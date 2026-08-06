@@ -1,0 +1,9 @@
+/target/
+/temp/
+
+.agents/
+.claude/
+.limcode/
+
+CLAUDE.md
+skills-lock.json
