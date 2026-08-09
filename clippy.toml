@@ -1,0 +1,14 @@
+# Brand and protocol names that are not code identifiers.
+doc-valid-idents = [
+    "OpenAI",
+    "DeepSeek",
+    "OpenRouter",
+    "WebSocket",
+    "GMT",
+    "MCP",
+    "..",
+]
+# `Error` deliberately carries the provider error body, headers and
+# retry-after inline (design § 14); error paths follow an HTTP round trip,
+# so the copy cost is irrelevant.
+large-error-threshold = 512

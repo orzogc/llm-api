@@ -3,10 +3,25 @@ name = "llm-api"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+description = "Unified intermediate representation and bidirectional conversion for LLM chat APIs, with a pluggable HTTP transport"
+
+[features]
+default = ["reqwest"]
+reqwest = ["dep:reqwest"]
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+http = "1"
+bytes = "1"
+futures-core = "0.3"
+time = { version = "0.3", default-features = false, features = ["std", "parsing"] }
+reqwest = { version = "0.12", optional = true, features = ["stream"] }
 
 [dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+futures-util = "0.3"
+wiremock = "0.6"
 
 [lints.rust]
 missing_docs = "warn"
