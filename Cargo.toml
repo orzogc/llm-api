@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.88"
 license = "MIT"
 description = "Unified intermediate representation and bidirectional conversion for LLM chat APIs, with a pluggable HTTP transport"
+readme = "README.md"
 
 [features]
 default = ["reqwest"]
