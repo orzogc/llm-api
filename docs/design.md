@@ -1278,8 +1278,11 @@ pub enum ApiErrorKind { InvalidRequest, Auth, PermissionDenied, NotFound,
   (missing protocol terminator ⇒ `finish()` error).
 - HTTP layer tested with `wiremock`.
 - Live tests: `#[ignore]` + env-gated API keys (`OPENAI_API_KEY`,
-  `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `DEEPSEEK_API_KEY` — DeepSeek
-  exercises the CC dialect path). Never run in CI by default.
+  `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `DEEPSEEK_API_KEY`), also read
+  from a gitignored crate-root `.env` (process environment wins). DeepSeek
+  exercises the dialect paths of three formats — Chat Completions,
+  Anthropic Messages (`/anthropic` base) and Responses — each in thinking
+  and non-thinking mode. Never run in CI by default.
 
 ## 16. Open items for future versions
 
