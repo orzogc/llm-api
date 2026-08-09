@@ -1,0 +1,96 @@
+{
+  "model": "gpt-4.1",
+  "messages": [
+    { "role": "system", "content": "House rules." },
+    { "role": "developer", "content": "Prefer JSON." },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "What is in this image?",
+          "prompt_cache_breakpoint": { "mode": "explicit" }
+        },
+        {
+          "type": "image_url",
+          "image_url": { "url": "https://example.com/cat.png", "detail": "low" }
+        },
+        {
+          "type": "image_url",
+          "image_url": { "url": "data:image/png;base64,QUJD" }
+        },
+        { "type": "input_audio", "input_audio": { "data": "QUJD", "format": "wav" } }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "A cat. Let me check the weather too.",
+      "reasoning_content": "The image shows a cat.",
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": { "name": "get_weather", "arguments": "{\"city\":\"Paris\"}" }
+        },
+        {
+          "id": "call_2",
+          "type": "custom",
+          "custom": { "name": "run_sql", "input": "SELECT 1" }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_1",
+      "name": "get_weather",
+      "content": "Sunny, 21C."
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_2",
+      "content": [
+        { "type": "text", "text": "one row" },
+        { "type": "text", "text": "done" }
+      ]
+    },
+    { "role": "function", "name": "legacy_lookup", "content": "old style result" },
+    { "role": "user", "content": "Thanks!" }
+  ],
+  "max_completion_tokens": 512,
+  "temperature": 0.7,
+  "top_p": 0.9,
+  "stop": ["END"],
+  "seed": 42,
+  "frequency_penalty": 0.1,
+  "presence_penalty": 0.2,
+  "metadata": { "trace": "t1" },
+  "prompt_cache_key": "cache-1",
+  "reasoning_effort": "medium",
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "answer",
+      "schema": { "type": "object", "properties": { "text": { "type": "string" } } },
+      "strict": true
+    }
+  },
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Look up the weather.",
+        "parameters": { "type": "object", "properties": { "city": { "type": "string" } } },
+        "strict": true
+      }
+    },
+    { "type": "function", "function": { "name": "noop" } },
+    { "type": "custom", "custom": { "name": "run_sql", "format": { "type": "text" } } }
+  ],
+  "tool_choice": "auto",
+  "parallel_tool_calls": true,
+  "n": 1,
+  "logit_bias": { "50256": -100 },
+  "service_tier": "auto",
+  "safety_identifier": "user-hash-1"
+}

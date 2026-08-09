@@ -1,0 +1,4 @@
+data: {"id":"chatcmpl-s5","object":"chat.completion.chunk","created":1700000300,"model":"gpt-4.1","choices":[{"index":0,"delta":{"role":"assistant","content":"Once upon"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-s5","object":"chat.completion.chunk","created":1700000300,"model":"gpt-4.1","choices":[{"index":0,"delta":{"content":" a time"},"finish_reason":null}]}
+

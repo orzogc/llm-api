@@ -1,0 +1,35 @@
+{
+  "id": "chatcmpl-r2",
+  "object": "chat.completion",
+  "created": 1741570000,
+  "model": "gpt-4.1",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "tool_calls": [
+          {
+            "id": "call_abc123",
+            "type": "function",
+            "function": { "name": "get_current_weather", "arguments": "{\"location\": \"Boston, MA\"}" }
+          },
+          {
+            "id": "call_def456",
+            "type": "custom",
+            "custom": { "name": "run_sql", "input": "SELECT 1" }
+          }
+        ]
+      },
+      "logprobs": null,
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 82,
+    "completion_tokens": 17,
+    "total_tokens": 99
+  }
+}

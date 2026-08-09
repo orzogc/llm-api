@@ -1,0 +1,27 @@
+{
+  "id": "chatcmpl-r3",
+  "object": "chat.completion",
+  "created": 1741570100,
+  "model": "deepseek-reasoner",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "9.11 is smaller than 9.8.",
+        "reasoning_content": "Compare 9.11 and 9.8 digit by digit. 9.8 is 9.80, and 0.80 > 0.11."
+      },
+      "logprobs": null,
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 20,
+    "completion_tokens": 60,
+    "total_tokens": 80,
+    "prompt_tokens_details": { "cached_tokens": 0 },
+    "completion_tokens_details": { "reasoning_tokens": 45 },
+    "prompt_cache_hit_tokens": 0,
+    "prompt_cache_miss_tokens": 20
+  }
+}
