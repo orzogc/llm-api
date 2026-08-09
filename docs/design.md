@@ -1280,11 +1280,24 @@ pub enum ApiErrorKind { InvalidRequest, Auth, PermissionDenied, NotFound,
   (missing protocol terminator ⇒ `finish()` error).
 - HTTP layer tested with `wiremock`.
 - Live tests: `#[ignore]` + env-gated API keys (`OPENAI_API_KEY`,
-  `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `DEEPSEEK_API_KEY`), also read
-  from a gitignored crate-root `.env` (process environment wins). DeepSeek
-  exercises the dialect paths of three formats — Chat Completions,
-  Anthropic Messages (`/anthropic` base) and Responses — each in thinking
-  and non-thinking mode. Never run in CI by default.
+  `GOOGLE_API_KEY`, `DEEPSEEK_API_KEY`; Anthropic reads
+  `LLM_API_ANTHROPIC_API_KEY` first and `ANTHROPIC_API_KEY` from `.env`
+  only — development environments like Claude Code occupy that name in the
+  process environment), also read from a gitignored crate-root `.env`
+  (process environment wins otherwise). Coverage per format: a multi-turn
+  conversation matrix (`streaming × thinking`) that checks context
+  reception against the model's own first-turn answer, multi-round
+  tool-call loops with verbatim history replay, JSON-Schema structured
+  output (both call modes), image input (except text-only DeepSeek), model
+  listing and token counting. DeepSeek exercises the dialect paths of three
+  formats — Chat Completions, Anthropic Messages (`/anthropic` base) and
+  Responses. Platform notes learned live: adaptive reasoning
+  (Anthropic, OpenAI's adaptive models) is model-discretionary — those
+  thinking assertions are cumulative or advisory; OpenAI rejects function
+  tools on CC unless `reasoning_effort` is `"none"` for such models, so
+  the CC thinking×tools cell runs against DeepSeek (whose docs require the
+  `reasoning_content` passback the replay performs). Never run in CI by
+  default.
 
 ## 16. Open items for future versions
 
