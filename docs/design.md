@@ -230,7 +230,7 @@ it. Source mapping:
 
 | `ImageSource` | OpenAI CC | Responses | Anthropic | Google |
 |---|---|---|---|---|
-| `Url` | `image_url.url` | `input_image.image_url` | `source:{type:"url", url}` | `fileData.fileUri` (verbatim + cosmetic warning: documented URIs are Files API ones; arbitrary URLs may be rejected upstream) |
+| `Url` | `image_url.url` | `input_image.image_url` | `source:{type:"url", url}` | `fileData.fileUri` (verbatim + cosmetic warning: documented URIs are Files API ones; arbitrary URLs may be rejected upstream. The parse direction maps `fileData.fileUri` to `FileId`, its canonical IR home, so Google→Google round-trips are warning-free) |
 | `Base64` | `image_url.url` as `data:` URL | `input_image.image_url` as `data:` URL | `source:{type:"base64", media_type, data}` | `inlineData:{mimeType, data}` |
 | `FileId` | semantic warning (no **image** channel; CC's `file` content part is a document-input channel, reserved for a future Document block) | `input_image.file_id` | `source:{type:"file", file_id}` | `fileData.fileUri` |
 
@@ -443,6 +443,10 @@ effort↔budget or effort-tier translation. `Effort::Other(s)` passes `s`
 through verbatim. If `enabled` and `effort` conflict (e.g. `enabled: true`
 with `effort: None`), `effort` wins and a cosmetic warning is attached. Other
 display options (`summary: "concise"/"detailed"` etc.) go through `extra`.
+On Anthropic, `include_thoughts` alone (no `enabled: true`, no mappable
+effort) does not synthesize a `thinking` object — silently enabling thinking
+would be a side effect — and warns instead; `thinking.display` is attached
+only when thinking has a basis.
 
 ### 4.8 Caching
 
@@ -480,7 +484,7 @@ pub enum OutputFormat {
 | Target | `JsonSchema` | `JsonObject` |
 |---|---|---|
 | OpenAI CC | `response_format: {type:"json_schema", json_schema:{name, schema, strict}}` (`name` required upstream; `"response"` synthesized when unset) | `response_format: {type:"json_object"}` |
-| Responses | `text.format: {type:"json_schema", name, schema, strict}` | `text.format: {type:"json_object"}` |
+| Responses | `text.format: {type:"json_schema", name, schema, strict}` (`name` required upstream here too; same `"response"` synthesis) | `text.format: {type:"json_object"}` |
 | Anthropic | `output_config.format: {type:"json_schema", schema}` (`name`/`strict` warn — cosmetic: Anthropic's json_schema output is natively enforced, the strict toggle has nothing to lose) | warn (no schema-less mode) |
 | Google | `generationConfig.responseMimeType:"application/json"` + `responseJsonSchema: schema` (standard JSON Schema passthrough; the OpenAPI-style `responseSchema` is not used) | `responseMimeType:"application/json"` |
 
@@ -616,9 +620,11 @@ message's `extra` in the IR or by the indexed `on_message` hook.
   carry them). Mid-conversation system messages stay as in-array `role=system`
   (supported by current Anthropic); `AnthropicOptions.downgrade_mid_system:
   bool` (default `false`) converts them to `user` + warning for dialect
-  providers without in-array system support. Original placement is recorded in
-  `round_trip` metadata; the parser maps a top-level `system` back to
-  `Request.system`.
+  providers without in-array system support. The parser maps a top-level
+  `system` back to `Request.system`, and tags in-array `system` messages with
+  a `round_trip` marker so re-serialization keeps their placement (including
+  leading ones — the combine rule applies to marker-less IR); a missing or
+  invalid marker degrades to canonical hoisting.
 - **Google**: `Request.system` plus leading in-array system messages →
   `systemInstruction` (same ordering); mid-conversation system → `user` +
   warning.
@@ -1189,7 +1195,13 @@ warnings — under strict that is a `ConversionError`, and a per-call
   OpenAI Responses `POST /v1/responses/input_tokens`, Anthropic
   `POST /v1/messages/count_tokens`, Google `:countTokens`. OpenAI CC has no
   endpoint → `Error::NotSupported`. The library never estimates tokens
-  locally. `TokenCount.warnings` carries the chat-build warnings plus the
+  locally. Because the prospective **chat** body is built first (§ 12),
+  chat-level structural requirements apply to counting too — e.g. Anthropic
+  counting fails without `max_output_tokens`/`default_max_tokens` even
+  though the count endpoint itself has no `max_tokens` field. Google's count
+  endpoint accepts the entire `GenerateContentRequest` (nested under
+  `generateContentRequest` with its own `model`), so its adapter drops
+  nothing and the count is exact. `TokenCount.warnings` carries the chat-build warnings plus the
   count adapter's own: fields the converter itself generated that the
   endpoint ignores by design (sampling knobs) are filtered silently; fields
   the adapter drops that it did not generate (injected via `extra`, hooks or
