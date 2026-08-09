@@ -21,13 +21,16 @@ and pick the upstream API format at call time.
 - Format-to-format conversion (e.g. an OpenAI request converted to an Anthropic
   request) is a design constraint (the IR must not preclude it) but is **not
   implemented in v1**, neither streaming nor non-streaming.
-- Same-provider round-trips are **canonicalizing and semantically lossless**:
-  the first `format -> IR -> format` pass may normalize equivalent encodings
-  (string shorthands vs single-element arrays, explicit `null` vs absent
-  optional fields), after which the mapping is idempotent — re-parsing and
-  re-serializing the canonical form reproduces it exactly. Modeled fields,
-  unknown fields, unmodeled union members (`Opaque`, § 4.3) and message order
-  are preserved. Nothing is silently dropped.
+- Same-provider round-trips are **canonicalizing, with explicitly documented
+  representational losses**: the first `format -> IR -> format` pass may
+  normalize equivalent encodings (string shorthands vs single-element arrays,
+  explicit `null` vs absent optional fields), after which the mapping is
+  idempotent — re-parsing and re-serializing the canonical form reproduces it
+  exactly. Preserved verbatim: modeled fields, **non-null** unknown fields,
+  unmodeled union members (`Opaque`, § 4.3) and message order. The one
+  documented representational loss: null-valued unknown fields canonicalize
+  to absent — for an unknown field the library cannot know whether `null`
+  carries distinct semantics. Nothing else is silently dropped.
 
 ### Non-goals
 
@@ -295,12 +298,17 @@ pub enum ToolChoice { Auto, None, Required, Tool { name: String } }
   passthrough), not the OpenAPI-style `parameters`.
 - `FunctionTool.parameters: None` means "no parameters". CC: field omitted
   (officially "defines a function with an empty parameter list"); Google:
-  `parametersJsonSchema` omitted; Responses: `parameters: null` and
-  `strict: null` — both are required-but-nullable there, so omission would
-  violate the schema; Anthropic: `input_schema` is required, so
+  `parametersJsonSchema` omitted; Responses: `parameters: null` — the field
+  is required-but-nullable there, so omission would violate the schema;
+  Anthropic: `input_schema` is required, so
   `{"type":"object","properties":{},"additionalProperties":false}` is emitted
   with a cosmetic warning — the faithful encoding of an empty parameter list
   (a bare `{"type":"object"}` would instead permit arbitrary arguments).
+- `FunctionTool.strict` maps independently and is never rewritten by the
+  `parameters` rules: CC/Responses/Anthropic send the user's value verbatim
+  (Responses emits `strict: null` only when `strict` is also unset); Google
+  has no per-tool strict — cosmetic warning. Whether `strict: true` next to
+  an empty schema is meaningful is the upstream's call.
 - `FunctionTool.cache` maps to Anthropic tool-level `cache_control`; other
   targets drop it with a cosmetic warning.
 
@@ -452,7 +460,7 @@ pub struct Extra(BTreeMap<String, Map<String, Value>>); // format id -> fields
   namespace, which keeps foreign dialect fields from leaking into other
   formats' JSON. Non-null unknown fields round-trip verbatim; a null-valued
   unknown field canonicalizes to absent on re-serialization (null means
-  delete in the merge) — part of the § 1 canonicalization, not data loss.
+  delete in the merge) — the documented representational loss of § 1.
 - Round-trip markers (original placement of hoisted system content,
   tool-message grouping, developer-role origin, …) do **not** live in `extra`;
   they ride the dedicated `round_trip: Option<RoundTripMeta>` field on
@@ -572,10 +580,20 @@ blocks.
   message; → Google: `functionResponse` parts of a `user` content. Adjacent
   IR `Tool`/`User` messages merge into that single user turn as required;
   grouping is recorded in `round_trip` metadata and restored when parsing back.
-- Text-only IR tool results map to Google's object-valued `response` as
-  `{"output": "<text>"}`, unwrapped on parse; multiple `Text` blocks join in
-  order with `\n\n` (empty blocks participate verbatim, no warning — the
-  boundary loss is § 1 canonicalization). When `ToolResult.name` is
+- Multiple `Text` blocks in a tool result keep their boundaries on CC,
+  Responses and Anthropic (text-part/block arrays; a single block uses the
+  string shorthand — both forms parse back, § 1 canonicalization). Only
+  Google must flatten: text maps into the object-valued `response` as
+  `{"output": "<text>"}` (unwrapped on parse), multiple blocks joining in
+  order with `\n\n` **plus a cosmetic warning** — user-constructed
+  multi-block results are a structural downgrade on Google, while anything
+  parsed from Google is single-block and joins warning-free.
+- An empty `ToolResult.content` has a defined encoding per target — CC
+  `content: ""`, Responses `output: ""`, Anthropic `content` omitted, Google
+  `response: {}` — each parsing back to the empty list (Google distinguishes
+  `{}` ↔ empty from `{"output": ""}` ↔ one empty `Text` block), keeping
+  round-trips idempotent: canonical encoding of emptiness, not fabrication.
+- When `ToolResult.name` is
   unset, the Google converter resolves it from the `ToolCall` with the same id
   earlier in the request; if none resolves, that is a `ConversionError` —
   an invented name would only produce an invalid call. Assistant `ToolCall` blocks map
@@ -790,9 +808,10 @@ pub enum BlockDelta {
   Anthropic's `message_start` input counts are cached and merged into every
   `message_delta` usage); the accumulator simply keeps the latest snapshot.
   Provided because agents typically render deltas while also keeping the full
-  message for history. A stream that errors before its terminal event
-  surfaces the error through the stream; accumulation then fails — the events
-  already delivered remain the partial record.
+  message for history. A stream that errors before its terminal event — including a silent EOF
+  that `StreamParser::finish` diagnoses as truncation — surfaces the error
+  through the stream; accumulation then fails, and the events already
+  delivered remain the partial record.
 - `include_raw: bool` (default `false`, in `CallOptions`) populates
   `StreamItem.raw` for every event; for `Unknown` it is populated regardless.
   Known-but-unmodeled deltas that belong to a block (Anthropic
@@ -807,8 +826,9 @@ pub enum BlockDelta {
   `Response.raw` is `None` for streamed responses.
 - Stream parse warnings ride `StreamItem.warnings`: the client attaches a
   parse call's warnings to the first item that call emits (held for the next
-  item when a call emits none); the accumulator folds every item's warnings
-  into `Response.warnings`.
+  item when a call emits none; `StreamParser::finish` flushes any still-held
+  warnings at end of stream, § 11); the accumulator folds every item's
+  warnings into `Response.warnings`.
 - SSE parsing lives in the library, on top of the transport's byte stream.
   Google streaming always uses `?alt=sse` (the JSON-array mode is not
   implemented). For CC, `stream_options: {include_usage: true}` is injected by
@@ -904,6 +924,14 @@ pub trait StreamParser: Send {
     /// (skipped extra candidates, lossy inference, …).
     fn parse(&mut self, event: &SseEvent)
         -> Result<(Vec<StreamEvent>, Vec<ConversionWarning>)>;
+    /// Called exactly once when the byte stream ends: flushes held warnings
+    /// and safely finalizable blocks, then validates terminal state. A
+    /// stream that never showed its protocol terminator ([DONE],
+    /// message_stop, a terminal Responses event, a finishReason chunk)
+    /// returns `Error::Parse` ("truncated stream") — a silent EOF must not
+    /// pass a half response off as complete.
+    fn finish(&mut self)
+        -> Result<(Vec<StreamEvent>, Vec<ConversionWarning>)>;
 }
 ```
 
@@ -975,8 +1003,13 @@ pub enum Override<T> { Inherit, Set(T), Disable }
   content-type, betas) < provider `extra_headers` < endpoint `Set` (same-name
   override, other names add) < per-call < auth injection (applied last, not
   overridable by any header layer). Endpoint `Disable` drops the provider
-  `extra_headers` layer for that endpoint; format defaults survive — removing
-  those would break the protocol, deliberate surgery goes through hooks.
+  `extra_headers` layer for that endpoint; format defaults are **not
+  removable through the generic client** — removing them breaks the protocol,
+  and the legitimate cases have dedicated knobs (e.g.
+  `AnthropicOptions.version: None`). Full header control means a custom
+  `ApiFormat`, or the typed layer with your own transport; an
+  `http::Request`-level hook can be added non-breakingly later if a real
+  case appears.
 - Convenience constructors cover the common case (one format, one base URL, one
   key).
 - `ConvertOptions { strict, downgrade_developer, orphan_tool_calls,
@@ -1008,7 +1041,11 @@ Client surface (sketch): `Client::new(http)`, then
 `Response.warnings`), `client.stream(...) -> Result<StreamHandle>` where
 `StreamHandle: Stream<Item = Result<StreamItem>>` and also exposes the
 request-build warnings, `client.list_models(&provider)`,
-`client.count_tokens(&provider, &request)`.
+`client.count_tokens(&provider, &request, opts)`. Token counting accepts the
+same `CallOptions` — `model`, `hooks`, `extra_headers`, `extra_query` apply
+(`include_raw` is ignored), so a per-call model override or a hook-injected
+field is counted exactly as it will be sent; hooks run against the count
+endpoint's final JSON.
 
 ## 13. Model listing and token counting
 
@@ -1025,7 +1062,8 @@ request-build warnings, `client.list_models(&provider)`,
   `after_id`/`has_more`; Google `pageToken` with `pageSize` up to 1000; OpenAI
   is a single page). Fine-grained pagination control = use the typed format
   layer directly.
-- `count_tokens(&Request) -> TokenCount { input_tokens, raw }` — endpoints:
+- `count_tokens(&Request) -> TokenCount { input_tokens, raw }` (accepts
+  `CallOptions`, § 12) — endpoints:
   OpenAI Responses `POST /v1/responses/input_tokens`, Anthropic
   `POST /v1/messages/count_tokens`, Google `:countTokens`. OpenAI CC has no
   endpoint → `Error::NotSupported`. The library never estimates tokens locally.
@@ -1069,14 +1107,16 @@ pub enum ApiErrorKind { InvalidRequest, Auth, PermissionDenied, NotFound,
   fixed point of parse→serialize — plus preservation of `extra`, `Opaque`
   nodes and `round_trip` metadata.
 - Dedicated tests: the § 4.7 extra-override examples (budget re-enable on
-  Anthropic/Google must fully rewrite the generated thinking fields) and the
-  § 7.5 signed-block merge barrier (merged vs skipped paths).
+  Anthropic/Google must fully rewrite the generated thinking fields), the
+  § 7.5 signed-block merge barrier (merged vs skipped paths), and the § 7.2
+  empty/multi-text tool-result encodings (round-trip idempotence per target).
 - Fixtures under `tests/fixtures/<format_id>/` — real request/response JSON
   and complete SSE streams taken from `docs/official_api` and recorded
   sessions. Stream block-boundary inference (CC, Google) gets the densest
   coverage, including interleaved thinking/text, tool-argument fragments,
-  citation/annotation streams, blocked-prompt responses and multi-candidate
-  warning paths.
+  citation/annotation streams, blocked-prompt responses, multi-candidate
+  warning paths, and truncated streams (missing protocol terminator ⇒
+  `finish()` error).
 - HTTP layer tested with `wiremock`.
 - Live tests: `#[ignore]` + env-gated API keys (`OPENAI_API_KEY`,
   `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `DEEPSEEK_API_KEY` — DeepSeek
