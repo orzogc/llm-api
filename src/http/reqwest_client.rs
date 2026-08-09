@@ -1,7 +1,10 @@
 //! Feature-gated default transport: `impl HttpClient for reqwest::Client`.
 //!
 //! The library does not wrap reqwest configuration — build your own client
-//! (proxy, timeouts, TLS) and pass it in.
+//! (proxy, timeouts, TLS) and pass it in. Note that reqwest 0.13's default
+//! TLS backend is rustls with the platform certificate verifier (and its
+//! defaults include system-proxy support); opt into `native-tls` on your
+//! own reqwest dependency if you need the old backend.
 
 use std::future::Future;
 use std::pin::Pin;

@@ -17,7 +17,7 @@ http = "1"
 bytes = "1"
 futures-core = "0.3"
 time = { version = "0.3", default-features = false, features = ["std", "parsing"] }
-reqwest = { version = "0.12", optional = true, features = ["stream"] }
+reqwest = { version = "0.13", optional = true, features = ["stream"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
