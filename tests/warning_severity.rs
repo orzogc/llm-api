@@ -30,6 +30,7 @@ fn severity_table_is_pinned() {
         (ThinkingOrphaned, Semantic),
         (MissingThinkingWithToolCalls, Semantic),
         (MergeBlockedBySignature, Semantic),
+        (ExtraDropped, Semantic),
         (CountTokensFieldDropped, Semantic),
         (CountTokensApproximate, Semantic),
         // Build side, cosmetic: tuning lost, or an opt-in policy executed

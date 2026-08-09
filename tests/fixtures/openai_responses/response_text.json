@@ -1,0 +1,54 @@
+{
+  "id": "resp_1",
+  "object": "response",
+  "created_at": 1741476542,
+  "status": "completed",
+  "completed_at": 1741476543,
+  "error": null,
+  "incomplete_details": null,
+  "instructions": null,
+  "max_output_tokens": null,
+  "model": "gpt-5.1",
+  "output": [
+    {
+      "type": "message",
+      "id": "msg_1",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Hello from Paris.",
+          "annotations": [
+            {
+              "type": "url_citation",
+              "url": "https://example.com",
+              "title": "Example",
+              "start_index": 0,
+              "end_index": 5
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "parallel_tool_calls": true,
+  "previous_response_id": null,
+  "reasoning": { "effort": null, "summary": null },
+  "store": true,
+  "temperature": 1.0,
+  "text": { "format": { "type": "text" } },
+  "tool_choice": "auto",
+  "tools": [],
+  "top_p": 1.0,
+  "truncation": "disabled",
+  "usage": {
+    "input_tokens": 36,
+    "input_tokens_details": { "cached_tokens": 12, "cache_write_tokens": 3 },
+    "output_tokens": 87,
+    "output_tokens_details": { "reasoning_tokens": 5 },
+    "total_tokens": 123
+  },
+  "user": null,
+  "metadata": {}
+}

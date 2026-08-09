@@ -89,6 +89,11 @@ pub enum WarningCode {
     /// `merge_consecutive_roles` skipped a merge because a signed block
     /// makes the pair a merge barrier (§ 7.5).
     MergeBlockedBySignature,
+    /// A node's `extra` namespace **for the target format** had no landing
+    /// spot in the output (e.g. block extras on `Request.system` when the
+    /// target's system channel is a plain string) — user-addressed data was
+    /// lost.
+    ExtraDropped,
     /// Token counting: the count adapter dropped a field it did not
     /// generate (injected via `extra`, hooks or a dialect) — the result is
     /// no longer exact (§ 13).
@@ -174,6 +179,7 @@ impl WarningCode {
             | ThinkingOrphaned
             | MissingThinkingWithToolCalls
             | MergeBlockedBySignature
+            | ExtraDropped
             | CountTokensFieldDropped
             | CountTokensApproximate
             | MultipleCandidates => WarningSeverity::Semantic,

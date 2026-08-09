@@ -1,0 +1,26 @@
+{
+  "id": "resp_3",
+  "object": "response",
+  "created_at": 1741476700,
+  "status": "completed",
+  "error": null,
+  "incomplete_details": null,
+  "model": "gpt-5.1",
+  "output": [
+    {
+      "type": "message",
+      "id": "msg_3",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        { "type": "refusal", "refusal": "I cannot help with that." }
+      ]
+    }
+  ],
+  "usage": {
+    "input_tokens": 12,
+    "output_tokens": 8,
+    "output_tokens_details": { "reasoning_tokens": 0 },
+    "total_tokens": 20
+  }
+}

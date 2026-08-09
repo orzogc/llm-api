@@ -1,0 +1,18 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "gpt-5.1",
+      "object": "model",
+      "created": 1686935002,
+      "owned_by": "openai"
+    },
+    {
+      "id": "o3",
+      "object": "model",
+      "created": 1700000000,
+      "owned_by": "openai"
+    },
+    { "object": "model", "created": 1700000001, "owned_by": "broken" }
+  ]
+}

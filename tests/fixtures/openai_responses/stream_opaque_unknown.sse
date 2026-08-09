@@ -1,0 +1,36 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_s7","object":"response","created_at":1741291500,"status":"in_progress","model":"gpt-5.1","output":[],"usage":null},"sequence_number":0}
+
+event: response.somefuture.event
+data: {"type":"response.somefuture.event","sequence_number":1}
+
+event: response.somefuture.event
+data: {"type":"response.somefuture.event","sequence_number":2}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"ws_s7","type":"web_search_call","status":"in_progress","action":{"type":"search","query":"cats"}},"sequence_number":3}
+
+event: response.web_search_call.searching
+data: {"type":"response.web_search_call.searching","item_id":"ws_s7","output_index":0,"sequence_number":4}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"ws_s7","type":"web_search_call","status":"completed","action":{"type":"search","query":"cats"}},"sequence_number":5}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_s7","type":"message","status":"in_progress","role":"assistant","content":[]},"sequence_number":6}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","item_id":"msg_s7","output_index":1,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]},"sequence_number":7}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","item_id":"msg_s7","output_index":1,"content_index":0,"delta":"Cats are cats.","sequence_number":8}
+
+event: response.content_part.done
+data: {"type":"response.content_part.done","item_id":"msg_s7","output_index":1,"content_index":0,"part":{"type":"output_text","text":"Cats are cats.","annotations":[]},"sequence_number":9}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_s7","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Cats are cats.","annotations":[]}]},"sequence_number":10}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_s7","object":"response","created_at":1741291500,"status":"completed","model":"gpt-5.1","output":[{"id":"ws_s7","type":"web_search_call","status":"completed","action":{"type":"search","query":"cats"}},{"id":"msg_s7","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Cats are cats.","annotations":[]}]}],"usage":{"input_tokens":8,"output_tokens":5,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":13}},"sequence_number":11}
+

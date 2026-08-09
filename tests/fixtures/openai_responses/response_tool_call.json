@@ -1,0 +1,39 @@
+{
+  "id": "resp_2",
+  "object": "response",
+  "created_at": 1741476600,
+  "status": "completed",
+  "error": null,
+  "incomplete_details": null,
+  "model": "gpt-5.1",
+  "output": [
+    {
+      "type": "reasoning",
+      "id": "rs_2",
+      "summary": [
+        { "type": "summary_text", "text": "Need the weather." },
+        { "type": "summary_text", "text": "Calling the tool." }
+      ],
+      "encrypted_content": "enc_2",
+      "status": "completed"
+    },
+    {
+      "type": "function_call",
+      "id": "fc_9",
+      "call_id": "call_9",
+      "name": "get_weather",
+      "arguments": "{\"city\":\"Paris\"}",
+      "status": "completed"
+    }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": [],
+  "usage": {
+    "input_tokens": 40,
+    "input_tokens_details": { "cached_tokens": 0 },
+    "output_tokens": 20,
+    "output_tokens_details": { "reasoning_tokens": 12 },
+    "total_tokens": 60
+  }
+}

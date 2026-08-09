@@ -1,0 +1,12 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_s6","object":"response","created_at":1741291400,"status":"in_progress","model":"gpt-5.1","output":[],"usage":null},"sequence_number":0}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_s6","type":"message","status":"in_progress","role":"assistant","content":[]},"sequence_number":1}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","item_id":"msg_s6","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]},"sequence_number":2}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","item_id":"msg_s6","output_index":0,"content_index":0,"delta":"Half a","sequence_number":3}
+

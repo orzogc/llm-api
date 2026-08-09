@@ -1,0 +1,11 @@
+{
+  "id": "resp_6",
+  "object": "response",
+  "created_at": 1741477000,
+  "status": "failed",
+  "error": { "code": "server_error", "message": "The model had a bad day." },
+  "incomplete_details": null,
+  "model": "gpt-5.1",
+  "output": [],
+  "usage": null
+}

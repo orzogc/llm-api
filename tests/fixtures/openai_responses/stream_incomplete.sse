@@ -1,0 +1,15 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_s4","object":"response","created_at":1741291200,"status":"in_progress","model":"gpt-5.1","output":[],"usage":null},"sequence_number":0}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_s4","type":"message","status":"in_progress","role":"assistant","content":[]},"sequence_number":1}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","item_id":"msg_s4","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]},"sequence_number":2}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","item_id":"msg_s4","output_index":0,"content_index":0,"delta":"Once upon a","sequence_number":3}
+
+event: response.incomplete
+data: {"type":"response.incomplete","response":{"id":"resp_s4","object":"response","created_at":1741291200,"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"model":"gpt-5.1","output":[{"id":"msg_s4","type":"message","status":"incomplete","role":"assistant","content":[{"type":"output_text","text":"Once upon a","annotations":[]}]}],"usage":{"input_tokens":9,"output_tokens":4,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":13}},"sequence_number":4}
+

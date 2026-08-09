@@ -1,0 +1,16 @@
+{
+  "id": "resp_5",
+  "object": "response",
+  "created_at": 1741476900,
+  "status": "incomplete",
+  "error": null,
+  "incomplete_details": { "reason": "content_filter" },
+  "model": "gpt-5.1",
+  "output": [],
+  "usage": {
+    "input_tokens": 9,
+    "output_tokens": 0,
+    "output_tokens_details": { "reasoning_tokens": 0 },
+    "total_tokens": 9
+  }
+}

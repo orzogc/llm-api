@@ -494,6 +494,17 @@ impl ToolOutputBlock {
         Self::Opaque { format: format.into(), value }
     }
 
+    /// Sets the cache hint. Ignored on `Opaque`, which has no cache
+    /// channel.
+    #[must_use]
+    pub fn with_cache(mut self, hint: CacheHint) -> Self {
+        match &mut self {
+            Self::Text { cache, .. } | Self::Image { cache, .. } => *cache = Some(hint),
+            Self::Opaque { .. } => {}
+        }
+        self
+    }
+
     /// Human-readable kind name, used in errors.
     #[must_use]
     pub fn kind_name(&self) -> &'static str {
