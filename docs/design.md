@@ -556,7 +556,10 @@ on `ProviderConfig` and overridden per call. `on_message`'s index and role
 refer to the **serialized target-format** message sequence (after the splits,
 merges and downgrades of § 7); top-level system channels (Anthropic `system`,
 Responses `instructions`, Google `systemInstruction`) are not visited — use
-`on_request` for those. Message-level targeting ("modify the third message",
+`on_request` for those. The (index, role) pairs are a snapshot taken at
+serialization time: a message whose pointer the request-level `extra` merge
+rewrote is skipped, and messages `extra` injected are not visited —
+rewriting the message array wholesale is `on_request` territory. Message-level targeting ("modify the third message",
 "set a breakpoint on the last user message") is served either by editing that
 message's `extra` in the IR or by the indexed `on_message` hook.
 
@@ -628,16 +631,24 @@ message's `extra` in the IR or by the indexed `on_message` hook.
   one text segment with no cache hint and no extra → string form; otherwise →
   text-block array (cache hints become `cache_control`; the string form cannot
   carry them). Mid-conversation system messages stay as in-array `role=system`
-  (supported by current Anthropic); `AnthropicOptions.downgrade_mid_system:
+  (supported by current Anthropic, on a subset of models — upstream rejects
+  the rest with a 400); `AnthropicOptions.downgrade_mid_system:
   bool` (default `false`) converts them to `user` + warning for dialect
   providers without in-array system support. The parser maps a top-level
   `system` back to `Request.system`, and tags in-array `system` messages with
   a `round_trip` marker so re-serialization keeps their placement (including
   leading ones — the combine rule applies to marker-less IR); a missing or
-  invalid marker degrades to canonical hoisting.
+  invalid marker degrades to canonical hoisting. A top-level `system` array
+  containing non-text entries instead parses whole into a marker-less leading
+  `System` message (text → `Text`, unknown entries → own-format `Opaque`) —
+  `Request.system` is Text-only, and the combine rule hoists the message back
+  on serialization, keeping the round trip idempotent.
 - **Google**: `Request.system` plus leading in-array system messages →
   `systemInstruction` (same ordering); mid-conversation system → `user` +
-  warning.
+  warning. Parse mirrors Anthropic: an all-text `systemInstruction` maps to
+  `Request.system`; one with non-text parts parses whole into a marker-less
+  leading `System` message (`Text` + own-format `Opaque`) that hoists back on
+  serialization.
 - **OpenAI CC**: `Request.system` is inserted at the front of `messages` as a
   `system` message; in-array system/developer messages pass through natively.
   The parser keeps leading system messages in-array (it never hoists them to
@@ -743,9 +754,18 @@ construction.
 Thinking signatures (Anthropic `signature`, Responses `encrypted_content`,
 Google `thoughtSignature`) are position-sensitive: providers validate them
 against the exact block/part they were issued for. The conversion rules above
-never reorder blocks within a message, and same-format round-trips are
-identity on block order, so plain replay is always safe. The opt-ins interact
-as follows:
+never reorder blocks within a message — except where the target wire format
+cannot express the order, surfaced as a **semantic** warning (Google tool
+results, § 7.2; CC assistant channels, `BlockOrderLost`: the wire message
+holds one field per channel, so an IR sequence interleaving
+thinking/content/tool-call blocks parses back in canonical channel order;
+joining several thinking texts into the single `reasoning_content` string
+additionally warns `ThinkingBlocksJoined`, cosmetic). Same-format round-trips
+are identity on block order for wire-parsed history (parsers only ever
+produce expressible orders), so plain replay is always safe; the CC caveat
+does not weaken signed replay — `reasoning_content` is a plaintext channel
+whose signatures are already dropped with their own warning. The opt-ins
+interact as follows:
 
 - `merge_consecutive_roles` treats any message containing a signed block
   (`Thinking.signature`, or a Google `thoughtSignature` riding a `ToolCall`'s
@@ -859,8 +879,10 @@ every format maps into it):
 #[non_exhaustive]
 pub struct StreamItem {
     pub event: StreamEvent,
-    pub raw: Option<String>, // original payload: always Some for Unknown,
-                             // Some for every event when include_raw is on
+    pub raw: Option<String>, // original payload: Some for every Unknown parsed
+                             // from a provider event (the end-of-stream synthetic
+                             // warning carrier has none), Some for every event
+                             // when include_raw is on
     pub warnings: Vec<ConversionWarning>, // parse-side warnings, usually empty
 }
 
@@ -912,7 +934,9 @@ pub enum BlockDelta {
   through the stream; accumulation then fails, and the events already
   delivered remain the partial record.
 - `include_raw: bool` (default `false`, in `CallOptions`) populates
-  `StreamItem.raw` for every event; for `Unknown` it is populated regardless.
+  `StreamItem.raw` for every event; for `Unknown` it is populated regardless
+  — except the synthetic end-of-stream carrier that only ferries leftover
+  warnings (no provider payload exists, so its `raw` is `None`).
   Known-but-unmodeled deltas that belong to a block (Anthropic
   `citations_delta` — part of the **current** protocol — Responses
   `output_text.annotation.added`, …) surface as `BlockDelta::Other` and are
@@ -932,7 +956,10 @@ pub enum BlockDelta {
   Google streaming always uses `?alt=sse` (the JSON-array mode is not
   implemented). For CC, `stream_options: {include_usage: true}` is injected by
   default (`OpenAiChatCompletionsOptions.inject_include_usage: bool`, default `true`;
-  disable for dialects that reject it). Anthropic usage in `message_delta` is
+  disable for dialects that reject it); the CC parse direction consumes
+  `stream`/`stream_options` as configuration, not IR data — `stream_options`
+  members other than `include_usage` cannot be rebuilt from configuration and
+  are dropped with a cosmetic `StreamOptionsDropped` warning. Anthropic usage in `message_delta` is
   cumulative; Google's final chunk carries the authoritative `usageMetadata`;
   Responses' terminal event carries the full response.
 - Stream-event format-to-format conversion is out of scope for v1.
@@ -1084,10 +1111,11 @@ pub enum Override<T> { Inherit, Set(T), Disable }
 
 - Capability decoupling supports real-world providers that, e.g., serve chat in
   Anthropic format but list models only in OpenAI format, or host capabilities
-  on different URLs. Unset `models`/`count_tokens` derive from `chat` only
-  when `chat.url` is `Base` — a `Full` chat URL cannot be reliably
-  decomposed; with a `Full` chat URL and no explicit config, those
-  capabilities return `Error::NotSupported` when called.
+  on different URLs. Unset `models`/`count_tokens` derive from `chat` — the
+  chat endpoint config is reused as-is (format, URL, auth and headers), with
+  only the capability path swapped in — and only when `chat.url` is `Base`; a
+  `Full` chat URL cannot be reliably decomposed, so with one and no explicit
+  config those capabilities return `Error::NotSupported` when called.
 - URL construction. `Base` joining: trim the base's trailing `/`, append `/`
   plus the capability path; the base's own query string is preserved. Path
   templates — CC chat `chat/completions`; Responses chat `responses`, count

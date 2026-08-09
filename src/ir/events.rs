@@ -16,8 +16,10 @@ use super::response::{Response, StopReason, Usage, normalize_stop_reason};
 pub struct StreamItem {
     /// The unified event.
     pub event: StreamEvent,
-    /// Original payload: always `Some` for `Unknown`, `Some` for every event
-    /// when the `include_raw` call option is on.
+    /// Original payload: `Some` for every `Unknown` parsed from a provider
+    /// event (the synthetic end-of-stream carrier that only ferries leftover
+    /// warnings has no payload, so its `raw` is `None`), and `Some` for every
+    /// event when the `include_raw` call option is on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<String>,
     /// Parse-side warnings, usually empty.

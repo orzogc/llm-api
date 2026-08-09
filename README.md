@@ -9,7 +9,7 @@ against the IR once and pick the upstream API format at call time.
 
 Built for the calling side of agent applications: conversation history —
 including thinking signatures, tool calls and provider-specific data —
-survives round-trips losslessly, and everything the IR does not model stays
+survives round-trips faithfully, and everything the IR does not model stays
 reachable.
 
 ## Why llm-api
@@ -28,11 +28,13 @@ reachable.
   stable codes, fixed severities (`Semantic` vs `Cosmetic`) and JSON-Pointer
   locations. Strict mode turns semantic losses into errors — unless your
   `extra` explicitly overrode the path in question.
-- **Lossless round-trips.** Same-provider `format → IR → format` passes are
+- **Faithful round-trips.** Same-provider `format → IR → format` passes are
   canonicalizing then idempotent; unmodeled provider nodes (documents,
   built-in tool calls, executable code, …) ride along as `Opaque` values in
-  their original positions. Persisting agent history as IR JSON is a
-  supported, semver-covered use case.
+  their original positions. The one documented representational loss:
+  explicitly-`null` unknown fields canonicalize to absent (`docs/design.md`
+  § 1). Persisting agent history as IR JSON is a supported, semver-covered
+  use case.
 
 ## Supported formats
 
@@ -153,8 +155,8 @@ request.extra.set(
 ```
 
 Each namespace only applies when serializing to that format, so provider-
-specific data never leaks across providers. Unknown fields parsed from a
-provider land in the same namespaces and round-trip verbatim.
+specific data never leaks across providers. Non-null unknown fields parsed
+from a provider land in the same namespaces and round-trip verbatim.
 
 **Hooks** — closures over the serialized JSON, run after conversion and the
 strict gate, before sending:

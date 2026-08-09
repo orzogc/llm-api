@@ -77,6 +77,15 @@ Each entry: `{ "role": "user" | "assistant" | "system", "content": string | Cont
 - Models operate on alternating `user`/`assistant` turns; consecutive same-role messages are
   combined into one turn. The `"system"` role is for mid-conversation system content (top-level
   `system` remains the primary system prompt).
+- Mid-conversation `system` messages are GA (no beta header) but **model-gated** (verified
+  2026-08 against the mid-conversation-system-messages feature page): supported on Claude
+  Opus 4.8, Opus 5, Fable 5 and Mythos 5; **not** supported on Sonnet 5 or older models, which
+  reject them with a 400 (`role 'system' is not supported on this model`). Placement is also
+  validated (not first; must follow a user turn — or an assistant turn ending in a server tool
+  result; must precede an assistant turn or end the array; never between `tool_use` and its
+  `tool_result`) — violations return a 400. Note: the official API reference's prose still
+  contains an outdated "there is no `system` role for input messages" sentence contradicting
+  its own schema; the schema and the feature page are authoritative.
 - String `content` is shorthand for `[{"type": "text", "text": ...}]`.
 - If the final message has role `assistant`, the response continues directly from its content
   (prefill; model-dependent availability).

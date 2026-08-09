@@ -64,7 +64,11 @@ Path templates and auth defaults:
 
 Streaming: CC/Responses/Anthropic set `"stream": true` in the body; CC
 additionally injects `stream_options: {"include_usage": true}` when
-`OpenAiChatCompletionsOptions.inject_include_usage` (default true).
+`OpenAiChatCompletionsOptions.inject_include_usage` (default true). CC
+parse consumes `model`/`stream`/`stream_options` (configuration, not IR
+data); `stream_options` members other than `include_usage` are dropped
+with a cosmetic `StreamOptionsDropped` warning (not mirrored into
+`extra` — a rebuilt unary body must not carry a bare `stream_options`).
 
 ## Thinking provenance (pins § 4.4)
 
@@ -134,7 +138,11 @@ Round-trip metadata flows **parse-attach → serialize-consume**.
 - CC parse keeps leading `system` messages in-array (no hoisting to
   `Request.system`); CC serialize inserts `Request.system` at the front
   as a `system` message. Anthropic/Google parse map the top-level
-  system channel to `Request.system`.
+  system channel to `Request.system` — unless it contains non-text
+  entries, in which case the whole channel parses into a marker-less
+  leading `System` message (`Text` + own-format `Opaque`; the § 7.1
+  combine rule hoists it back on serialization, `Request.system` stays
+  Text-only).
 
 ## Response parsing
 
@@ -183,7 +191,9 @@ merge and hooks), then adapt:
 
 `build_models_request` → GET; OpenAI-family: single page (`cursor`
 ignored, next cursor `None`); Anthropic: `after_id=<cursor>` +
-`has_more`/`last_id`; Google: `pageSize=1000` + `pageToken=<cursor>` /
+`has_more`/`last_id` (`has_more: true` with a missing/empty `last_id` is
+`Error::Parse` — malformed pagination must not silently truncate the
+list); Google: `pageSize=1000` + `pageToken=<cursor>` /
 `nextPageToken`, `models/` prefix stripped from ids. `created`: OpenAI
 Unix seconds via `models::system_time_from_unix_seconds`, Anthropic RFC
 3339 via `models::system_time_from_rfc3339`; parse failure → `None` +
@@ -194,6 +204,15 @@ Unix seconds via `models::system_time_from_unix_seconds`, Anthropic RFC
 - `Request.system` allows only `Text` blocks — anything else (incl.
   `Opaque`) is `ConversionError::InvalidBlockForRole` with role `System`.
   In-array messages follow the § 7.4 table exactly.
+- Unknown wire roles: CC, Anthropic and Responses keep the whole wire
+  message/item as a lone own-format `Opaque` (in a `User`-role IR message
+  for CC/Anthropic; in the assistant run for Responses) + `MalformedField`
+  warning; serialize re-emits it verbatim (a merge barrier on Anthropic).
+  Google's role union is closed (`user`/`model`, optional), so anything
+  else is treated as `user` per upstream semantics — an out-of-set value
+  still warns `MalformedField`.
+- Usage arithmetic saturates (`saturating_add`) — misbehaving provider
+  data must not overflow (§ 8's saturating precedent).
 - Empty `ToolResult.content` encodings: CC `content: ""`, Responses
   `output: ""`, Anthropic `content` omitted, Google `response: {}`;
   each parses back to the empty list; Google `{"output": ""}` parses to
