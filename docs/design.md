@@ -57,8 +57,10 @@ and pick the upstream API format at call time.
 OpenAI Responses WebSocket transport (a transport for the same format, not a new
 format), Google Interactions API (a fifth HTTP format; note its streaming is
 SSE, not WebSocket), format-to-format conversion, audio/video/document input,
-image generation, and Google tuned models (`tunedModels/…` resource names —
-tuning survives only on the retiring Vertex Gemini 2.5 line). The IR reserves room via `#[non_exhaustive]` enums/structs; no
+image generation, and Google tuned models — both `tunedModels/…` resource
+names and Vertex AI tuned endpoints (a different resource and auth scheme);
+first-party tuning availability is currently tied to the retiring Gemini 2.5
+generation. The IR reserves room via `#[non_exhaustive]` enums/structs; no
 code is written for these in v1.
 
 ## 3. Crate layout
@@ -373,6 +375,13 @@ Parameters unsupported by the target format produce a warning:
 ¹ Anthropic requires `max_tokens`; if the IR leaves it unset the format layer
 must fail with a clear conversion error rather than invent a number
 (`AnthropicOptions.default_max_tokens: Option<u32>` may configure a fallback).
+
+Severity of the `warn` cells follows the § 6 test: losing `stop_sequences`
+(an output-control contract) or an unmappable `Reasoning.enabled: false` is
+**semantic**; losing pure sampling tuning (`seed`, `top_k`, penalties) or
+`metadata` is cosmetic. Every `WarningCode` has a fixed severity so
+classifications cannot drift between formats (asserted centrally in tests,
+§ 15).
 
 `n`/`candidateCount` (multiple candidates) is deliberately not modeled; set it
 via `extra` if needed — the response parser only reads the first
@@ -1052,8 +1061,9 @@ pub enum Override<T> { Inherit, Set(T), Disable }
   models list `models` on all four. `{model}` is percent-encoded as a single
   path segment after stripping a leading `models/` prefix; Google
   `tunedModels/…` resource names are out of scope for v1 and return
-  `Error::NotSupported` instead of producing a broken URL (tuning survives
-  only on the retiring Vertex Gemini 2.5 line). `Full` serves nonstandard
+  `Error::NotSupported` instead of producing a broken URL (tuned models are
+  excluded entirely, § 2 — Vertex tuned endpoints are a different
+  resource/auth scheme, not a `tunedModels/…` path). `Full` serves nonstandard
   paths (`/chat`, `/completions`, bare
   `/api`, no `/v1` prefix, …); for Google-format chat a `Full` URL should
   contain `{method}`, otherwise the same URL is used for both call modes.
@@ -1094,10 +1104,26 @@ pub enum Override<T> { Inherit, Set(T), Disable }
   extra_query, include_raw }` — field-wise merge with the provider config,
   per-call wins. Format, URL and auth are deliberately not per-call
   (use another `ProviderConfig` for that).
-- `Limits` (`#[non_exhaustive]`, generous defaults): size caps for
-  non-streaming bodies, error bodies and individual SSE events, bounding
-  memory against misbehaving proxies; exceeding a cap fails with
-  `Error::Parse`.
+- `Limits` (`#[non_exhaustive]`): size caps bounding memory against
+  misbehaving proxies —
+
+  ```rust
+  #[non_exhaustive]
+  pub struct Limits {
+      pub max_response_body: usize, // decompressed bytes, as delivered by the transport
+      pub max_error_body: usize,
+      pub max_sse_event: usize,     // one complete logical SSE event (joined data lines)
+  }
+  ```
+
+  Plain byte counts, no magic values (`usize::MAX` ≈ unlimited). Defaults are
+  generous, chosen at implementation, and may be tuned in minor versions —
+  the semver guarantee is the mechanism, not the numbers. Exceeding a cap
+  keeps what was already read: a 2xx body or an SSE event over its cap fails
+  with `Error::BodyTooLarge` (status/headers where available + the read
+  prefix); an oversized **error** body still produces a full `Error::Api`
+  with `truncated: true` and the prefix as `raw` (§ 14) — status, headers
+  and `retry_after` survive.
 - Default auth header per format: `Authorization: Bearer` (OpenAI family),
   `x-api-key` + `anthropic-version` (Anthropic), `x-goog-api-key` (Google —
   header, not query, to keep keys out of logs).
@@ -1115,11 +1141,12 @@ result as `send` — `model`, `convert`, `hooks`, `extra_headers`,
 exactly as for `send`), then a per-format count adapter reshapes it for the
 count endpoint — Google wraps it in `generateContentRequest`, Anthropic
 filters it to the fields its count endpoint accepts, Responses maps it onto
-the `input_tokens` body; fields the endpoint does not accept are filtered by
-the adapter (they cannot affect the count). "Counted exactly as it will be
-sent" therefore holds whenever the count endpoint uses the chat format; with
-a decoupled count format the count request is built independently from the
-IR by that format, and the result is a semantic approximation only.
+the `input_tokens` body; what the adapter filters is graded in § 13.
+Exactness is guaranteed for the **modeled and documented request surface**
+when chat and count use the same format; dropped unknown/injected fields and
+decoupled count formats make the result approximate and produce **semantic**
+warnings — under strict that is a `ConversionError`, and a per-call
+`convert` with `strict: false` opts into approximate counting.
 
 ## 13. Model listing and token counting
 
@@ -1146,9 +1173,11 @@ IR by that format, and the result is a semantic approximation only.
   count adapter's own: fields the converter itself generated that the
   endpoint ignores by design (sampling knobs) are filtered silently; fields
   the adapter drops that it did not generate (injected via `extra`, hooks or
-  a dialect) get a cosmetic warning — the library cannot know whether they
-  would have affected the count; a decoupled count format adds one cosmetic
-  warning marking the result as a semantic approximation.
+  a dialect) get a **semantic** warning — the library cannot know whether
+  they would have affected the count, so the result is no longer exact; a
+  decoupled count format adds one **semantic** warning marking the result as
+  an approximation. Under strict these fail the call; per-call `convert`
+  with `strict: false` accepts an approximate count.
 
 ## 14. Errors
 
@@ -1157,12 +1186,16 @@ IR by that format, and the result is a semantic approximation only.
 pub enum Error {
     Transport(HttpError),
     Api { status: u16, kind: ApiErrorKind, message: String,
-          raw: Bytes,                // verbatim body (may be non-JSON/non-UTF-8)
+          raw: Bytes,                // body (may be non-JSON/non-UTF-8)
+          truncated: bool,           // raw is only a prefix (max_error_body hit)
           parsed: Option<Value>,     // present when the body parsed as JSON
           retry_after: Option<Duration>, headers: http::HeaderMap },
     Conversion(ConversionError),   // structural/strict failures, invalid IR
     Hook(HookError),               // a request hook returned Err
     Parse { message: String, raw: Bytes },
+    BodyTooLarge { kind: BodyKind, // SuccessBody | SseEvent
+                   limit: usize, status: Option<u16>,
+                   headers: Option<http::HeaderMap>, prefix: Bytes },
     NotSupported(&'static str),    // e.g. count_tokens on openai_chat_completions
 }
 
@@ -1172,10 +1205,12 @@ pub enum ApiErrorKind { InvalidRequest, Auth, PermissionDenied, NotFound,
 ```
 
 - `kind` is a coarse classification mapped from each provider's error shape;
-  the **raw error body is always preserved verbatim** (`Bytes` — proxies
-  return HTML/plain-text errors too; `parsed` is set when it is JSON). Non-2xx
-  handling belongs to `ApiFormat::parse_error` (§ 11); `parse_response` only
-  sees 2xx.
+  error bodies **within `max_error_body` are preserved verbatim** (`Bytes` —
+  proxies return HTML/plain-text errors too; `parsed` is set when it is
+  JSON), and an oversized one keeps status, headers, `retry_after` and the
+  read prefix with `truncated: true` — never downgraded to a bare parse
+  error. Non-2xx handling belongs to `ApiFormat::parse_error` (§ 11);
+  `parse_response` only sees 2xx.
 - `retry_after` is extracted from response headers where present — callers
   implement their own retry policies.
 - `Error` implements `std::error::Error` and `Display`; `HttpError` nests as
@@ -1190,8 +1225,10 @@ pub enum ApiErrorKind { InvalidRequest, Auth, PermissionDenied, NotFound,
   nodes and `round_trip` metadata.
 - Dedicated tests: the § 4.7 extra-override examples (budget re-enable on
   Anthropic/Google must fully rewrite the generated thinking fields), the
-  § 7.5 signed-block merge barrier (merged vs skipped paths), and the § 7.2
-  empty/multi-text tool-result encodings (round-trip idempotence per target).
+  § 7.5 signed-block merge barrier (merged vs skipped paths), the § 7.2
+  empty/multi-text tool-result encodings (round-trip idempotence per target),
+  and a single central assertion of the `WarningCode` → severity table
+  (§ 4.6).
 - Fixtures under `tests/fixtures/<format_id>/` — real request/response JSON
   and complete SSE streams taken from `docs/official_api` and recorded
   sessions. Stream block-boundary inference (CC, Google) gets the densest
