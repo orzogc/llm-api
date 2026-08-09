@@ -223,8 +223,9 @@ impl Client {
     /// [`WarningCode::CountTokensApproximate`] warning marks the result as
     /// an approximation. `TokenCount::warnings` carries the request-build
     /// warnings, then that approximation warning, then parse-side
-    /// warnings; strict-mode escalation of build warnings already happened
-    /// inside the format's build.
+    /// warnings. Under strict, a decoupled count format fails the call
+    /// before any IO (§ 13); build-warning escalation happens inside the
+    /// format's build as usual.
     pub async fn count_tokens(
         &self,
         provider: &ProviderConfig,
@@ -239,6 +240,20 @@ impl Client {
         let decoupled = !Arc::ptr_eq(&endpoint.format, &provider.chat.format)
             && endpoint.format.id() != provider.chat.format.id();
         let eff = effective_options(provider, opts);
+        let approx_warning = || {
+            ConversionWarning::to_format(
+                WarningCode::CountTokensApproximate,
+                endpoint.format.id(),
+                "",
+                "token counting uses a format decoupled from the chat format; the result is an approximation",
+            )
+        };
+        // § 13: under strict a decoupled count format fails the call — and
+        // does so before any IO; a per-call `convert` with `strict: false`
+        // opts into the approximate count.
+        if decoupled {
+            crate::convert::strict_gate(eff.convert.strict, &[approx_warning()])?;
+        }
         let ctx = eff.build_ctx(endpoint.url.clone(), CallMode::Unary, provider);
         let built = endpoint.format.build_count_tokens_request(request, &ctx)?;
         let mut d = self
@@ -265,12 +280,7 @@ impl Client {
         let parse_warnings = std::mem::take(&mut count.warnings);
         let mut warnings = d.warnings;
         if decoupled {
-            warnings.push(ConversionWarning::to_format(
-                WarningCode::CountTokensApproximate,
-                endpoint.format.id(),
-                "",
-                "token counting uses a format decoupled from the chat format; the result is an approximation",
-            ));
+            warnings.push(approx_warning());
         }
         warnings.extend(parse_warnings);
         count.warnings = warnings;

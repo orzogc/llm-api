@@ -97,6 +97,40 @@ pub enum StreamEvent {
     Unknown,
 }
 
+impl StreamEvent {
+    /// A `MessageStart` event. Constructor for [`crate::StreamParser`]
+    /// implementations (the variants are `#[non_exhaustive]` and cannot be
+    /// built with literals outside this crate).
+    #[must_use]
+    pub fn message_start(id: Option<String>, model: Option<String>, usage: Option<Usage>) -> Self {
+        Self::MessageStart { id, model, usage }
+    }
+
+    /// A `BlockStart` event.
+    #[must_use]
+    pub fn block_start(index: usize, block: ContentBlock) -> Self {
+        Self::BlockStart { index, block }
+    }
+
+    /// A `BlockDelta` event.
+    #[must_use]
+    pub fn block_delta(index: usize, delta: BlockDelta) -> Self {
+        Self::BlockDelta { index, delta }
+    }
+
+    /// A `BlockStop` event, optionally carrying the finalized block.
+    #[must_use]
+    pub fn block_stop(index: usize, block: Option<ContentBlock>) -> Self {
+        Self::BlockStop { index, block }
+    }
+
+    /// A `MessageDelta` event.
+    #[must_use]
+    pub fn message_delta(stop_reason: Option<StopReason>, usage: Option<Usage>) -> Self {
+        Self::MessageDelta { stop_reason, usage }
+    }
+}
+
 /// Incremental payload kinds.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

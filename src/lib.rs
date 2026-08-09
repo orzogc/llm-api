@@ -25,6 +25,7 @@ pub mod ir;
 pub mod models;
 pub mod tokens;
 
+pub use client::{CallOptions, Client, EndpointConfig, Limits, Override, ProviderConfig, StreamHandle};
 pub use convert::{
     ConversionDirection, ConversionWarning, ConvertOptions, OrphanToolCalls, RequestHooks,
     WarningCode, WarningSeverity,

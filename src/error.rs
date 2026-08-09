@@ -184,12 +184,79 @@ pub enum ConversionError {
 }
 
 impl ConversionError {
-    pub(crate) fn missing(what: impl Into<String>, location: impl Into<String>) -> Self {
+    /// A `MissingRequired` error. Public constructor for third-party
+    /// [`crate::ApiFormat`] implementations (the variants are
+    /// `#[non_exhaustive]` and cannot be built with literals outside this
+    /// crate).
+    #[must_use]
+    pub fn missing(what: impl Into<String>, location: impl Into<String>) -> Self {
         Self::MissingRequired { what: what.into(), location: location.into() }
     }
 
-    pub(crate) fn other(message: impl Into<String>) -> Self {
+    /// An `InvalidToolArguments` error.
+    #[must_use]
+    pub fn invalid_tool_arguments(
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+        reason: impl Into<String>,
+        location: impl Into<String>,
+    ) -> Self {
+        Self::InvalidToolArguments {
+            name: name.into(),
+            arguments: arguments.into(),
+            reason: reason.into(),
+            location: location.into(),
+        }
+    }
+
+    /// An `InvalidBlockForRole` error.
+    #[must_use]
+    pub fn invalid_block_for_role(
+        role: Role,
+        block: &'static str,
+        location: impl Into<String>,
+    ) -> Self {
+        Self::InvalidBlockForRole { role, block, location: location.into() }
+    }
+
+    /// An `Other` structural error.
+    #[must_use]
+    pub fn other(message: impl Into<String>) -> Self {
         Self::Other { message: message.into() }
+    }
+}
+
+impl Error {
+    /// A `Parse` error. Public constructor for third-party
+    /// [`crate::ApiFormat`] / [`crate::StreamParser`] implementations.
+    #[must_use]
+    pub fn parse(message: impl Into<String>, raw: impl Into<Bytes>) -> Self {
+        Self::Parse { message: message.into(), raw: raw.into() }
+    }
+
+    /// An `Api` error with the given classification; `retry_after` is
+    /// extracted from `headers`, `parsed` from `raw` when it is JSON.
+    #[must_use]
+    pub fn api(
+        status: u16,
+        kind: ApiErrorKind,
+        message: impl Into<String>,
+        raw: impl Into<Bytes>,
+        headers: http::HeaderMap,
+    ) -> Self {
+        let raw = raw.into();
+        let parsed = serde_json::from_slice(&raw).ok();
+        let retry_after = retry_after_from_headers(&headers);
+        Self::Api {
+            status,
+            kind,
+            message: message.into(),
+            raw,
+            truncated: false,
+            parsed,
+            retry_after,
+            headers,
+        }
     }
 }
 
