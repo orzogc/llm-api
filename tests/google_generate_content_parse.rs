@@ -246,11 +246,129 @@ fn legacy_function_role_parses_as_tool_turn() {
             {"role": "function", "parts": [{"functionResponse": {"name": "f", "response": {"output": "ok"}}}]}
         ]
     });
-    let (ir, _) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
+    let (ir, warnings) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
     assert_eq!(ir.messages[0].role, Role::Tool);
+    // "function" is outside the documented role union → user-side + warning.
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].code, WarningCode::MalformedField);
+    assert_eq!(warnings[0].location, "/contents/0/role");
     // Canonicalizes to the documented user turn on the way back.
     let (serialized, _) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
     assert_eq!(serialized["contents"][0]["role"], "user");
+}
+
+#[test]
+fn out_of_schema_content_role_warns_and_stays_user() {
+    // The documented role union is closed: "user" / "model", optionally
+    // absent. Anything else keeps the user-side behavior, with a warning.
+    let body = json!({
+        "contents": [{"role": "assistant", "parts": [{"text": "hi"}]}]
+    });
+    let (ir, warnings) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedField);
+    assert_eq!(warnings[0].location, "/contents/0/role");
+    assert!(warnings[0].message.contains("assistant"));
+    assert_eq!(ir.messages[0].role, Role::User);
+    // Canonicalizes to role "user" on the way back.
+    let (serialized, _) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
+    assert_eq!(serialized["contents"][0]["role"], "user");
+
+    // Documented values stay warning-free — including the absent default.
+    for content in [
+        json!({"parts": [{"text": "hi"}]}),
+        json!({"role": "user", "parts": [{"text": "hi"}]}),
+        json!({"role": "model", "parts": [{"text": "hi"}]}),
+    ] {
+        let body = json!({"contents": [content]});
+        let (_, warnings) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+}
+
+#[test]
+fn text_only_system_instruction_stays_in_request_system() {
+    let body = json!({
+        "systemInstruction": {"parts": [{"text": "a"}, {"text": "b", "partTag": 1}]},
+        "contents": [{"role": "user", "parts": [{"text": "hi"}]}]
+    });
+    let (ir, warnings) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(ir.system.as_ref().unwrap().len(), 2);
+    assert!(ir.messages.iter().all(|m| m.role != Role::System));
+    assert_fixed_point(&body);
+}
+
+#[test]
+fn system_instruction_with_non_text_parts_parses_as_leading_system_message() {
+    // Request.system is Text-only, so an out-of-schema part forces the whole
+    // instruction into a leading System message (Text + same-format Opaque,
+    // part order kept); § 7.1 hoists it back on serialization — nothing is
+    // lost.
+    let body = json!({
+        "systemInstruction": {
+            "parts": [
+                {"text": "You are terse.", "partTag": 1},
+                {"inlineData": {"mimeType": "image/png", "data": "cGl4"}},
+                {"unknownPart": 1},
+                {"text": "Answer in French."}
+            ],
+            "siTag": "s1"
+        },
+        "contents": [{"role": "user", "parts": [{"text": "hi"}]}]
+    });
+    let (ir, warnings) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
+    // One MalformedField per non-text part, and nothing else.
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert!(
+        warnings
+            .iter()
+            .all(|w| w.code == WarningCode::MalformedField)
+    );
+    assert_eq!(warnings[0].location, "/systemInstruction/parts/1");
+    assert_eq!(warnings[1].location, "/systemInstruction/parts/2");
+
+    assert_eq!(ir.system, None);
+    let sys = &ir.messages[0];
+    assert_eq!(sys.role, Role::System);
+    assert_eq!(ir.messages[1].role, Role::User);
+    assert!(matches!(&sys.content[0], ContentBlock::Text { text, .. } if text == "You are terse."));
+    assert!(matches!(
+        &sys.content[1],
+        ContentBlock::Opaque { format, value, .. }
+            if format == FMT && value.get("inlineData").is_some()
+    ));
+    assert!(matches!(
+        &sys.content[2],
+        ContentBlock::Opaque { format, value, .. }
+            if format == FMT && value.get("unknownPart").is_some()
+    ));
+    assert!(
+        matches!(&sys.content[3], ContentBlock::Text { text, .. } if text == "Answer in French.")
+    );
+    // Instruction-level unknown fields ride the message extra.
+    assert_eq!(
+        sys.extra.get(FMT).unwrap().get("siTag").unwrap(),
+        &json!("s1")
+    );
+
+    // The hoist rule makes the wire round-trip the identity, warning-free.
+    let (serialized, ser_warnings) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
+    assert!(ser_warnings.is_empty(), "{ser_warnings:?}");
+    assert_eq!(serialized, body);
+    let (ir2, _) = request_to_ir(&serde_json::to_vec(&serialized).unwrap()).unwrap();
+    assert_eq!(ir2, ir);
+
+    // An instruction with no text part at all survives the same way.
+    let body = json!({
+        "systemInstruction": {"parts": [{"unknownPart": 1}]},
+        "contents": [{"role": "user", "parts": [{"text": "hi"}]}]
+    });
+    let (ir, _) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
+    assert_eq!(ir.system, None);
+    assert_eq!(ir.messages[0].role, Role::System);
+    let (serialized, _) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
+    assert_eq!(serialized, body);
 }
 
 #[test]
@@ -354,14 +472,19 @@ fn unmodeled_tool_config_shapes_mirror_into_extra() {
 
 #[test]
 fn mixed_tool_entry_canonicalizes_by_splitting() {
+    // Splitting is a deliberate, silent canonicalization: the split form is
+    // upstream-equivalent (the official tool-combination examples list the
+    // combined tools as separate entries), so neither direction warns.
     let body = json!({
         "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
         "tools": [{"functionDeclarations": [{"name": "f"}], "googleSearch": {}}]
     });
-    let (ir, _) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
+    let (ir, parse_warnings) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
+    assert!(parse_warnings.is_empty(), "{parse_warnings:?}");
     let tools = ir.tools.as_ref().unwrap();
     assert_eq!(tools.len(), 2);
-    let (serialized, _) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
+    let (serialized, warnings) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(
         serialized["tools"],
         json!([{"functionDeclarations": [{"name": "f"}]}, {"googleSearch": {}}])
@@ -476,6 +599,48 @@ fn function_call_response_normalizes_to_tool_use() {
     assert_eq!(usage.output_tokens, 35, "candidates + thoughts");
     assert_eq!(usage.reasoning_tokens, Some(30));
     assert_eq!(usage.visible_output_tokens(), 5);
+}
+
+#[test]
+fn usage_boundary_values_clamp_and_saturate() {
+    let candidate = json!({
+        "content": {"parts": [{"text": "x"}], "role": "model"},
+        "finishReason": "STOP",
+    });
+
+    // Absurdly large counts must not overflow: the output sum saturates.
+    let body = json!({
+        "candidates": [candidate.clone()],
+        "usageMetadata": {
+            "promptTokenCount": 1,
+            "candidatesTokenCount": i64::MAX,
+            "thoughtsTokenCount": i64::MAX,
+        }
+    });
+    let resp = response_to_ir(&serde_json::to_vec(&body).unwrap(), &meta()).unwrap();
+    let usage = resp.usage.as_ref().unwrap();
+    let max = u64::try_from(i64::MAX).unwrap();
+    assert_eq!(usage.output_tokens, max * 2);
+    assert_eq!(usage.reasoning_tokens, Some(max));
+
+    // Negative counts (never sent by well-behaved servers) clamp to zero.
+    let body = json!({
+        "candidates": [candidate],
+        "usageMetadata": {
+            "promptTokenCount": -1,
+            "candidatesTokenCount": -5,
+            "thoughtsTokenCount": 7,
+            "cachedContentTokenCount": -3,
+            "totalTokenCount": -2,
+        }
+    });
+    let resp = response_to_ir(&serde_json::to_vec(&body).unwrap(), &meta()).unwrap();
+    let usage = resp.usage.as_ref().unwrap();
+    assert_eq!(usage.input_tokens, 0);
+    assert_eq!(usage.output_tokens, 7);
+    assert_eq!(usage.reasoning_tokens, Some(7));
+    assert_eq!(usage.cache_read_tokens, Some(0));
+    assert_eq!(usage.total_tokens, Some(0));
 }
 
 #[test]

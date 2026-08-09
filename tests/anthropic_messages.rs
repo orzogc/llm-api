@@ -960,6 +960,78 @@ fn merge_consecutive_roles_and_signature_barrier() {
 }
 
 #[test]
+fn lone_opaque_wire_message_is_verbatim_and_never_merges() {
+    // A lone own-format Opaque with a string `role` (the unknown-role
+    // parse home) re-emits verbatim, untouched by merge_consecutive_roles.
+    let wire_msg = json!({"role": "critic", "content": "meh", "weight": 2});
+    let mut lone = Message::user(vec![ContentBlock::opaque(FMT, wire_msg.clone())]);
+    lone.extra.set(FMT, "priority", 1); // message-level extra still merges
+    let r = req(vec![Message::user_text("a"), lone, Message::user_text("b")]);
+    let mut c = ctx();
+    c.format_options.anthropic.merge_consecutive_roles = true;
+    let (body, warnings) = build_with(&r, &c);
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 3, "no merging through the verbatim message");
+    assert_eq!(
+        messages[0]["content"],
+        json!([{"type": "text", "text": "a"}])
+    );
+    assert_eq!(
+        messages[1],
+        json!({"role": "critic", "content": "meh", "weight": 2, "priority": 1})
+    );
+    assert_eq!(
+        messages[2]["content"],
+        json!([{"type": "text", "text": "b"}])
+    );
+    // Silent barrier: not a same-role merge conflict.
+    assert!(find(&warnings, &WarningCode::MergeBlockedBySignature).is_none());
+
+    // A two-block message or a value without a role string is not verbatim:
+    // the opaque serializes inside a regular content array as before.
+    let r2 = req(vec![Message::user(vec![
+        ContentBlock::opaque(FMT, wire_msg.clone()),
+        ContentBlock::text("t"),
+    ])]);
+    let (body2, _) = build(&r2);
+    assert_eq!(
+        body2["messages"][0],
+        json!({"role": "user", "content": [wire_msg, {"type": "text", "text": "t"}]})
+    );
+}
+
+#[test]
+fn lone_opaque_wire_message_blocks_turn_group_re_merge() {
+    let wire_msg = json!({"role": "critic", "content": "meh"});
+    let r = req(vec![
+        Message::user_text("q"),
+        Message::assistant(vec![ContentBlock::tool_call_with_id("t1", "f", "{}")]),
+        Message::tool(vec![ContentBlock::tool_result_text(
+            Some("t1".into()),
+            "ok",
+        )])
+        .with_turn_group(7),
+        Message::user(vec![ContentBlock::opaque(FMT, wire_msg.clone())]).with_turn_group(7),
+        Message::user_text("continue").with_turn_group(7),
+    ]);
+    let (body, _) = build(&r);
+    let messages = body["messages"].as_array().unwrap();
+    // Without the verbatim message the grouped Tool + User pair would merge
+    // into one wire turn; the verbatim message stays standalone and keeps
+    // its neighbours apart.
+    assert_eq!(messages.len(), 5);
+    assert_eq!(
+        messages[2]["content"],
+        json!([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}])
+    );
+    assert_eq!(messages[3], wire_msg);
+    assert_eq!(
+        messages[4]["content"],
+        json!([{"type": "text", "text": "continue"}])
+    );
+}
+
+#[test]
 fn turn_group_meta_re_merges_tool_and_user_messages() {
     let call = ContentBlock::tool_call_with_id("t1", "f", "{}");
     let r = req(vec![

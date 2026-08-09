@@ -26,6 +26,7 @@ fn severity_table_is_pinned() {
         (JsonModeUnsupported, Semantic),
         (RoleDowngraded, Semantic),
         (ToolResultOrderLost, Semantic),
+        (BlockOrderLost, Semantic),
         (OrphanToolCalls, Semantic),
         (ThinkingOrphaned, Semantic),
         (MissingThinkingWithToolCalls, Semantic),
@@ -47,6 +48,7 @@ fn severity_table_is_pinned() {
         (IncludeThoughtsUnsupported, Cosmetic),
         (ImageUrlAsFileUri, Cosmetic),
         (ToolResultTextJoined, Cosmetic),
+        (ThinkingBlocksJoined, Cosmetic),
         (OrphanToolCallsDropped, Cosmetic),
         (OrphanToolCallsSynthesized, Cosmetic),
         (MissingThinkingFilled, Cosmetic),
@@ -54,6 +56,7 @@ fn severity_table_is_pinned() {
         (MultipleCandidates, Semantic),
         (MalformedField, Cosmetic),
         (UnknownStreamEvent, Cosmetic),
+        (StreamOptionsDropped, Cosmetic),
     ];
     for (code, expected) in table {
         assert_eq!(code.severity(), expected, "severity drifted for {code:?}");

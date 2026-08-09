@@ -71,8 +71,18 @@ impl SseParser {
             }
             self.bom_checked = true;
         }
+        // Drain complete lines first (the per-event data cap is enforced
+        // inside `process_line`), then check what remains: `buf` now holds
+        // only the current unfinished line, so this is a flood guard against
+        // a stream that never sends a newline — it keeps accumulating across
+        // pushes — and never trips on a chunk that carries several small
+        // complete events. Known trade-off: a giant non-`data` line
+        // (`event:`, `id:`, comment) that arrives complete within one chunk
+        // is consumed into parser state unchecked — the § 12 cap is defined
+        // over joined `data:` lines only.
+        let events = self.drain_lines(false)?;
         self.check_cap()?;
-        self.drain_lines(false)
+        Ok(events)
     }
 
     /// Signals end of stream. Complete trailing lines are processed; an
@@ -92,17 +102,19 @@ impl SseParser {
         // never sends a newline must not grow memory unboundedly).
         let current = self.data.len().max(self.buf.len());
         if current > self.max_event {
-            let prefix = if self.data.len() >= self.buf.len() {
-                bytes::Bytes::copy_from_slice(self.data.as_bytes())
+            let src = if self.data.len() >= self.buf.len() {
+                self.data.as_bytes()
             } else {
-                bytes::Bytes::copy_from_slice(&self.buf)
+                &self.buf
             };
+            // `prefix` carries at most `limit` bytes of what was read.
+            let end = src.len().min(self.max_event);
             return Err(Error::BodyTooLarge {
                 kind: BodyKind::SseEvent,
                 limit: self.max_event,
                 status: None,
                 headers: None,
-                prefix,
+                prefix: bytes::Bytes::copy_from_slice(&src[..end]),
             });
         }
         Ok(())
@@ -323,6 +335,72 @@ mod tests {
         // A no-newline flood also trips the cap.
         let mut p2 = SseParser::new(8);
         assert!(p2.push(b"0123456789abcdef").is_err());
+    }
+
+    #[test]
+    fn size_cap_ignores_chunk_size() {
+        // One chunk carrying several small events must not trip the cap:
+        // the limit is per logical event, not per network chunk.
+        let mut p = SseParser::new(10);
+        let events = p.push(b"data:a\n\ndata:b\n\ndata:c\n\n").unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].data, "a");
+        assert_eq!(events[2].data, "c");
+    }
+
+    #[test]
+    fn size_cap_result_is_chunking_independent() {
+        let input = b"data: hello\n\ndata: world\n\n";
+        let mut whole = SseParser::new(16);
+        let all_at_once = collect(&mut whole, &[std::str::from_utf8(input).unwrap()]);
+
+        // Byte-by-byte delivery of the same stream yields the same events.
+        let mut split = SseParser::new(16);
+        let mut one_by_one = Vec::new();
+        for b in input {
+            one_by_one.extend(split.push(&[*b]).unwrap());
+        }
+        one_by_one.extend(split.finish().unwrap());
+        assert_eq!(all_at_once, one_by_one);
+    }
+
+    #[test]
+    fn size_cap_ignores_comment_and_keepalive_overhead() {
+        // A long comment line does not count against the event's data cap.
+        let mut p = SseParser::new(8);
+        let events = p
+            .push(b": a keepalive comment much longer than the cap\ndata:a\n\n")
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "a");
+    }
+
+    #[test]
+    fn size_cap_prefix_is_truncated_to_limit() {
+        let mut p = SseParser::new(8);
+        let err = p.push(&[b'x'; 30]).unwrap_err();
+        match err {
+            Error::BodyTooLarge { prefix, limit, .. } => {
+                assert_eq!(limit, 8);
+                assert_eq!(prefix.len(), 8, "prefix must not exceed the limit");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let mut p2 = SseParser::new(8);
+        let err2 = p2.push(b"data: 0123456789abcdef\n").unwrap_err();
+        match err2 {
+            Error::BodyTooLarge { prefix, .. } => assert!(prefix.len() <= 8),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn size_cap_flood_accumulates_across_pushes() {
+        // An unterminated line growing across pushes still trips the guard.
+        let mut p = SseParser::new(8);
+        assert!(p.push(b"01234").is_ok());
+        assert!(p.push(b"56789").is_err());
     }
 
     #[test]

@@ -257,6 +257,10 @@ impl ApiFormat for MockFormat {
 ///   with that text plus one warning
 /// - `{"k":"stop"}` → `MessageDelta` (stop reason + usage) + `MessageStop`
 /// - `{"k":"bad"}` → parser error
+/// - `{"k":"apierr","own_headers":bool}` → an in-stream `Error::Api` built
+///   from the event body alone (empty headers, no `retry_after`), the way
+///   the Anthropic/Responses stream parsers construct theirs;
+///   `own_headers` sets a parser-supplied `x-parser` header instead
 /// - anything else → `Unknown` + `UnknownStreamEvent` warning
 struct MockStreamParser {
     id: &'static str,
@@ -338,6 +342,19 @@ impl StreamParser for MockStreamParser {
                 ))
             }
             Some("bad") => Err(parse_err("mock: bad stream event")),
+            Some("apierr") => {
+                let mut headers = http::HeaderMap::new();
+                if v["own_headers"].as_bool() == Some(true) {
+                    headers.insert("x-parser", http::HeaderValue::from_static("own"));
+                }
+                Err(Error::api(
+                    429,
+                    ApiErrorKind::RateLimit,
+                    "in-stream error",
+                    event.data.clone(),
+                    headers,
+                ))
+            }
             _ => Ok((
                 vec![StreamEvent::Unknown],
                 vec![ConversionWarning::from_format(
@@ -1400,6 +1417,104 @@ async fn stream_non_2xx_fails_like_send() {
     }
 }
 
+#[tokio::test]
+async fn stream_in_stream_api_error_gains_response_headers() {
+    // Parser-built in-stream API errors carry no HTTP metadata; the handle
+    // fills in the real response headers and derives `retry_after`.
+    let session = [json!({"k": "start"}), json!({"k": "apierr"})];
+    let scripted_response = || Scripted::Respond {
+        status: 200,
+        headers: vec![
+            ("content-type", "text/event-stream"),
+            ("request-id", "req-1"),
+            ("retry-after", "9"),
+        ],
+        chunks: session.iter().map(sse_chunk).collect(),
+    };
+    let (client, _) = scripted(vec![scripted_response(), scripted_response()]);
+    let provider = mock_provider();
+
+    let handle = client
+        .stream(&provider, &user_request(), &CallOptions::new())
+        .await
+        .unwrap();
+    let items = drain(handle).await;
+    assert_eq!(items.len(), 2, "the stream terminates after the error");
+    match &items[1] {
+        Err(Error::Api {
+            status,
+            kind,
+            headers,
+            retry_after,
+            ..
+        }) => {
+            assert_eq!(*status, 429, "parser-reported status survives");
+            assert_eq!(*kind, ApiErrorKind::RateLimit);
+            assert_eq!(
+                headers.get("request-id").unwrap(),
+                "req-1",
+                "response headers filled in"
+            );
+            assert_eq!(*retry_after, Some(Duration::from_secs(9)));
+        }
+        other => panic!("unexpected item: {other:?}"),
+    }
+
+    // collect() consumes the handle (and its headers accessor); the error
+    // itself must still carry the response headers.
+    let err = client
+        .stream(&provider, &user_request(), &CallOptions::new())
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap_err();
+    match err {
+        Error::Api {
+            headers,
+            retry_after,
+            ..
+        } => {
+            assert_eq!(headers.get("request-id").unwrap(), "req-1");
+            assert_eq!(retry_after, Some(Duration::from_secs(9)));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn stream_in_stream_api_error_preserves_parser_headers() {
+    let (client, _) = scripted(vec![Scripted::Respond {
+        status: 200,
+        headers: vec![
+            ("content-type", "text/event-stream"),
+            ("request-id", "req-1"),
+            ("retry-after", "9"),
+        ],
+        chunks: vec![sse_chunk(&json!({"k": "apierr", "own_headers": true}))],
+    }]);
+    let handle = client
+        .stream(&mock_provider(), &user_request(), &CallOptions::new())
+        .await
+        .unwrap();
+    let items = drain(handle).await;
+    match &items[0] {
+        Err(Error::Api {
+            headers,
+            retry_after,
+            ..
+        }) => {
+            // Headers a parser set deliberately survive untouched…
+            assert_eq!(headers.get("x-parser").unwrap(), "own");
+            assert!(headers.get("request-id").is_none());
+            // …while a missing retry_after is still derived from the real
+            // response headers.
+            assert_eq!(*retry_after, Some(Duration::from_secs(9)));
+        }
+        other => panic!("unexpected item: {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // list_models
 // ---------------------------------------------------------------------------
@@ -1429,6 +1544,70 @@ async fn list_models_paginates_via_derived_endpoint() {
     );
     // Derived endpoint inherits provider auth.
     assert_eq!(calls[0].auth.as_ref().unwrap().value.expose(), "secret-key");
+}
+
+#[tokio::test]
+async fn derived_endpoints_keep_chat_auth_and_header_overrides() {
+    // Unset models/count_tokens derive from `chat` — including its Set
+    // auth and header overrides, not just format and URL.
+    let (client, captured) = scripted(vec![
+        respond_json(&json!({"data": [{"id": "a"}]})),
+        respond_json(&json!({"input_tokens": 3})),
+    ]);
+    let mut provider = mock_provider();
+    provider.auth = None; // prove the endpoint Set auth is what travels
+    provider.chat.auth = Override::Set(AuthHeader {
+        name: http::HeaderName::from_static("x-chat-key"),
+        prefix: None,
+        value: ApiKey::new("chat-secret"),
+    });
+    let mut endpoint_headers = http::HeaderMap::new();
+    endpoint_headers.insert("x-endpoint", http::HeaderValue::from_static("e"));
+    provider.chat.headers = Override::Set(endpoint_headers);
+
+    client.list_models(&provider).await.unwrap();
+    client
+        .count_tokens(&provider, &user_request(), &CallOptions::new())
+        .await
+        .unwrap();
+
+    let calls = captured.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    for (i, call) in calls.iter().enumerate() {
+        let auth = call
+            .auth
+            .as_ref()
+            .unwrap_or_else(|| panic!("call {i}: derived endpoint must send the chat Set auth"));
+        assert_eq!(auth.name, "x-chat-key", "call {i}");
+        assert_eq!(auth.value.expose(), "chat-secret", "call {i}");
+        assert_eq!(
+            call.headers.get("x-endpoint").unwrap(),
+            "e",
+            "call {i}: derived endpoint must apply the chat Set headers"
+        );
+    }
+}
+
+#[tokio::test]
+async fn derived_endpoints_keep_chat_auth_disable() {
+    let (client, captured) = scripted(vec![
+        respond_json(&json!({"data": []})),
+        respond_json(&json!({"input_tokens": 3})),
+    ]);
+    let mut provider = mock_provider(); // provider key is set
+    provider.chat.auth = Override::Disable;
+
+    client.list_models(&provider).await.unwrap();
+    client
+        .count_tokens(&provider, &user_request(), &CallOptions::new())
+        .await
+        .unwrap();
+
+    let calls = captured.lock().unwrap();
+    assert!(
+        calls.iter().all(|c| c.auth.is_none()),
+        "chat auth Disable must apply to derived endpoints"
+    );
 }
 
 #[tokio::test]

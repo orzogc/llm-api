@@ -62,6 +62,10 @@ impl WireRole {
 struct WirePlan {
     role: WireRole,
     parts: Vec<usize>,
+    /// Emit `parts[0]`'s lone own-format `Opaque` value verbatim as the
+    /// whole wire message (unknown-role passthrough); excluded from every
+    /// merge.
+    verbatim: bool,
 }
 
 /// A warning recorded before final wire positions are known; `msg` is an
@@ -102,6 +106,19 @@ pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) ->
     let mut plans: Vec<WirePlan> = Vec::new();
     let mut leading = true;
     for (i, m) in messages.iter().enumerate() {
+        // Verbatim wire messages neither hoist nor merge: they become
+        // standalone wire messages re-emitting the opaque value untouched.
+        if verbatim_wire_message(m).is_some() {
+            leading = false;
+            plans.push(WirePlan {
+                // Placeholder; verbatim plans render from the opaque value
+                // and never take part in role-based merging.
+                role: WireRole::User,
+                parts: vec![i],
+                verbatim: true,
+            });
+            continue;
+        }
         if leading && m.role == Role::System && !has_in_array_system_meta(m.round_trip.as_ref()) {
             hoisted.push(i);
             continue;
@@ -140,6 +157,7 @@ pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) ->
             && let Some(group) = m.turn_group_id()
             && let Some(last) = plans.last_mut()
             && last.role == WireRole::User
+            && !last.verbatim
             && last.parts.last().is_some_and(|&p| {
                 matches!(messages[p].role, Role::User | Role::Tool)
                     && messages[p].turn_group_id() == Some(group)
@@ -151,14 +169,19 @@ pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) ->
         plans.push(WirePlan {
             role: wire_role,
             parts: vec![i],
+            verbatim: false,
         });
     }
 
     if opts.merge_consecutive_roles {
         let mut merged: Vec<WirePlan> = Vec::new();
         for plan in plans {
+            // Verbatim plans are merge barriers on both sides, silently —
+            // they are not same-role neighbours but complete wire messages.
             if let Some(prev) = merged.last_mut()
                 && prev.role == plan.role
+                && !prev.verbatim
+                && !plan.verbatim
             {
                 let barrier = prev
                     .parts
@@ -223,6 +246,16 @@ pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) ->
     let mut wire_messages: Vec<Value> = Vec::new();
     for (w, plan) in plans.iter().enumerate() {
         let msg_loc = format!("/messages/{w}");
+        if plan.verbatim {
+            let m = &messages[plan.parts[0]];
+            let value =
+                verbatim_wire_message(m).expect("verbatim plan holds a lone opaque wire message");
+            let mut wire_msg = value.clone();
+            m.extra.merge_into(FMT, &mut wire_msg, &msg_loc, &mut log);
+            wire_messages.push(wire_msg);
+            message_pointers.push((msg_loc, m.role));
+            continue;
+        }
         let mut content: Vec<Value> = Vec::new();
         for &p in &plan.parts {
             let m = &messages[p];
@@ -466,6 +499,26 @@ pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) ->
         message_pointers,
         generated_keys,
     })
+}
+
+/// Returns the wire-message JSON when the message re-emits verbatim:
+/// exactly one own-format `Opaque` block whose value is itself a wire
+/// message (it has a string `role` field) — the parse-side home for
+/// messages with unknown wire roles. `System` messages are excluded: their
+/// canonical home is the top-level `system` channel (§ 7.1), where a
+/// role-bearing opaque entry stays a system entry.
+fn verbatim_wire_message(message: &Message) -> Option<&Value> {
+    if message.role == Role::System {
+        return None;
+    }
+    match message.content.as_slice() {
+        [ContentBlock::Opaque { format, value, .. }]
+            if format == FMT && value.get("role").is_some_and(Value::is_string) =>
+        {
+            Some(value)
+        }
+        _ => None,
+    }
 }
 
 /// `true` when the message contains a signed block (§ 7.5): a `Thinking`

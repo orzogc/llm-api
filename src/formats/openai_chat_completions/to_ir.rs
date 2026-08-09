@@ -38,8 +38,9 @@ fn parse_failure(what: &str, error: impl std::fmt::Display, body: &[u8]) -> Erro
 /// one-element array, legacy `max_tokens` maps to the IR
 /// `max_output_tokens` (re-serializing as `max_completion_tokens`), and
 /// `model` / `stream` / `stream_options` are configuration, not IR data,
-/// and are consumed. Leading `system` messages stay in-array (no hoisting
-/// to `Request.system`, implementation contract).
+/// and are consumed (`stream_options` members other than `include_usage`
+/// warn `StreamOptionsDropped`). Leading `system` messages stay in-array
+/// (no hoisting to `Request.system`, implementation contract).
 pub fn request_to_ir(body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)> {
     let wire: types::Request =
         serde_json::from_slice(body).map_err(|e| parse_failure("request", e, body))?;
@@ -119,10 +120,48 @@ pub fn request_to_ir(body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)> {
     req.parallel_tool_calls = wire.parallel_tool_calls;
     // `model`, `stream` and `stream_options` are deliberately consumed:
     // the model comes from configuration, streaming from the call mode,
-    // and `include_usage` from `OpenAiChatCompletionsOptions`.
+    // and `include_usage` from `OpenAiChatCompletionsOptions`. Members
+    // the build side cannot reconstruct warn — they are not mirrored into
+    // `extra`, since a re-serialized unary body must not carry a bare
+    // `stream_options`.
+    if let Some(options) = &wire.stream_options {
+        warn_dropped_stream_options(options, &mut warnings);
+    }
     ns.extend(wire.extra);
     req.extra = Extra::from_unknown(FORMAT, ns);
     Ok((req, warnings))
+}
+
+/// Warns about consumed `stream_options` content the build side cannot
+/// reconstruct: everything except the `include_usage` member, which
+/// [`crate::OpenAiChatCompletionsOptions::inject_include_usage`] re-injects
+/// on streaming builds.
+fn warn_dropped_stream_options(options: &Value, warnings: &mut Vec<ConversionWarning>) {
+    let message = match options {
+        Value::Object(members) => {
+            let dropped: Vec<String> = members
+                .keys()
+                .filter(|key| key.as_str() != "include_usage")
+                .map(|key| format!("`{key}`"))
+                .collect();
+            if dropped.is_empty() {
+                return;
+            }
+            format!(
+                "`stream_options` member(s) {} were dropped; the build side reconstructs \
+                 only `include_usage` (per `OpenAiChatCompletionsOptions`)",
+                dropped.join(", ")
+            )
+        }
+        _ => "non-object `stream_options` was dropped; the build side reconstructs only \
+              `include_usage` (per `OpenAiChatCompletionsOptions`)"
+            .to_owned(),
+    };
+    warnings.push(warn(
+        WarningCode::StreamOptionsDropped,
+        "/stream_options",
+        message,
+    ));
 }
 
 /// Parses a 2xx `chat.completion` body into the IR (§ 8). Reads the first

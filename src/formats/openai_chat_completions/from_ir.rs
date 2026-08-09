@@ -578,6 +578,12 @@ fn encode_role_content(
 
 /// Serializes an assistant message: native thinking → `reasoning_content`,
 /// text/refusal blocks → `content`, tool calls → `tool_calls[]`.
+///
+/// The wire message holds one field per channel, so only canonical block
+/// order (thinking → content → tool calls) survives a round trip:
+/// serializing an interleaved sequence warns `BlockOrderLost` (semantic),
+/// and joining several thinking texts into the single `reasoning_content`
+/// string warns `ThinkingBlocksJoined` (cosmetic).
 fn build_assistant_message(
     msg: &Message,
     mi: usize,
@@ -591,9 +597,35 @@ fn build_assistant_message(
     let mut calls: Vec<Value> = Vec::new();
     let mut thinking_extras: Vec<&Extra> = Vec::new();
 
+    // Channel-order tracking, in canonical wire order. Only blocks that
+    // actually reach a wire channel participate: dropped blocks (foreign
+    // thinking/opaque, assistant images) carry their own warnings and
+    // have no wire position to lose.
+    const THINKING: u8 = 0;
+    const CONTENT: u8 = 1;
+    const TOOL_CALLS: u8 = 2;
+    let mut max_channel = THINKING;
+    let mut order_lost = false;
+    let mut reached = |channel: u8| {
+        if channel < max_channel {
+            order_lost = true;
+        } else {
+            max_channel = channel;
+        }
+    };
+
     for (bi, block) in msg.content.iter().enumerate() {
         match block {
-            ContentBlock::Text { .. } | ContentBlock::Opaque { .. } => text_blocks.push(block),
+            ContentBlock::Text { .. } => {
+                reached(CONTENT);
+                text_blocks.push(block);
+            }
+            ContentBlock::Opaque { format, .. } => {
+                if format == FORMAT {
+                    reached(CONTENT);
+                }
+                text_blocks.push(block);
+            }
             ContentBlock::Thinking {
                 text,
                 signature,
@@ -602,6 +634,7 @@ fn build_assistant_message(
                 let ptr = format!("{msg_ptr}/reasoning_content");
                 if is_native_thinking(extra) {
                     if let Some(text) = text {
+                        reached(THINKING);
                         thinking_texts.push(text.clone());
                     }
                     if signature.is_some() {
@@ -616,6 +649,7 @@ fn build_assistant_message(
                 } else if options.thinking_as_text
                     && let Some(text) = text
                 {
+                    reached(THINKING);
                     thinking_texts.push(text.clone());
                     if signature.is_some() {
                         warnings.push(warn(
@@ -641,6 +675,7 @@ fn build_assistant_message(
                 cache,
                 extra,
             } => {
+                reached(TOOL_CALLS);
                 let ptr = format!("{msg_ptr}/tool_calls/{}", calls.len());
                 if cache.is_some() {
                     warnings.push(warn(
@@ -675,6 +710,28 @@ fn build_assistant_message(
                 .into());
             }
         }
+    }
+
+    if order_lost {
+        warnings.push(warn(
+            WarningCode::BlockOrderLost,
+            msg_ptr.to_owned(),
+            "assistant blocks interleave across the reasoning_content / content / \
+             tool_calls channels; the wire message holds one field per channel, so \
+             parsing it back yields canonical order (thinking, content, tool calls) \
+             and the original block order is lost",
+        ));
+    }
+    if thinking_texts.len() > 1 {
+        warnings.push(warn(
+            WarningCode::ThinkingBlocksJoined,
+            format!("{msg_ptr}/reasoning_content"),
+            format!(
+                "{} thinking texts were joined with \"\\n\\n\" into the single \
+                 `reasoning_content` string; block boundaries are lost (order kept)",
+                thinking_texts.len()
+            ),
+        ));
     }
 
     let mut item = json!({"role": "assistant"});

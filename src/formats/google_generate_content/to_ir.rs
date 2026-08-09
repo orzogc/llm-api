@@ -10,7 +10,7 @@ use crate::format::ResponseMeta;
 use crate::format::ids::GOOGLE_GENERATE_CONTENT as ID;
 use crate::ir::{
     ContentBlock, Effort, Extra, ImageSource, Message, OutputFormat, Reasoning, Request, Response,
-    StopReason, Tool, ToolChoice, ToolOutputBlock, Usage, normalize_stop_reason,
+    Role, StopReason, Tool, ToolChoice, ToolOutputBlock, Usage, normalize_stop_reason,
 };
 
 use super::types;
@@ -61,7 +61,9 @@ fn clamp_opt(v: Option<i64>) -> Option<u64> {
 pub(crate) fn usage_from_metadata(u: &types::UsageMetadata) -> Usage {
     let mut usage = Usage {
         input_tokens: clamp(u.prompt_token_count),
-        output_tokens: clamp(u.candidates_token_count) + clamp(u.thoughts_token_count),
+        // Saturating so misbehaving provider counts cannot overflow the sum.
+        output_tokens: clamp(u.candidates_token_count)
+            .saturating_add(clamp(u.thoughts_token_count)),
         total_tokens: clamp_opt(u.total_token_count),
         cache_read_tokens: clamp_opt(u.cached_content_token_count),
         reasoning_tokens: clamp_opt(u.thoughts_token_count),
@@ -113,6 +115,16 @@ fn part_ns(part: &types::Part) -> Map<String, Value> {
         ns.insert("thoughtSignature".to_owned(), json!(sig));
     }
     ns
+}
+
+/// Builds the `Text` block for a `systemInstruction` text part (wire
+/// modifiers such as `thought` ride the block's namespace verbatim).
+fn system_text_block(part: &types::Part) -> ContentBlock {
+    ContentBlock::Text {
+        text: part.text.clone().unwrap_or_default(),
+        cache: None,
+        extra: Extra::from_unknown(ID, part_ns(part)),
+    }
 }
 
 /// Classifies a model-content part (§ 8 / § 9 shared logic).
@@ -430,47 +442,72 @@ pub fn request_to_ir(body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)> {
     let mut req = Request::new();
     let mut extra_ns = wire.extra;
 
-    // systemInstruction → Request.system (§ 7.1).
+    // systemInstruction → Request.system (§ 7.1). Request.system is
+    // Text-only, so an out-of-schema non-text part forces the *whole*
+    // instruction into a leading System message instead (text parts →
+    // `Text`, others → same-format `Opaque`, part order kept); § 7.1 hoists
+    // leading System messages back into `systemInstruction`, keeping the
+    // wire round-trip the identity and losing nothing.
     if let Some(si) = wire.system_instruction {
-        let mut system = Vec::new();
-        for (pi, part) in si.parts.iter().enumerate() {
-            if part.text.is_some() && union_members(part) == 1 {
-                let mut ns = part.extra.clone();
-                if part.thought == Some(true) {
-                    ns.insert("thought".to_owned(), json!(true));
-                }
-                if let Some(sig) = &part.thought_signature {
-                    ns.insert("thoughtSignature".to_owned(), json!(sig));
-                }
-                system.push(ContentBlock::Text {
-                    text: part.text.clone().unwrap_or_default(),
-                    cache: None,
-                    extra: Extra::from_unknown(ID, ns),
-                });
-            } else {
-                warn(
-                    &mut warnings,
-                    WarningCode::MalformedField,
-                    format!("/systemInstruction/parts/{pi}"),
-                    "systemInstruction accepts text parts only; the part was skipped",
-                );
+        let text_only = si
+            .parts
+            .iter()
+            .all(|part| part.text.is_some() && union_members(part) == 1);
+        if text_only {
+            let system: Vec<ContentBlock> = si.parts.iter().map(system_text_block).collect();
+            if !system.is_empty() {
+                req.system = Some(system);
             }
-        }
-        if !system.is_empty() {
-            req.system = Some(system);
-        }
-        if !si.extra.is_empty() {
-            extra_ns.insert("systemInstruction".to_owned(), Value::Object(si.extra));
+            if !si.extra.is_empty() {
+                extra_ns.insert("systemInstruction".to_owned(), Value::Object(si.extra));
+            }
+        } else {
+            let blocks: Vec<ContentBlock> = si
+                .parts
+                .iter()
+                .enumerate()
+                .map(|(pi, part)| {
+                    if part.text.is_some() && union_members(part) == 1 {
+                        system_text_block(part)
+                    } else {
+                        warn(
+                            &mut warnings,
+                            WarningCode::MalformedField,
+                            format!("/systemInstruction/parts/{pi}"),
+                            "systemInstruction accepts text parts only; the part was kept as an opaque block and round-trips verbatim",
+                        );
+                        opaque_part(part)
+                    }
+                })
+                .collect();
+            let mut msg = Message::new(Role::System, blocks);
+            if !si.extra.is_empty() {
+                msg.extra = Extra::from_unknown(ID, si.extra);
+            }
+            req.messages.push(msg);
         }
     }
 
-    // contents → messages, splitting mixed user turns.
+    // contents → messages, splitting mixed user turns. The documented role
+    // union is closed (`user` / `model`, optional), and non-`model` roles
+    // behave as `user` upstream — keep that behavior, warning only when an
+    // out-of-schema value was actually present.
     let mut group = 0u64;
     for (ci, content) in wire.contents.iter().enumerate() {
         if content.role.as_deref() == Some("model") {
             req.messages
                 .push(assistant_message(content, ci, &mut warnings));
         } else {
+            if let Some(role) = content.role.as_deref()
+                && role != "user"
+            {
+                warn(
+                    &mut warnings,
+                    WarningCode::MalformedField,
+                    format!("/contents/{ci}/role"),
+                    format!("unknown content role `{role}`; treated as user"),
+                );
+            }
             req.messages
                 .extend(split_user_content(content, ci, &mut group, &mut warnings));
         }

@@ -11,10 +11,14 @@
 //!   `:streamGenerateContent?alt=sse`; auth header `x-goog-api-key`.
 //! - `Request.system` and the leading run of system messages become
 //!   `systemInstruction`; mid-conversation system and developer messages
-//!   downgrade to `user` with a warning. Adjacent `User`/`Tool` messages
-//!   merge into one `user` turn and adjacent `Assistant` messages into one
-//!   `model` turn — Google requires role alternation; parsed mixed turns are
-//!   split back apart carrying turn-group metadata.
+//!   downgrade to `user` with a warning. A parsed `systemInstruction` maps to
+//!   `Request.system` when text-only; with any out-of-schema non-text part it
+//!   parses as a leading `System` message (text + same-format opaque blocks)
+//!   instead, which the hoist rule serializes back — nothing is lost.
+//! - Adjacent `User`/`Tool` messages merge into one `user` turn and adjacent
+//!   `Assistant` messages into one `model` turn — Google requires role
+//!   alternation; parsed mixed turns are split back apart carrying
+//!   turn-group metadata.
 //! - `ToolResult.is_error: true` maps to the documented
 //!   `functionResponse.response` failure key `{"error": …}` (and back);
 //!   `is_error: false` canonicalizes to the plain `{"output": …}` encoding.
@@ -28,7 +32,10 @@
 //!   text block has no wire location on Google (the text is flattened into
 //!   `response`) and drops with an `ExtraDropped` warning; explicit
 //!   `thought: false` and content `role` defaults canonicalize to their
-//!   absent forms.
+//!   absent forms; a `tools` entry combining `functionDeclarations` with
+//!   hosted tool members splits into one entry per kind on round-trip — an
+//!   upstream-equivalent form (the official tool-combination examples list
+//!   the combined tools as separate entries).
 
 pub mod types;
 

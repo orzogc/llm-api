@@ -165,7 +165,7 @@ impl Default for Limits {
 ///
 /// Capabilities are decoupled: `models` / `count_tokens` may use their own
 /// format, URL, auth and headers. When unset they derive from `chat` —
-/// same format and URL, inherited auth and headers — but only when
+/// same format, URL, auth and headers — but only when
 /// [`ProviderConfig::chat`] uses a base URL; a full chat URL cannot be
 /// reliably decomposed, so those capabilities then return
 /// [`crate::error::Error::NotSupported`] unless configured explicitly.

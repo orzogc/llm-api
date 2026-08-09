@@ -18,6 +18,13 @@
 //!   re-serialized; mid-conversation `System` messages stay in-array
 //!   (`AnthropicOptions.downgrade_mid_system` converts them to `user`).
 //!   `Developer` messages always downgrade to `user` with a warning.
+//! - A top-level `system` array whose entries are all `text` parses into
+//!   `Request.system`; with any non-text entry the whole array parses as a
+//!   marker-less leading `System` message (non-text entries as `Opaque`
+//!   blocks), which the combine rule hoists back on re-serialization.
+//! - A wire message with an unknown role parses to a lone `Opaque` block
+//!   holding the whole message; the build side re-emits it verbatim as a
+//!   standalone wire message, excluded from every merge.
 //! - Thinking: `enabled: true` → `{type: "adaptive"}`, `enabled: false` →
 //!   `{type: "disabled"}`, `include_thoughts` → `thinking.display`;
 //!   `budget_tokens` is unmodeled and round-trips via the reasoning
@@ -170,10 +177,19 @@ impl ApiFormat for AnthropicMessages {
                 .and_then(system_time_from_rfc3339);
             models.push(model);
         }
-        let next = if page.has_more == Some(true) {
-            page.last_id
-        } else {
-            None
+        // has_more without a usable cursor would silently truncate the
+        // paginated listing — malformed pagination is a hard parse error.
+        let next = match page.has_more {
+            Some(true) => match page.last_id {
+                Some(id) if !id.is_empty() => Some(id),
+                _ => {
+                    return Err(Error::Parse {
+                        message: "malformed pagination: has_more=true without last_id".to_owned(),
+                        raw: bytes::Bytes::copy_from_slice(body),
+                    });
+                }
+            },
+            _ => None,
         };
         Ok((models, next))
     }

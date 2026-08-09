@@ -245,7 +245,8 @@ enum ItemKind {
     /// A `function_call_output` item → its own `Tool` message.
     FunctionCallOutput,
     /// Everything else: assistant messages, `reasoning`, `function_call`,
-    /// and unmodeled items (grouped into the current assistant run).
+    /// unknown-role `message` items and unmodeled items (grouped into the
+    /// current assistant run; unmapped ones stay `Opaque`).
     AssistantSide,
 }
 
@@ -673,13 +674,28 @@ pub(crate) fn assistant_item_to_blocks(
 }
 
 /// Parses an assistant `message` item into `Text` blocks. An item holding
-/// an unmodeled part kind is kept whole as `Opaque` so its wire shape
-/// (part vs. top-level item) survives re-serialization.
+/// an unmodeled part kind, or one whose role is unknown, is kept whole as
+/// `Opaque` so its wire shape (role, part vs. top-level item) survives
+/// re-serialization.
 fn message_item_to_assistant_blocks(
     item: &Value,
     ptr: &str,
     warnings: &mut Vec<ConversionWarning>,
 ) -> Vec<ContentBlock> {
+    // Known input roles were routed off by `classify_item`, so any
+    // non-`assistant` role here is unknown. Rewriting it to `assistant`
+    // would silently change semantics — keep the whole item verbatim
+    // instead (re-emitted in place, like unmodeled item types).
+    if let Some(role) = item.get("role").and_then(Value::as_str)
+        && role != "assistant"
+    {
+        warnings.push(warn(
+            WarningCode::MalformedField,
+            ptr.to_owned(),
+            format!("message item with unknown role `{role}` was kept verbatim"),
+        ));
+        return vec![ContentBlock::opaque(FORMAT, item.clone())];
+    }
     let wire: types::MessageItem = match serde_json::from_value(item.clone()) {
         Ok(w) => w,
         Err(e) => {

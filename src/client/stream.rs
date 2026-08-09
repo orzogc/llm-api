@@ -113,7 +113,9 @@ impl StreamHandle {
     }
 
     /// Queues a fatal error and stops pumping. `BodyTooLarge` errors from
-    /// the SSE parser get the response status/headers filled in.
+    /// the SSE parser get the response status/headers filled in; `Api`
+    /// errors built by a stream parser from an in-stream error event get
+    /// the response headers and `retry_after` filled in.
     fn fatal(&mut self, mut error: Error) {
         if let Error::BodyTooLarge {
             status, headers, ..
@@ -122,6 +124,24 @@ impl StreamHandle {
             status.get_or_insert(self.status);
             if headers.is_none() {
                 *headers = Some(self.headers.clone());
+            }
+        }
+        if let Error::Api {
+            headers,
+            retry_after,
+            ..
+        } = &mut error
+        {
+            // An empty header map is the parser-constructed sentinel: a
+            // real HTTP response always carries headers, and stream parsers
+            // only see the event body. A non-empty map is preserved — a
+            // third-party parser may have set it deliberately. `status` is
+            // left alone (200 could be either the sentinel or genuine).
+            if headers.is_empty() {
+                *headers = self.headers.clone();
+            }
+            if retry_after.is_none() {
+                *retry_after = crate::error::retry_after_from_headers(&self.headers);
             }
         }
         self.queue.push_back(Err(error));

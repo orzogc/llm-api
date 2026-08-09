@@ -31,8 +31,10 @@
 //! - Assistant messages: native thinking → `reasoning_content` (see
 //!   below), text / refusal-marked blocks → `content`, `ToolCall` blocks →
 //!   `tool_calls[]` (an id is required — `ConversionError` when absent).
-//!   Assistant images drop with a semantic warning (parse-only channel,
-//!   § 7.4).
+//!   The wire message holds one field per channel, so only canonical block
+//!   order (thinking → content → tool calls) survives; serializing an
+//!   interleaved sequence warns `BlockOrderLost` (semantic). Assistant
+//!   images drop with a semantic warning (parse-only channel, § 7.4).
 //! - `Tool` messages: one `role: "tool"` wire message per `ToolResult`
 //!   (`tool_call_id` required). Content is text-only: images drop with
 //!   `ToolResultImageDropped`; a single plain non-empty text uses the
@@ -59,7 +61,8 @@
 //! carries this namespace or no format namespace at all — plaintext
 //! thinking with no provenance is native to Chat Completions. Native
 //! blocks emit their text (several join with `"\n\n"` — the wire field is
-//! a single string); a signature has no channel and drops with
+//! a single string — adding a cosmetic `ThinkingBlocksJoined` warning);
+//! a signature has no channel and drops with
 //! `ThinkingSignatureDropped`. Foreign blocks drop with `ThinkingDropped`
 //! unless `ConvertOptions.thinking_as_text` re-emits their text.
 //! `ConvertOptions.fill_missing_thinking` genuinely helps here — the
@@ -98,12 +101,13 @@
 //! everything else uses the part-array form; a string `stop` becomes a
 //! one-element array; legacy `max_tokens` becomes `max_completion_tokens`;
 //! `model`, `stream` and `stream_options` are configuration, not IR data,
-//! and are consumed on parse; explicit `null` fields (e.g. assistant
-//! `content: null`) canonicalize to absent; a message-level `refusal`
-//! field becomes a `refusal` content part. Streaming `logprobs` and chunk
-//! envelope fields (`system_fingerprint`, `obfuscation`, …) are
-//! known-ignorable and not surfaced — use the `include_raw` call option
-//! for the raw payloads.
+//! and are consumed on parse (`stream_options` members other than
+//! `include_usage` warn `StreamOptionsDropped`); explicit `null` fields
+//! (e.g. assistant `content: null`) canonicalize to absent; a
+//! message-level `refusal` field becomes a `refusal` content part.
+//! Streaming `logprobs` and chunk envelope fields (`system_fingerprint`,
+//! `obfuscation`, …) are known-ignorable and not surfaced — use the
+//! `include_raw` call option for the raw payloads.
 
 mod from_ir;
 mod stream;

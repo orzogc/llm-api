@@ -79,7 +79,8 @@ pub struct Request {
     /// Streaming options (`include_usage`, `include_obfuscation`).
     /// Streaming configuration tied to `stream`; consumed on parse — the
     /// build side re-injects `include_usage` per
-    /// [`crate::OpenAiChatCompletionsOptions`].
+    /// [`crate::OpenAiChatCompletionsOptions`]; members other than
+    /// `include_usage` warn (`StreamOptionsDropped`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<Value>,
     /// Unknown fields (`n`, `logit_bias`, `service_tier`, dialect knobs,

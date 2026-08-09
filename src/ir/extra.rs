@@ -155,11 +155,24 @@ pub fn merge_patch(target: &mut Value, patch: &Map<String, Value>, base: &str, l
                 log.ops.push((MergeOpKind::Deleted, ptr));
             }
             Value::Object(po) => {
-                let entry = obj.entry(key.clone()).or_insert(Value::Object(Map::new()));
-                if !entry.is_object() {
-                    *entry = Value::Object(Map::new());
-                    log.ops.push((MergeOpKind::SetTree, ptr.clone()));
-                }
+                // Only a merge into a pre-existing object leaves the target
+                // subtree in place; creating the object at a vacant key or
+                // replacing a non-object rebuilds it and is recorded as
+                // `SetTree` (an exact-pointer override, § 6).
+                let entry = match obj.entry(key.clone()) {
+                    serde_json::map::Entry::Vacant(vacant) => {
+                        log.ops.push((MergeOpKind::SetTree, ptr.clone()));
+                        vacant.insert(Value::Object(Map::new()))
+                    }
+                    serde_json::map::Entry::Occupied(occupied) => {
+                        let entry = occupied.into_mut();
+                        if !entry.is_object() {
+                            *entry = Value::Object(Map::new());
+                            log.ops.push((MergeOpKind::SetTree, ptr.clone()));
+                        }
+                        entry
+                    }
+                };
                 merge_patch(entry, po, &ptr, log);
             }
             other => {
@@ -250,6 +263,81 @@ mod tests {
         assert!(!log.overrides("/a/y"));
         // The set leaf itself is.
         assert!(log.overrides("/a/x"));
+    }
+
+    #[test]
+    fn vacant_object_creation_records_set_tree_at_every_level() {
+        let mut target = json!({});
+        let mut log = MergeLog::new();
+        merge_patch(
+            &mut target,
+            &patch_of(json!({"a": {"b": {"c": 1}}})),
+            "",
+            &mut log,
+        );
+        assert_eq!(target, json!({"a": {"b": {"c": 1}}}));
+        // Every created level is an exact-pointer override…
+        assert!(log.overrides("/a"));
+        assert!(log.overrides("/a/b"));
+        assert!(log.overrides("/a/b/c"));
+        // …but `SetTree` is not an ancestor override for untouched paths.
+        assert!(!log.overrides("/a/other"));
+        assert!(!log.overrides("/a/b/other"));
+    }
+
+    #[test]
+    fn vacant_empty_object_creation_is_recorded() {
+        let mut target = json!({});
+        let mut log = MergeLog::new();
+        merge_patch(&mut target, &patch_of(json!({"a": {}})), "", &mut log);
+        assert_eq!(target, json!({"a": {}}));
+        assert!(log.overrides("/a"));
+
+        // An empty-object merge into an existing object records nothing.
+        let mut target = json!({"a": {"x": 1}});
+        let mut log = MergeLog::new();
+        merge_patch(&mut target, &patch_of(json!({"a": {}})), "", &mut log);
+        assert_eq!(target, json!({"a": {"x": 1}}));
+        assert!(!log.overrides("/a"));
+    }
+
+    #[test]
+    fn vacant_create_and_non_object_replace_override_identically() {
+        let patch = patch_of(json!({"a": {"x": 1}}));
+        let mut logs = Vec::new();
+        for mut target in [json!({}), json!({"a": 5})] {
+            let mut log = MergeLog::new();
+            merge_patch(&mut target, &patch, "", &mut log);
+            assert_eq!(target, json!({"a": {"x": 1}}));
+            logs.push(log);
+        }
+        for pointer in ["/a", "/a/x", "/a/y", "/a/x/deep"] {
+            assert_eq!(
+                logs[0].overrides(pointer),
+                logs[1].overrides(pointer),
+                "override result must not depend on vacant-vs-replace at {pointer}"
+            );
+        }
+        assert!(logs[0].overrides("/a"));
+        assert!(logs[0].overrides("/a/x"));
+        assert!(!logs[0].overrides("/a/y"));
+    }
+
+    #[test]
+    fn merge_into_existing_object_still_records_no_set_tree() {
+        let mut target = json!({"gen": {"keep": 1}});
+        let mut log = MergeLog::new();
+        merge_patch(
+            &mut target,
+            &patch_of(json!({"gen": {"new": 2}})),
+            "",
+            &mut log,
+        );
+        assert_eq!(target, json!({"gen": {"keep": 1, "new": 2}}));
+        // The pre-existing object was merged, not rebuilt.
+        assert!(!log.overrides("/gen"));
+        assert!(log.overrides("/gen/new"));
+        assert!(!log.overrides("/gen/keep"));
     }
 
     #[test]

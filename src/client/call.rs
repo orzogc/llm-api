@@ -141,8 +141,8 @@ impl Client {
     /// Lists models, auto-paginating to exhaustion (§ 13).
     ///
     /// The endpoint is [`ProviderConfig::models`] when set; otherwise it
-    /// derives from the chat endpoint (same format and URL, inherited auth
-    /// and headers) — but only when the chat URL is a base URL; with a full
+    /// derives from the chat endpoint (same format, URL, auth and headers)
+    /// — but only when the chat URL is a base URL; with a full
     /// chat URL and no explicit config this returns
     /// [`Error::NotSupported`]. A pagination cursor equal to one already
     /// seen aborts with `Error::Parse` (malformed pagination) instead of
@@ -441,7 +441,10 @@ fn resolve_auth(
 
 /// Resolves a secondary (models / count-tokens) endpoint: the explicit
 /// config when present, else derived from the chat endpoint when its URL
-/// is a base URL, else `NotSupported`.
+/// is a base URL, else `NotSupported`. A derived endpoint is the chat
+/// endpoint itself (same format, URL, auth and headers) — only the
+/// capability path differs, and that is appended by the format's build
+/// functions from the base URL.
 fn resolve_secondary_endpoint(
     provider: &ProviderConfig,
     explicit: Option<&EndpointConfig>,
@@ -451,10 +454,7 @@ fn resolve_secondary_endpoint(
         return Ok(endpoint.clone());
     }
     match &provider.chat.url {
-        EndpointUrl::Base(_) => Ok(EndpointConfig::new(
-            provider.chat.format.clone(),
-            provider.chat.url.clone(),
-        )),
+        EndpointUrl::Base(_) => Ok(provider.chat.clone()),
         EndpointUrl::Full(_) => Err(Error::NotSupported(not_supported)),
     }
 }

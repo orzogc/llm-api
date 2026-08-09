@@ -251,8 +251,12 @@ pub struct AnthropicOptions {
     pub version: Option<String>,
     /// Beta flags, joined into an `anthropic-beta` header.
     pub betas: Vec<String>,
-    /// Converts mid-conversation system messages to `user` + warning for
-    /// dialect providers without in-array system support (§ 7.1).
+    /// Converts mid-conversation system messages to `user` + warning
+    /// (§ 7.1). In-array `system` messages are GA on the Anthropic API (no
+    /// beta header) but model-gated: Claude Opus 4.8 / Opus 5 / Fable 5 /
+    /// Mythos 5 accept them; Sonnet 5 and earlier models return 400
+    /// ("role 'system' is not supported on this model"). Set `true` for
+    /// such models and for dialect providers without in-array support.
     pub downgrade_mid_system: bool,
     /// Merges adjacent same-role messages for dialect providers that do
     /// not auto-merge; signed blocks are merge barriers (§ 7.5).
@@ -379,6 +383,10 @@ pub trait StreamParser: Send {
 /// `messages` lists `(JSON pointer, role)` for each serialized
 /// target-format message, in serialized order — after the splits, merges
 /// and downgrades of § 7. Top-level system channels are not visited.
+/// Index and role are a serialization-time snapshot: a message whose
+/// pointer the request-level `extra` merge overrode (e.g. the whole
+/// message array was replaced) is not visited — use `on_request` to edit
+/// wholesale-rewritten arrays.
 pub fn finalize_request(
     body: &mut Value,
     warnings: &mut [ConversionWarning],
@@ -395,8 +403,15 @@ pub fn finalize_request(
     crate::convert::strict_gate(strict, warnings)?;
     if let Some(on_message) = &hooks.on_message {
         for (index, (pointer, role)) in messages.iter().enumerate() {
-            // A pointer that no longer resolves (e.g. the request-level
-            // `extra` rewrote the message array) is skipped defensively.
+            // A message the `extra` merge overrode (its exact pointer, or a
+            // scalar/array set or delete at an ancestor — e.g. a replaced
+            // message array) is skipped: the pointer may now resolve to a
+            // different message, and calling the hook with the snapshotted
+            // index/role would silently misattribute it.
+            if merge_log.overrides(pointer) {
+                continue;
+            }
+            // A pointer that no longer resolves is skipped defensively.
             if let Some(value) = body.pointer_mut(pointer) {
                 on_message(index, role, value).map_err(Error::Hook)?;
             }
@@ -786,6 +801,85 @@ mod tests {
         assert!(warnings[0].overridden);
         assert_eq!(body["messages"][0]["hooked"], json!(true));
         assert_eq!(body["done"], json!(true));
+    }
+
+    #[test]
+    fn finalize_request_skips_on_message_for_extra_overridden_pointers() {
+        use crate::ir::{MergeLog, Role, merge_patch};
+        use serde_json::json;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // The request-level extra replaces the whole message array
+        // (SetScalar at /messages): every /messages/N pointer is overridden
+        // and the hook must not run against the rewritten messages.
+        let mut body = json!({"messages": [{"role": "user", "content": "hi"}]});
+        let mut log = MergeLog::new();
+        let Value::Object(patch) = json!({
+            "messages": [
+                {"role": "system", "content": "injected"},
+                {"role": "user", "content": "hi"},
+            ]
+        }) else {
+            unreachable!()
+        };
+        merge_patch(&mut body, &patch, "", &mut log);
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let hooks = RequestHooks::new()
+            .with_on_message(move |_, _, _| {
+                seen.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .with_on_request(|value| {
+                value["done"] = json!(true);
+                Ok(())
+            });
+        finalize_request(
+            &mut body,
+            &mut [],
+            &log,
+            false,
+            &hooks,
+            &[("/messages/0".to_owned(), Role::User)],
+        )
+        .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "on_message must not run on extra-rewritten messages"
+        );
+        // on_request still runs — it is the intended tool for wholesale
+        // array rewrites.
+        assert_eq!(body["done"], json!(true));
+
+        // An extra merge that does not touch the message pointers leaves
+        // the hook calls intact.
+        let mut body = json!({"messages": [{"role": "user", "content": "hi"}]});
+        let mut log = MergeLog::new();
+        let Value::Object(patch) = json!({"top_k": 40}) else {
+            unreachable!()
+        };
+        merge_patch(&mut body, &patch, "", &mut log);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let hooks = RequestHooks::new().with_on_message(move |index, role, _| {
+            assert_eq!(index, 0);
+            assert_eq!(*role, Role::User);
+            seen.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        finalize_request(
+            &mut body,
+            &mut [],
+            &log,
+            false,
+            &hooks,
+            &[("/messages/0".to_owned(), Role::User)],
+        )
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

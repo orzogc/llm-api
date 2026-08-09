@@ -20,7 +20,9 @@
 //!   → `function_call`), order preserved; each `ToolResult` of a `Tool`
 //!   message becomes one `function_call_output` item. Parsing groups
 //!   consecutive assistant-side items back into one assistant message and
-//!   gives every `function_call_output` its own `Tool` message.
+//!   gives every `function_call_output` its own `Tool` message. A
+//!   `message` item with an unknown role parses to an `Opaque` block
+//!   (`MalformedField` warning) and is re-emitted verbatim, in place.
 //! - `max_output_tokens` / `temperature` / `top_p` / `metadata` /
 //!   `prompt_cache_key` map directly; `stop_sequences` is dropped with a
 //!   semantic warning; `top_k` / `seed` / penalties drop with cosmetic

@@ -10,10 +10,10 @@ use llm_api::formats::openai_chat_completions::{
     OpenAiChatCompletions, request_from_ir, request_to_ir, response_to_ir,
 };
 use llm_api::{
-    ApiFormat, BuildCtx, BuiltRequest, CacheHint, CallMode, ContentBlock, ConversionError,
-    ConvertOptions, Effort, EndpointUrl, Error, FunctionTool, ImageSource, Message,
-    OpenAiChatCompletionsOptions, OrphanToolCalls, OutputFormat, Reasoning, Request, RequestHooks,
-    ResponseMeta, Role, StopReason, Tool, ToolChoice, ToolOutputBlock, WarningCode,
+    ApiFormat, BuildCtx, BuiltRequest, CacheHint, CallMode, ContentBlock, ConversionDirection,
+    ConversionError, ConvertOptions, Effort, EndpointUrl, Error, FunctionTool, ImageSource,
+    Message, OpenAiChatCompletionsOptions, OrphanToolCalls, OutputFormat, Reasoning, Request,
+    RequestHooks, ResponseMeta, Role, StopReason, Tool, ToolChoice, ToolOutputBlock, WarningCode,
     WarningSeverity,
 };
 
@@ -431,7 +431,9 @@ fn assistant_refusal_blocks_become_refusal_parts() {
 
 #[test]
 fn assistant_thinking_provenance() {
-    // Multiple native plaintext blocks join with a blank line.
+    // Multiple native plaintext blocks join with a blank line — the lost
+    // block boundaries are a cosmetic ThinkingBlocksJoined (order kept,
+    // so no BlockOrderLost).
     let msg = Message::assistant(vec![
         ContentBlock::thinking("First."),
         ContentBlock::thinking("Second."),
@@ -443,7 +445,10 @@ fn assistant_thinking_provenance() {
         body["messages"][0]["reasoning_content"],
         json!("First.\n\nSecond.")
     );
-    assert!(built.warnings.is_empty());
+    assert_eq!(built.warnings.len(), 1, "{:?}", built.warnings);
+    assert_eq!(built.warnings[0].code, WarningCode::ThinkingBlocksJoined);
+    assert_eq!(built.warnings[0].severity, WarningSeverity::Cosmetic);
+    assert_eq!(built.warnings[0].location, "/messages/0/reasoning_content");
 
     // A signature has no plaintext channel: text kept, signature dropped.
     let msg = Message::assistant(vec![ContentBlock::thinking_signed("plan", "sig")]);
@@ -493,6 +498,140 @@ fn assistant_thinking_provenance() {
         body["messages"][0]["reasoning_details"],
         json!([{"type": "x"}])
     );
+}
+
+#[test]
+fn assistant_interleaved_blocks_warn_block_order_lost() {
+    // Thinking after content cannot keep its position: the wire message
+    // holds one field per channel.
+    let msg = Message::assistant(vec![
+        ContentBlock::thinking("First."),
+        ContentBlock::text("One."),
+        ContentBlock::thinking("Second."),
+        ContentBlock::text("Two."),
+    ]);
+    let req = Request::with_messages(vec![msg]);
+    let built = build(&req);
+    let order: Vec<_> = built
+        .warnings
+        .iter()
+        .filter(|w| w.code == WarningCode::BlockOrderLost)
+        .collect();
+    assert_eq!(order.len(), 1, "{:?}", built.warnings);
+    assert_eq!(order[0].severity, WarningSeverity::Semantic);
+    assert_eq!(order[0].location, "/messages/0");
+    let joined: Vec<_> = built
+        .warnings
+        .iter()
+        .filter(|w| w.code == WarningCode::ThinkingBlocksJoined)
+        .collect();
+    assert_eq!(joined.len(), 1);
+    assert_eq!(joined[0].severity, WarningSeverity::Cosmetic);
+    assert_eq!(built.warnings.len(), 2, "{:?}", built.warnings);
+    // Every text still reaches the wire, per channel.
+    let body = body_of(&built);
+    assert_eq!(
+        body["messages"][0]["reasoning_content"],
+        json!("First.\n\nSecond.")
+    );
+    assert_eq!(
+        body["messages"][0]["content"],
+        json!([
+            {"type": "text", "text": "One."},
+            {"type": "text", "text": "Two."},
+        ])
+    );
+
+    // Strict mode escalates the semantic order loss.
+    let mut strict_ctx = ctx(CallMode::Unary);
+    strict_ctx.convert.strict = true;
+    assert!(matches!(
+        OpenAiChatCompletions
+            .build_request(&req, &strict_ctx)
+            .unwrap_err(),
+        Error::Conversion(ConversionError::Strict { .. })
+    ));
+}
+
+#[test]
+fn assistant_text_after_tool_call_warns_block_order_lost() {
+    let msg = Message::assistant(vec![
+        ContentBlock::text("before"),
+        ContentBlock::tool_call_with_id("c1", "f", "{}"),
+        ContentBlock::text("after"),
+    ]);
+    let tool = Message::tool(vec![ContentBlock::tool_result_text(
+        Some("c1".into()),
+        "ok",
+    )]);
+    let built = build(&Request::with_messages(vec![msg, tool]));
+    let w = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::BlockOrderLost)
+        .unwrap();
+    assert_eq!(w.location, "/messages/0");
+    // A single thinking text at most: no join warning here.
+    assert!(!has_code(
+        &built.warnings,
+        &WarningCode::ThinkingBlocksJoined
+    ));
+}
+
+#[test]
+fn assistant_canonical_order_and_dropped_blocks_stay_quiet() {
+    // Canonical channel order never warns.
+    let msg = Message::assistant(vec![
+        ContentBlock::thinking("plan"),
+        ContentBlock::text("answer"),
+        ContentBlock::tool_call_with_id("c1", "f", "{}"),
+    ]);
+    let tool = Message::tool(vec![ContentBlock::tool_result_text(
+        Some("c1".into()),
+        "ok",
+    )]);
+    let built = build(&Request::with_messages(vec![msg, tool]));
+    assert!(built.warnings.is_empty(), "{:?}", built.warnings);
+
+    // A dropped foreign thinking block has no wire position: only its own
+    // ThinkingDropped fires.
+    let msg = Message::assistant(vec![
+        ContentBlock::text("a"),
+        ContentBlock::thinking("chain").with_extra("anthropic_messages", "x", 1),
+        ContentBlock::text("b"),
+    ]);
+    let built = build(&Request::with_messages(vec![msg.clone()]));
+    assert!(has_code(&built.warnings, &WarningCode::ThinkingDropped));
+    assert!(!has_code(&built.warnings, &WarningCode::BlockOrderLost));
+
+    // thinking_as_text re-emits it into the thinking channel — now the
+    // block genuinely moves and the order warning fires.
+    let mut tctx = ctx(CallMode::Unary);
+    tctx.convert.thinking_as_text = true;
+    let built = OpenAiChatCompletions
+        .build_request(&Request::with_messages(vec![msg]), &tctx)
+        .unwrap();
+    assert!(has_code(&built.warnings, &WarningCode::BlockOrderLost));
+}
+
+#[test]
+fn parsed_assistant_replays_without_order_warnings() {
+    // The parse side rebuilds blocks in canonical channel order, so
+    // same-format round trips add no order noise.
+    let wire = json!({
+        "messages": [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "answer", "reasoning_content": "think",
+             "tool_calls": [{"id": "c1", "type": "function",
+                             "function": {"name": "f", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+        ],
+    });
+    let (req, parse_warnings) = request_to_ir(&serde_json::to_vec(&wire).unwrap()).unwrap();
+    assert!(parse_warnings.is_empty(), "{parse_warnings:?}");
+    let (body, warnings) = from_ir_unary(&req);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(body["messages"], wire["messages"]);
 }
 
 #[test]
@@ -1300,6 +1439,47 @@ fn request_parse_canonicalizes_shorthands() {
         request_to_ir(br#"{"messages": [], "max_tokens": 5, "max_completion_tokens": 9}"#).unwrap();
     assert_eq!(req.max_output_tokens, Some(9));
     assert!(has_code(&warnings, &WarningCode::MalformedField));
+}
+
+#[test]
+fn stream_options_unknown_members_warn_on_parse() {
+    // Members beyond `include_usage` have no configuration equivalent and
+    // are consumed with a warning listing them.
+    let (req, warnings) = request_to_ir(
+        br#"{"stream": true,
+             "stream_options": {"include_usage": true, "include_obfuscation": false,
+                                "vendor_x": 1},
+             "messages": [{"role": "user", "content": "hi"}]}"#,
+    )
+    .unwrap();
+    let dropped: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.code == WarningCode::StreamOptionsDropped)
+        .collect();
+    assert_eq!(dropped.len(), 1, "{warnings:?}");
+    assert_eq!(dropped[0].severity, WarningSeverity::Cosmetic);
+    assert_eq!(dropped[0].location, "/stream_options");
+    assert_eq!(dropped[0].direction, ConversionDirection::FromFormat);
+    assert!(dropped[0].message.contains("`include_obfuscation`"));
+    assert!(dropped[0].message.contains("`vendor_x`"));
+    // Not mirrored into extra: a unary rebuild must not carry a bare
+    // `stream_options` (rejected upstream without `stream`).
+    assert!(req.extra.is_empty());
+    let (body, _) = from_ir_unary(&req);
+    assert!(body.get("stream_options").is_none());
+
+    // `include_usage` alone is fully covered by configuration — silent.
+    let (_, warnings) = request_to_ir(
+        br#"{"stream": true, "stream_options": {"include_usage": true},
+             "messages": [{"role": "user", "content": "hi"}]}"#,
+    )
+    .unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    // A non-object value cannot be reconstructed either.
+    let (_, warnings) =
+        request_to_ir(br#"{"stream": true, "stream_options": true, "messages": []}"#).unwrap();
+    assert!(has_code(&warnings, &WarningCode::StreamOptionsDropped));
 }
 
 #[test]

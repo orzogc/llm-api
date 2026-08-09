@@ -77,6 +77,11 @@ pub enum WarningCode {
     /// Google tool results split media from text; an interleaved sequence
     /// lost its order (§ 7.2).
     ToolResultOrderLost,
+    /// The target wire message holds one field per channel (CC assistant
+    /// `reasoning_content` / `content` / `tool_calls`); an interleaved
+    /// block sequence lost its order and replays in canonical channel
+    /// order.
+    BlockOrderLost,
     /// Unmatched tool calls in the middle of the conversation (never
     /// repaired).
     OrphanToolCalls,
@@ -134,6 +139,10 @@ pub enum WarningCode {
     /// Google tool results flatten multiple text blocks into one string
     /// (§ 7.2).
     ToolResultTextJoined,
+    /// Several thinking blocks were joined into the target's single
+    /// thinking-text channel (CC `reasoning_content`); block boundaries
+    /// were lost, order kept.
+    ThinkingBlocksJoined,
     /// `orphan_tool_calls: DropTrailing` removed unmatched trailing tool
     /// calls (opt-in policy executed as requested).
     OrphanToolCallsDropped,
@@ -152,6 +161,10 @@ pub enum WarningCode {
     /// A stream event could not be attributed to a block and surfaced as
     /// `Unknown`.
     UnknownStreamEvent,
+    /// CC `stream_options` members other than `include_usage` have no
+    /// configuration equivalent; they were consumed on parse and the
+    /// build side will not reconstruct them.
+    StreamOptionsDropped,
 }
 
 impl WarningCode {
@@ -175,6 +188,7 @@ impl WarningCode {
             | JsonModeUnsupported
             | RoleDowngraded
             | ToolResultOrderLost
+            | BlockOrderLost
             | OrphanToolCalls
             | ThinkingOrphaned
             | MissingThinkingWithToolCalls
@@ -195,11 +209,13 @@ impl WarningCode {
             | IncludeThoughtsUnsupported
             | ImageUrlAsFileUri
             | ToolResultTextJoined
+            | ThinkingBlocksJoined
             | OrphanToolCallsDropped
             | OrphanToolCallsSynthesized
             | MissingThinkingFilled
             | MalformedField
-            | UnknownStreamEvent => WarningSeverity::Cosmetic,
+            | UnknownStreamEvent
+            | StreamOptionsDropped => WarningSeverity::Cosmetic,
         }
     }
 }

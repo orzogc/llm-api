@@ -1128,6 +1128,107 @@ fn request_parse_mirrors_unmodeled_fields_into_extra() {
 }
 
 #[test]
+fn unknown_message_role_parses_to_opaque_with_warning() {
+    // A message item with a role outside user/system/developer/assistant
+    // must not be silently rewritten: it stays verbatim as `Opaque`.
+    let wire = json!({
+        "input": [
+            {"type": "message", "role": "critic", "content": [{"type": "input_text", "text": "meh"}]},
+        ],
+    });
+    let (req, warnings) = request_to_ir(&serde_json::to_vec(&wire).unwrap()).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedField);
+    assert_eq!(warnings[0].severity, WarningSeverity::Cosmetic);
+    assert_eq!(warnings[0].location, "/input/0");
+    assert_eq!(req.messages.len(), 1);
+    assert_eq!(req.messages[0].role, Role::Assistant);
+    assert_eq!(
+        req.messages[0].content,
+        vec![ContentBlock::opaque(F, wire["input"][0].clone())]
+    );
+}
+
+#[test]
+fn unknown_message_role_round_trips_verbatim() {
+    // Neither the role nor the content part types get canonicalized.
+    let wire = json!({
+        "input": [
+            {"type": "message", "role": "critic", "content": [
+                {"type": "input_text", "text": "meh"},
+                {"type": "custom_part", "data": 1},
+            ]},
+        ],
+    });
+    let (req, _) = request_to_ir(&serde_json::to_vec(&wire).unwrap()).unwrap();
+    let (body, build_warnings) =
+        request_from_ir(&req, None, CallMode::Unary, &ConvertOptions::default()).unwrap();
+    assert!(build_warnings.is_empty(), "{build_warnings:?}");
+    assert_eq!(body, wire);
+
+    // Idempotence: a second parse/serialize pass is a fixed point.
+    let (req2, _) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
+    let (body2, _) =
+        request_from_ir(&req2, None, CallMode::Unary, &ConvertOptions::default()).unwrap();
+    assert_eq!(body2, wire);
+}
+
+#[test]
+fn known_message_roles_parse_without_warnings() {
+    let wire = json!({
+        "input": [
+            {"type": "message", "role": "system", "content": [{"type": "input_text", "text": "s"}]},
+            {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "d"}]},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "u"}]},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "a", "annotations": []}]},
+        ],
+    });
+    let (req, warnings) = request_to_ir(&serde_json::to_vec(&wire).unwrap()).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let roles: Vec<Role> = req.messages.iter().map(|m| m.role).collect();
+    assert_eq!(
+        roles,
+        vec![Role::System, Role::Developer, Role::User, Role::Assistant]
+    );
+    let (body, build_warnings) =
+        request_from_ir(&req, None, CallMode::Unary, &ConvertOptions::default()).unwrap();
+    assert!(build_warnings.is_empty(), "{build_warnings:?}");
+    assert_eq!(body, wire);
+}
+
+#[test]
+fn unknown_message_role_preserves_position_among_items() {
+    // The opaque item keeps its slot between mapped items, whether next to
+    // input messages or inside an assistant run; string content stays a
+    // string.
+    let wire = json!({
+        "input": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "q"}]},
+            {"type": "message", "role": "critic", "content": "meh"},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "a", "annotations": []}]},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "next"}]},
+        ],
+    });
+    let (req, warnings) = request_to_ir(&serde_json::to_vec(&wire).unwrap()).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedField);
+    assert_eq!(warnings[0].location, "/input/1");
+    // The critic item joins the adjacent assistant run, in item order.
+    let roles: Vec<Role> = req.messages.iter().map(|m| m.role).collect();
+    assert_eq!(roles, vec![Role::User, Role::Assistant, Role::User]);
+    assert_eq!(
+        req.messages[1].content[0],
+        ContentBlock::opaque(F, wire["input"][1].clone())
+    );
+    assert!(matches!(&req.messages[1].content[1], ContentBlock::Text { text, .. } if text == "a"));
+
+    let (body, build_warnings) =
+        request_from_ir(&req, None, CallMode::Unary, &ConvertOptions::default()).unwrap();
+    assert!(build_warnings.is_empty(), "{build_warnings:?}");
+    assert_eq!(body, wire);
+}
+
+#[test]
 fn tool_result_output_encodings_round_trip() {
     // § 7.2: `""` <-> empty list, string shorthand <-> single text, part
     // arrays keep boundaries; nested breakpoints stay verbatim in extra.
@@ -1387,6 +1488,27 @@ fn response_replay_reconstructs_items() {
             }],
         })
     );
+}
+
+#[test]
+fn response_output_unknown_role_message_kept_opaque() {
+    let body = json!({
+        "id": "resp_x", "object": "response", "status": "completed", "model": "m",
+        "output": [
+            {"type": "message", "role": "critic", "content": [{"type": "output_text", "text": "meh", "annotations": []}]},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok", "annotations": []}]},
+        ],
+    });
+    let resp = response_to_ir(&serde_json::to_vec(&body).unwrap(), &meta_ok()).unwrap();
+    assert_eq!(resp.message.content.len(), 2);
+    assert_eq!(
+        resp.message.content[0],
+        ContentBlock::opaque(F, body["output"][0].clone())
+    );
+    assert!(matches!(&resp.message.content[1], ContentBlock::Text { text, .. } if text == "ok"));
+    assert_eq!(resp.warnings.len(), 1, "{:?}", resp.warnings);
+    assert_eq!(resp.warnings[0].code, WarningCode::MalformedField);
+    assert_eq!(resp.warnings[0].location, "/output/0");
 }
 
 // ---------------------------------------------------------------- models

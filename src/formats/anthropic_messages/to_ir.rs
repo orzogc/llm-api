@@ -14,9 +14,9 @@ use crate::ir::{
 use crate::ir::{FunctionTool, Tool};
 
 use super::types::{
-    CacheControl, FunctionToolParam, ImageBlock, ImageSourceParam, MessageContent, MessagesRequest,
-    MessagesResponse, RedactedThinkingBlock, SystemPrompt, TextBlock, ThinkingBlock,
-    ToolResultBlock, ToolResultContent, ToolUseBlock, UsageWire,
+    CacheControl, FunctionToolParam, ImageBlock, ImageSourceParam, MessageContent, MessageParam,
+    MessagesRequest, MessagesResponse, RedactedThinkingBlock, SystemPrompt, TextBlock,
+    ThinkingBlock, ToolResultBlock, ToolResultContent, ToolUseBlock, UsageWire,
 };
 use super::{FORMAT_ID as FMT, in_array_system_meta};
 
@@ -281,16 +281,36 @@ fn content_blocks(content: MessageContent) -> Vec<Value> {
 
 /// Parses one wire message into one or more IR messages (§ 7.2 turn
 /// splitting: a user turn mixing `tool_result` blocks with other content
-/// splits into runs sharing a fresh turn-group id).
+/// splits into runs sharing a fresh turn-group id). A message with an
+/// unknown role is kept verbatim as a lone `Opaque` block; the build side
+/// re-emits it untouched.
 fn parse_wire_message(
-    role: &str,
-    blocks: Vec<Value>,
-    msg_extra: Map<String, Value>,
+    wm: MessageParam,
     msg_loc: &str,
     group_counter: &mut u64,
     warnings: &mut Vec<ConversionWarning>,
 ) -> Vec<Message> {
-    match role {
+    if !matches!(wm.role.as_str(), "user" | "assistant" | "system") {
+        warnings.push(pwarn(
+            WarningCode::MalformedField,
+            msg_loc,
+            format!(
+                "unknown message role `{}`; the message was kept verbatim as an opaque block",
+                wm.role
+            ),
+        ));
+        // `MessageParam` preserves every field (content untagged, unknown
+        // fields flattened), so serializing it back is the wire message.
+        let value = serde_json::to_value(&wm).expect("wire message is plain JSON data");
+        return vec![Message::user(vec![ContentBlock::opaque(FMT, value)])];
+    }
+    let MessageParam {
+        role,
+        content,
+        extra: msg_extra,
+    } = wm;
+    let blocks = content_blocks(content);
+    match role.as_str() {
         "assistant" => {
             let content: Vec<ContentBlock> = blocks
                 .iter()
@@ -319,14 +339,7 @@ fn parse_wire_message(
             m.extra = extra_from(msg_extra);
             vec![m]
         }
-        other => {
-            if other != "user" {
-                warnings.push(pwarn(
-                    WarningCode::MalformedField,
-                    msg_loc,
-                    format!("unknown message role `{other}`; treated as user"),
-                ));
-            }
+        _ => {
             // Split into runs of tool results vs other content.
             let mut runs: Vec<(bool, Vec<ContentBlock>)> = Vec::new();
             for (j, b) in blocks.iter().enumerate() {
@@ -453,27 +466,37 @@ pub(crate) fn parse_request_body(body: &[u8]) -> Result<(Request, Vec<Conversion
                         warnings.push(pwarn(
                             WarningCode::MalformedField,
                             loc,
-                            "non-text system entry kept as opaque; it cannot be re-serialized \
-                             into Request.system",
+                            "non-text system entry: the whole system channel is parsed as a \
+                             leading system message so the entry survives round-trips as an \
+                             opaque block",
                         ));
                         ContentBlock::opaque(FMT, b.clone())
                     }
                 })
                 .collect(),
         };
-        if !blocks.is_empty() {
-            req.system = Some(blocks);
+        // `Request.system` is Text-only (contract pin). An all-text channel
+        // parses into it; a channel with any non-text entry (opaque fallback
+        // above, or a malformed text entry) instead becomes a marker-less
+        // leading System message — the § 7.1 combine rule hoists it back
+        // into the top-level `system` field, keeping round-trips idempotent.
+        if blocks
+            .iter()
+            .all(|b| matches!(b, ContentBlock::Text { .. }))
+        {
+            if !blocks.is_empty() {
+                req.system = Some(blocks);
+            }
+        } else {
+            req.messages.push(Message::new(Role::System, blocks));
         }
     }
 
     let mut group_counter: u64 = 0;
     for (i, wm) in wire.messages.into_iter().enumerate() {
         let msg_loc = format!("/messages/{i}");
-        let blocks = content_blocks(wm.content);
         req.messages.extend(parse_wire_message(
-            &wm.role,
-            blocks,
-            wm.extra,
+            wm,
             &msg_loc,
             &mut group_counter,
             &mut warnings,
@@ -643,9 +666,13 @@ pub(crate) fn parse_request_body(body: &[u8]) -> Result<(Request, Vec<Conversion
 /// input plus cache reads and writes.
 pub(crate) fn unify_usage(wire: &UsageWire, raw: Value) -> Usage {
     let mut usage = Usage {
-        input_tokens: wire.input_tokens.unwrap_or(0)
-            + wire.cache_creation_input_tokens.unwrap_or(0)
-            + wire.cache_read_input_tokens.unwrap_or(0),
+        // Saturating: misbehaving provider data must not overflow (same
+        // defense as `visible_output_tokens`'s saturating_sub).
+        input_tokens: wire
+            .input_tokens
+            .unwrap_or(0)
+            .saturating_add(wire.cache_creation_input_tokens.unwrap_or(0))
+            .saturating_add(wire.cache_read_input_tokens.unwrap_or(0)),
         output_tokens: wire.output_tokens.unwrap_or(0),
         ..Usage::default()
     };

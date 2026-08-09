@@ -112,6 +112,121 @@ fn round_trip_system_array() {
 }
 
 #[test]
+fn system_array_with_non_text_entry_parses_as_leading_system_message() {
+    // Any non-text entry turns the whole system channel into a marker-less
+    // leading System message (order kept, non-text entries opaque); the
+    // combine rule hoists it back, so the wire round trip is the identity.
+    let body = json!({
+        "model": "m", "max_tokens": 5,
+        "system": [
+            {"type": "text", "text": "a", "cache_control": {"type": "ephemeral"}},
+            {"type": "unknown_block", "foo": 1},
+            {"type": "text", "text": "b"},
+        ],
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+    });
+    let bytes = serde_json::to_vec(&body).unwrap();
+    let (req, warnings) = AnthropicMessages.parse_request(&bytes).unwrap();
+    assert!(req.system.is_none());
+    assert_eq!(req.messages.len(), 2);
+    let lead = &req.messages[0];
+    assert_eq!(lead.role, Role::System);
+    assert!(lead.round_trip.is_none(), "no marker: canonical hoisting");
+    assert_eq!(lead.content.len(), 3);
+    match &lead.content[0] {
+        ContentBlock::Text { text, cache, .. } => {
+            assert_eq!(text, "a");
+            assert!(cache.is_some());
+        }
+        other => panic!("unexpected block: {other:?}"),
+    }
+    assert!(matches!(
+        &lead.content[1],
+        ContentBlock::Opaque { format, value, .. }
+            if format == FMT && value["type"] == "unknown_block"
+    ));
+    assert!(matches!(&lead.content[2], ContentBlock::Text { text, .. } if text == "b"));
+    let w = warnings
+        .iter()
+        .find(|w| w.code == WarningCode::MalformedField)
+        .unwrap();
+    assert_eq!(w.location, "/system/1");
+    // The fixed-point/idempotence helper asserts the identity round trip.
+    assert_round_trip(&bytes);
+
+    // An all-opaque channel takes the same path.
+    let only_opaque = json!({
+        "model": "m", "max_tokens": 5,
+        "system": [{"type": "unknown_block", "foo": 1}],
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+    });
+    let req2 = assert_round_trip(&serde_json::to_vec(&only_opaque).unwrap());
+    assert!(req2.system.is_none());
+    assert_eq!(req2.messages[0].role, Role::System);
+
+    // A system entry that itself carries a `role` field stays a system
+    // entry (the verbatim wire-message passthrough excludes System-role
+    // messages), so it hoists back instead of becoming a wire message.
+    let role_bearing = json!({
+        "model": "m", "max_tokens": 5,
+        "system": [{"type": "unknown_block", "role": "weird"}],
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+    });
+    let req3 = assert_round_trip(&serde_json::to_vec(&role_bearing).unwrap());
+    assert_eq!(req3.messages[0].role, Role::System);
+}
+
+#[test]
+fn system_array_with_non_text_entry_coexists_with_in_array_system() {
+    // The synthetic leading System message (no marker) hoists while the
+    // wire's own leading in-array system message (marker) stays in place.
+    let body = json!({
+        "model": "m", "max_tokens": 5,
+        "system": [
+            {"type": "text", "text": "a"},
+            {"type": "unknown_block", "foo": 1},
+        ],
+        "messages": [
+            {"role": "system", "content": [{"type": "text", "text": "in-array"}]},
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        ],
+    });
+    let req = assert_round_trip(&serde_json::to_vec(&body).unwrap());
+    assert!(req.system.is_none());
+    assert_eq!(req.messages[0].role, Role::System);
+    assert!(req.messages[0].round_trip.is_none());
+    assert_eq!(req.messages[1].role, Role::System);
+    assert!(req.messages[1].round_trip.is_some());
+}
+
+#[test]
+fn plain_system_forms_still_parse_into_request_system() {
+    // String form.
+    let body = json!({
+        "model": "m", "max_tokens": 5,
+        "system": "Be helpful.",
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+    });
+    let req = assert_round_trip(&serde_json::to_vec(&body).unwrap());
+    let system = req.system.as_ref().unwrap();
+    assert!(matches!(&system[0], ContentBlock::Text { text, .. } if text == "Be helpful."));
+    assert_eq!(req.messages.len(), 1);
+
+    // All-text array form.
+    let body2 = json!({
+        "model": "m", "max_tokens": 5,
+        "system": [
+            {"type": "text", "text": "a"},
+            {"type": "text", "text": "b"},
+        ],
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+    });
+    let req2 = assert_round_trip(&serde_json::to_vec(&body2).unwrap());
+    assert_eq!(req2.system.as_ref().unwrap().len(), 2);
+    assert_eq!(req2.messages.len(), 1);
+}
+
+#[test]
 fn round_trip_in_array_system_keeps_placement() {
     let req = assert_round_trip(&fixture("request_in_array_system.json"));
     // The leading in-array system message stays a System message (with the
@@ -327,20 +442,45 @@ fn parse_rejects_invalid_json() {
 }
 
 #[test]
-fn parse_unknown_role_warns_and_degrades_to_user() {
+fn parse_unknown_role_kept_verbatim_and_round_trips() {
+    // The whole wire message (role string, shorthand content, unknown
+    // fields) is kept as a lone opaque block and re-emitted untouched.
     let body = json!({
         "model": "m", "max_tokens": 5,
-        "messages": [{"role": "critic", "content": "meh"}],
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+            {"role": "critic", "content": "meh", "weight": 2},
+            {"role": "user", "content": [{"type": "text", "text": "next"}]},
+        ],
     });
     let (req, warnings) = AnthropicMessages
         .parse_request(&serde_json::to_vec(&body).unwrap())
         .unwrap();
-    assert_eq!(req.messages[0].role, Role::User);
-    assert!(
-        warnings
-            .iter()
-            .any(|w| w.code == WarningCode::MalformedField)
-    );
+    assert_eq!(req.messages.len(), 3);
+    assert_eq!(req.messages[1].role, Role::User);
+    match &req.messages[1].content[..] {
+        [ContentBlock::Opaque { format, value, .. }] => {
+            assert_eq!(format, FMT);
+            assert_eq!(
+                *value,
+                json!({"role": "critic", "content": "meh", "weight": 2})
+            );
+        }
+        other => panic!("unexpected content: {other:?}"),
+    }
+    let w = warnings
+        .iter()
+        .find(|w| w.code == WarningCode::MalformedField)
+        .unwrap();
+    assert_eq!(w.location, "/messages/1");
+    // Wire-level round trip is the identity (even the string-form content
+    // stays a string — verbatim means verbatim).
+    let first = rebuild(&req, "m");
+    assert_eq!(first, body);
+    let (req2, _) = AnthropicMessages
+        .parse_request(&serde_json::to_vec(&first).unwrap())
+        .unwrap();
+    assert_eq!(rebuild(&req2, "m"), first);
 }
 
 fn meta() -> ResponseMeta {
@@ -368,6 +508,28 @@ fn parse_response_text_and_usage_unification() {
     let original: Value = serde_json::from_slice(&raw).unwrap();
     assert_eq!(resp.raw.as_ref().unwrap(), &original);
     assert_eq!(resp.status, 200);
+}
+
+#[test]
+fn usage_input_sum_saturates_instead_of_overflowing() {
+    // Misbehaving provider data at u64::MAX must saturate, not panic
+    // (debug) or wrap (release).
+    let body = json!({
+        "id": "m", "type": "message", "role": "assistant", "model": "x",
+        "content": [], "stop_reason": "end_turn",
+        "usage": {
+            "input_tokens": u64::MAX,
+            "cache_creation_input_tokens": u64::MAX,
+            "cache_read_input_tokens": 7,
+            "output_tokens": 1,
+        },
+    });
+    let resp = AnthropicMessages
+        .parse_response(&serde_json::to_vec(&body).unwrap(), &meta())
+        .unwrap();
+    let usage = resp.usage.as_ref().unwrap();
+    assert_eq!(usage.input_tokens, u64::MAX);
+    assert_eq!(usage.output_tokens, 1);
 }
 
 #[test]
@@ -569,6 +731,38 @@ fn models_request_and_response() {
         .unwrap();
     assert!(models2.is_empty());
     assert_eq!(next2, None);
+}
+
+#[test]
+fn models_page_malformed_pagination_is_a_parse_error() {
+    // has_more=true without a usable cursor would silently truncate the
+    // listing; it must fail instead of ending pagination.
+    for page in [
+        json!({"data": [], "has_more": true}),
+        json!({"data": [], "has_more": true, "last_id": null}),
+        json!({"data": [], "has_more": true, "last_id": ""}),
+    ] {
+        let err = AnthropicMessages
+            .parse_models_response(&serde_json::to_vec(&page).unwrap())
+            .unwrap_err();
+        match err {
+            Error::Parse { message, .. } => {
+                assert!(message.contains("pagination"), "message: {message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+    // Absent or false has_more keeps ending pagination, cursor ignored.
+    for page in [
+        json!({"data": []}),
+        json!({"data": [], "has_more": false}),
+        json!({"data": [], "last_id": "x"}),
+    ] {
+        let (_, next) = AnthropicMessages
+            .parse_models_response(&serde_json::to_vec(&page).unwrap())
+            .unwrap();
+        assert_eq!(next, None);
+    }
 }
 
 #[test]
