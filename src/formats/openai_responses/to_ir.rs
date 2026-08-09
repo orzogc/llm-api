@@ -16,7 +16,11 @@ use super::FORMAT;
 use super::types;
 
 /// Parse-side warning shorthand.
-fn warn(code: WarningCode, location: impl Into<String>, message: impl Into<String>) -> ConversionWarning {
+fn warn(
+    code: WarningCode,
+    location: impl Into<String>,
+    message: impl Into<String>,
+) -> ConversionWarning {
     ConversionWarning::from_format(code, FORMAT, location, message)
 }
 
@@ -95,7 +99,8 @@ pub fn request_to_ir(body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)> {
 /// Parses a 2xx Response body into the IR (§ 8). `status: "failed"`
 /// becomes an [`Error::Api`] built from `response.error`.
 pub fn response_to_ir(body: &[u8], meta: &ResponseMeta) -> Result<Response> {
-    let raw: Value = serde_json::from_slice(body).map_err(|e| parse_failure("response", e, body))?;
+    let raw: Value =
+        serde_json::from_slice(body).map_err(|e| parse_failure("response", e, body))?;
     let wire: types::Response =
         serde_json::from_value(raw.clone()).map_err(|e| parse_failure("response", e, body))?;
     if wire.status.as_deref() == Some("failed") {
@@ -115,12 +120,18 @@ pub fn response_to_ir(body: &[u8], meta: &ResponseMeta) -> Result<Response> {
         if item.get("type").and_then(Value::as_str) == Some("function_call") {
             has_function_call = true;
         }
-        blocks.extend(assistant_item_to_blocks(item, &format!("/output/{i}"), &mut warnings));
+        blocks.extend(assistant_item_to_blocks(
+            item,
+            &format!("/output/{i}"),
+            &mut warnings,
+        ));
     }
     let message = Message::assistant(blocks);
     let stop_reason = derive_stop_reason(
         wire.status.as_deref(),
-        wire.incomplete_details.as_ref().and_then(|d| d.reason.as_deref()),
+        wire.incomplete_details
+            .as_ref()
+            .and_then(|d| d.reason.as_deref()),
         has_function_call,
     );
     let stop_reason = normalize_stop_reason(&message, stop_reason);
@@ -182,7 +193,10 @@ pub(crate) fn failed_response_error(
     Error::Api {
         status,
         kind,
-        message: message.map_or_else(|| "the response status is `failed`".to_owned(), str::to_owned),
+        message: message.map_or_else(
+            || "the response status is `failed`".to_owned(),
+            str::to_owned,
+        ),
         raw: Bytes::copy_from_slice(body),
         truncated: false,
         parsed,
@@ -198,9 +212,18 @@ pub(crate) fn usage_to_ir(u: &types::Usage) -> Usage {
         input_tokens: u.input_tokens.unwrap_or(0),
         output_tokens: u.output_tokens.unwrap_or(0),
         total_tokens: u.total_tokens,
-        cache_read_tokens: u.input_tokens_details.as_ref().and_then(|d| d.cached_tokens),
-        cache_write_tokens: u.input_tokens_details.as_ref().and_then(|d| d.cache_write_tokens),
-        reasoning_tokens: u.output_tokens_details.as_ref().and_then(|d| d.reasoning_tokens),
+        cache_read_tokens: u
+            .input_tokens_details
+            .as_ref()
+            .and_then(|d| d.cached_tokens),
+        cache_write_tokens: u
+            .input_tokens_details
+            .as_ref()
+            .and_then(|d| d.cache_write_tokens),
+        reasoning_tokens: u
+            .output_tokens_details
+            .as_ref()
+            .and_then(|d| d.reasoning_tokens),
         raw: serde_json::to_value(u).ok(),
     }
 }
@@ -210,7 +233,9 @@ pub(crate) fn usage_from_value(value: &Value) -> Option<Usage> {
     if !value.is_object() {
         return None;
     }
-    serde_json::from_value::<types::Usage>(value.clone()).ok().map(|u| usage_to_ir(&u))
+    serde_json::from_value::<types::Usage>(value.clone())
+        .ok()
+        .map(|u| usage_to_ir(&u))
 }
 
 /// Which IR home an input item belongs to.
@@ -262,13 +287,15 @@ pub(crate) fn parse_input_items(
                 }
                 None => run.push(ContentBlock::opaque(FORMAT, item.clone())),
             },
-            ItemKind::FunctionCallOutput => match function_call_output_to_ir(item, &ptr, warnings) {
-                Some(msg) => {
-                    flush(&mut run, &mut messages);
-                    messages.push(msg);
+            ItemKind::FunctionCallOutput => {
+                match function_call_output_to_ir(item, &ptr, warnings) {
+                    Some(msg) => {
+                        flush(&mut run, &mut messages);
+                        messages.push(msg);
+                    }
+                    None => run.push(ContentBlock::opaque(FORMAT, item.clone())),
                 }
-                None => run.push(ContentBlock::opaque(FORMAT, item.clone())),
-            },
+            }
             ItemKind::AssistantSide => {
                 run.extend(assistant_item_to_blocks(item, &ptr, warnings));
             }
@@ -349,43 +376,56 @@ fn input_part_to_block(
                 if let Some(pcb) = pcb {
                     ns.insert("prompt_cache_breakpoint".to_owned(), pcb);
                 }
-                ContentBlock::Text { text: w.text, cache, extra: Extra::from_unknown(FORMAT, ns) }
-            }
-            Err(e) => {
-                malformed(warnings, &e);
-                ContentBlock::opaque(FORMAT, part.clone())
-            }
-        },
-        Some("input_image") => match serde_json::from_value::<types::InputImagePart>(part.clone()) {
-            Ok(w) => {
-                let mut ns = w.extra;
-                let source = if let Some(url) = w.image_url {
-                    if let Some(id) = w.file_id {
-                        // Both channels set: keep the URL as the source and
-                        // preserve the file id verbatim.
-                        ns.insert("file_id".to_owned(), Value::from(id));
-                    }
-                    match parse_data_url(&url) {
-                        Some((media_type, data)) => ImageSource::base64(media_type, data),
-                        None => ImageSource::url(url),
-                    }
-                } else if let Some(id) = w.file_id {
-                    ImageSource::file_id(id)
-                } else {
-                    malformed(warnings, &"input_image has neither `image_url` nor `file_id`");
-                    return ContentBlock::opaque(FORMAT, part.clone());
-                };
-                let (cache, pcb) = parse_breakpoint(w.prompt_cache_breakpoint);
-                if let Some(pcb) = pcb {
-                    ns.insert("prompt_cache_breakpoint".to_owned(), pcb);
+                ContentBlock::Text {
+                    text: w.text,
+                    cache,
+                    extra: Extra::from_unknown(FORMAT, ns),
                 }
-                ContentBlock::Image { source, cache, extra: Extra::from_unknown(FORMAT, ns) }
             }
             Err(e) => {
                 malformed(warnings, &e);
                 ContentBlock::opaque(FORMAT, part.clone())
             }
         },
+        Some("input_image") => {
+            match serde_json::from_value::<types::InputImagePart>(part.clone()) {
+                Ok(w) => {
+                    let mut ns = w.extra;
+                    let source = if let Some(url) = w.image_url {
+                        if let Some(id) = w.file_id {
+                            // Both channels set: keep the URL as the source and
+                            // preserve the file id verbatim.
+                            ns.insert("file_id".to_owned(), Value::from(id));
+                        }
+                        match parse_data_url(&url) {
+                            Some((media_type, data)) => ImageSource::base64(media_type, data),
+                            None => ImageSource::url(url),
+                        }
+                    } else if let Some(id) = w.file_id {
+                        ImageSource::file_id(id)
+                    } else {
+                        malformed(
+                            warnings,
+                            &"input_image has neither `image_url` nor `file_id`",
+                        );
+                        return ContentBlock::opaque(FORMAT, part.clone());
+                    };
+                    let (cache, pcb) = parse_breakpoint(w.prompt_cache_breakpoint);
+                    if let Some(pcb) = pcb {
+                        ns.insert("prompt_cache_breakpoint".to_owned(), pcb);
+                    }
+                    ContentBlock::Image {
+                        source,
+                        cache,
+                        extra: Extra::from_unknown(FORMAT, ns),
+                    }
+                }
+                Err(e) => {
+                    malformed(warnings, &e);
+                    ContentBlock::opaque(FORMAT, part.clone())
+                }
+            }
+        }
         // `input_file` and future part kinds stay verbatim.
         _ => ContentBlock::opaque(FORMAT, part.clone()),
     }
@@ -444,37 +484,11 @@ fn tool_output_part_to_block(
                 if let Some(pcb) = w.prompt_cache_breakpoint {
                     ns.insert("prompt_cache_breakpoint".to_owned(), pcb);
                 }
-                ToolOutputBlock::Text { text: w.text, cache: None, extra: Extra::from_unknown(FORMAT, ns) }
-            }
-            Err(e) => {
-                warnings.push(warn(
-                    WarningCode::MalformedField,
-                    ptr.to_owned(),
-                    format!("tool-output part failed to parse and was kept verbatim: {e}"),
-                ));
-                ToolOutputBlock::opaque(FORMAT, part.clone())
-            }
-        },
-        Some("input_image") => match serde_json::from_value::<types::InputImagePart>(part.clone()) {
-            Ok(w) => {
-                let mut ns = w.extra;
-                let source = if let Some(url) = w.image_url {
-                    if let Some(id) = w.file_id {
-                        ns.insert("file_id".to_owned(), Value::from(id));
-                    }
-                    match parse_data_url(&url) {
-                        Some((media_type, data)) => ImageSource::base64(media_type, data),
-                        None => ImageSource::url(url),
-                    }
-                } else if let Some(id) = w.file_id {
-                    ImageSource::file_id(id)
-                } else {
-                    return ToolOutputBlock::opaque(FORMAT, part.clone());
-                };
-                if let Some(pcb) = w.prompt_cache_breakpoint {
-                    ns.insert("prompt_cache_breakpoint".to_owned(), pcb);
+                ToolOutputBlock::Text {
+                    text: w.text,
+                    cache: None,
+                    extra: Extra::from_unknown(FORMAT, ns),
                 }
-                ToolOutputBlock::Image { source, cache: None, extra: Extra::from_unknown(FORMAT, ns) }
             }
             Err(e) => {
                 warnings.push(warn(
@@ -485,6 +499,42 @@ fn tool_output_part_to_block(
                 ToolOutputBlock::opaque(FORMAT, part.clone())
             }
         },
+        Some("input_image") => {
+            match serde_json::from_value::<types::InputImagePart>(part.clone()) {
+                Ok(w) => {
+                    let mut ns = w.extra;
+                    let source = if let Some(url) = w.image_url {
+                        if let Some(id) = w.file_id {
+                            ns.insert("file_id".to_owned(), Value::from(id));
+                        }
+                        match parse_data_url(&url) {
+                            Some((media_type, data)) => ImageSource::base64(media_type, data),
+                            None => ImageSource::url(url),
+                        }
+                    } else if let Some(id) = w.file_id {
+                        ImageSource::file_id(id)
+                    } else {
+                        return ToolOutputBlock::opaque(FORMAT, part.clone());
+                    };
+                    if let Some(pcb) = w.prompt_cache_breakpoint {
+                        ns.insert("prompt_cache_breakpoint".to_owned(), pcb);
+                    }
+                    ToolOutputBlock::Image {
+                        source,
+                        cache: None,
+                        extra: Extra::from_unknown(FORMAT, ns),
+                    }
+                }
+                Err(e) => {
+                    warnings.push(warn(
+                        WarningCode::MalformedField,
+                        ptr.to_owned(),
+                        format!("tool-output part failed to parse and was kept verbatim: {e}"),
+                    ));
+                    ToolOutputBlock::opaque(FORMAT, part.clone())
+                }
+            }
+        }
         _ => ToolOutputBlock::opaque(FORMAT, part.clone()),
     }
 }
@@ -523,7 +573,10 @@ impl AssistantItemMeta {
             }
         }
         if !unknown.is_empty() {
-            ns.insert(super::text_block_reserved_key::ITEM.to_owned(), Value::Object(unknown));
+            ns.insert(
+                super::text_block_reserved_key::ITEM.to_owned(),
+                Value::Object(unknown),
+            );
         }
         Self { ns }
     }
@@ -561,7 +614,11 @@ pub(crate) fn assistant_text_block_from_part(
         for (key, value) in &meta.ns {
             ns.insert(key.clone(), value.clone());
         }
-        ContentBlock::Text { text, cache: None, extra: Extra::from_unknown(FORMAT, ns) }
+        ContentBlock::Text {
+            text,
+            cache: None,
+            extra: Extra::from_unknown(FORMAT, ns),
+        }
     };
     match part.get("type").and_then(Value::as_str)? {
         "output_text" => {
@@ -578,7 +635,10 @@ pub(crate) fn assistant_text_block_from_part(
         "refusal" => {
             let wire: types::RefusalPart = serde_json::from_value(part.clone()).ok()?;
             let mut ns = Map::new();
-            ns.insert(super::text_block_reserved_key::REFUSAL.to_owned(), Value::from(true));
+            ns.insert(
+                super::text_block_reserved_key::REFUSAL.to_owned(),
+                Value::from(true),
+            );
             ns.extend(wire.extra);
             Some(build(wire.refusal, ns))
         }
@@ -705,7 +765,10 @@ pub(crate) fn thinking_from_reasoning(
     let text = (!joined.is_empty()).then_some(joined);
     let mut ns = Map::new();
     if let Some(id) = wire.id {
-        ns.insert(super::text_block_reserved_key::ID.to_owned(), Value::from(id));
+        ns.insert(
+            super::text_block_reserved_key::ID.to_owned(),
+            Value::from(id),
+        );
     }
     ns.insert("summary".to_owned(), Value::Array(wire.summary));
     ns.extend(wire.extra);
@@ -781,7 +844,10 @@ fn take_string(map: &mut Map<String, Value>, key: &str) -> Option<String> {
 fn text_to_ir(tc: types::TextConfig, req: &mut Request, ns: &mut Map<String, Value>) {
     let mut text_ns = Map::new();
     if let Some(format) = tc.format {
-        let mapped = match (format.get("type").and_then(Value::as_str), format.as_object()) {
+        let mapped = match (
+            format.get("type").and_then(Value::as_str),
+            format.as_object(),
+        ) {
             (Some("json_schema"), Some(obj)) if obj.contains_key("schema") => {
                 let mut leftover = obj.clone();
                 leftover.remove("type");
@@ -796,8 +862,12 @@ fn text_to_ir(tc: types::TextConfig, req: &mut Request, ns: &mut Map<String, Val
                     }
                     _ => None,
                 };
-                req.output_format =
-                    Some(OutputFormat::JsonSchema { name, description, schema, strict });
+                req.output_format = Some(OutputFormat::JsonSchema {
+                    name,
+                    description,
+                    schema,
+                    strict,
+                });
                 if !leftover.is_empty() {
                     text_ns.insert("format".to_owned(), Value::Object(leftover));
                 }

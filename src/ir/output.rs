@@ -33,7 +33,12 @@ impl OutputFormat {
     /// Schema-constrained JSON output.
     #[must_use]
     pub fn json_schema(schema: Value) -> Self {
-        Self::JsonSchema { name: None, description: None, schema, strict: None }
+        Self::JsonSchema {
+            name: None,
+            description: None,
+            schema,
+            strict: None,
+        }
     }
 
     /// Schema-less JSON mode.

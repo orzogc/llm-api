@@ -23,7 +23,11 @@ use crate::ir::{BlockDelta, ContentBlock, Extra, StreamEvent};
 use super::{FORMAT, to_ir};
 
 /// Parse-side warning shorthand.
-fn warn(code: WarningCode, location: impl Into<String>, message: impl Into<String>) -> ConversionWarning {
+fn warn(
+    code: WarningCode,
+    location: impl Into<String>,
+    message: impl Into<String>,
+) -> ConversionWarning {
     ConversionWarning::from_format(code, FORMAT, location, message)
 }
 
@@ -77,9 +81,9 @@ impl ItemState {
     fn block_index(&self, content_index: Option<u64>) -> Option<usize> {
         match self {
             Self::Message { parts } => content_index.and_then(|ci| parts.get(&ci)).map(|p| p.index),
-            Self::Reasoning { index, .. } | Self::FunctionCall { index } | Self::Opaque { index } => {
-                Some(*index)
-            }
+            Self::Reasoning { index, .. }
+            | Self::FunctionCall { index }
+            | Self::Opaque { index } => Some(*index),
         }
     }
 }
@@ -113,7 +117,11 @@ impl ResponsesStreamParser {
     fn ensure_started(&mut self, events: &mut Vec<StreamEvent>) {
         if !self.started {
             self.started = true;
-            events.push(StreamEvent::MessageStart { id: None, model: None, usage: None });
+            events.push(StreamEvent::MessageStart {
+                id: None,
+                model: None,
+                usage: None,
+            });
         }
     }
 
@@ -149,17 +157,26 @@ impl ResponsesStreamParser {
                 .and_then(|r| r.get("model"))
                 .and_then(Value::as_str)
                 .map(str::to_owned),
-            usage: resp.and_then(|r| r.get("usage")).and_then(to_ir::usage_from_value),
+            usage: resp
+                .and_then(|r| r.get("usage"))
+                .and_then(to_ir::usage_from_value),
         });
     }
 
     fn on_item_added(&mut self, payload: &Value, events: &mut Vec<StreamEvent>) {
-        let Some(idx) = payload.get("output_index").and_then(Value::as_u64) else { return };
+        let Some(idx) = payload.get("output_index").and_then(Value::as_u64) else {
+            return;
+        };
         let item = payload.get("item").cloned().unwrap_or(Value::Null);
         self.ensure_started(events);
         match item.get("type").and_then(Value::as_str) {
             Some("message") => {
-                self.items.insert(idx, ItemState::Message { parts: BTreeMap::new() });
+                self.items.insert(
+                    idx,
+                    ItemState::Message {
+                        parts: BTreeMap::new(),
+                    },
+                );
             }
             Some("reasoning") => {
                 let index = self.alloc_index();
@@ -177,7 +194,11 @@ impl ResponsesStreamParser {
                 };
                 self.items.insert(
                     idx,
-                    ItemState::Reasoning { index, saw_summary_part: false, last_text_part: None },
+                    ItemState::Reasoning {
+                        index,
+                        saw_summary_part: false,
+                        last_text_part: None,
+                    },
                 );
                 events.push(StreamEvent::BlockStart { index, block });
             }
@@ -188,7 +209,10 @@ impl ResponsesStreamParser {
                     ns.insert("id".to_owned(), Value::from(id));
                 }
                 let block = ContentBlock::ToolCall {
-                    id: item.get("call_id").and_then(Value::as_str).map(str::to_owned),
+                    id: item
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
                     name: item
                         .get("name")
                         .and_then(Value::as_str)
@@ -208,8 +232,10 @@ impl ResponsesStreamParser {
             _ => {
                 let index = self.alloc_index();
                 self.items.insert(idx, ItemState::Opaque { index });
-                events
-                    .push(StreamEvent::BlockStart { index, block: ContentBlock::opaque(FORMAT, item) });
+                events.push(StreamEvent::BlockStart {
+                    index,
+                    block: ContentBlock::opaque(FORMAT, item),
+                });
             }
         }
     }
@@ -247,23 +273,36 @@ impl ResponsesStreamParser {
                 }
             }
             Some("output_text" | "input_text") => ContentBlock::Text {
-                text: part.get("text").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                text: part
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
                 cache: None,
                 extra: Extra::from_unknown(FORMAT, ns),
             },
             _ => ContentBlock::opaque(FORMAT, part.clone()),
         };
         let index = self.alloc_index();
-        let state = self
-            .items
-            .entry(idx)
-            .or_insert_with(|| ItemState::Message { parts: BTreeMap::new() });
+        let state = self.items.entry(idx).or_insert_with(|| ItemState::Message {
+            parts: BTreeMap::new(),
+        });
         if let ItemState::Message { parts } = state {
-            parts.insert(ci, PartState { index, annotations: Vec::new(), final_part: None });
+            parts.insert(
+                ci,
+                PartState {
+                    index,
+                    annotations: Vec::new(),
+                    final_part: None,
+                },
+            );
             events.push(StreamEvent::BlockStart { index, block });
         } else if let Some(index) = state.block_index(None) {
             // A part event for a non-message item: surface it on that block.
-            events.push(StreamEvent::BlockDelta { index, delta: BlockDelta::Other(payload.clone()) });
+            events.push(StreamEvent::BlockDelta {
+                index,
+                delta: BlockDelta::Other(payload.clone()),
+            });
         }
     }
 
@@ -313,9 +352,17 @@ impl ResponsesStreamParser {
                 part.annotations.push(annotation.clone());
             }
             let index = part.index;
-            events.push(StreamEvent::BlockDelta { index, delta: BlockDelta::Other(payload.clone()) });
+            events.push(StreamEvent::BlockDelta {
+                index,
+                delta: BlockDelta::Other(payload.clone()),
+            });
         } else {
-            self.on_unknown("response.output_text.annotation.added", payload, events, warnings);
+            self.on_unknown(
+                "response.output_text.annotation.added",
+                payload,
+                events,
+                warnings,
+            );
         }
     }
 
@@ -334,7 +381,12 @@ impl ResponsesStreamParser {
                     delta: BlockDelta::ToolArguments(delta.to_owned()),
                 });
             }
-            _ => self.on_unknown("response.function_call_arguments.delta", payload, events, warnings),
+            _ => self.on_unknown(
+                "response.function_call_arguments.delta",
+                payload,
+                events,
+                warnings,
+            ),
         }
     }
 
@@ -346,7 +398,11 @@ impl ResponsesStreamParser {
     ) {
         let idx = payload.get("output_index").and_then(Value::as_u64);
         match idx.and_then(|i| self.items.get_mut(&i)) {
-            Some(ItemState::Reasoning { index, saw_summary_part, .. }) => {
+            Some(ItemState::Reasoning {
+                index,
+                saw_summary_part,
+                ..
+            }) => {
                 let index = *index;
                 if *saw_summary_part {
                     // Later summary parts join with a blank line, matching
@@ -368,7 +424,12 @@ impl ResponsesStreamParser {
                     });
                 }
             }
-            _ => self.on_unknown("response.reasoning_summary_part.added", payload, events, warnings),
+            _ => self.on_unknown(
+                "response.reasoning_summary_part.added",
+                payload,
+                events,
+                warnings,
+            ),
         }
     }
 
@@ -387,7 +448,12 @@ impl ResponsesStreamParser {
                     delta: BlockDelta::Thinking(delta.to_owned()),
                 });
             }
-            _ => self.on_unknown("response.reasoning_summary_text.delta", payload, events, warnings),
+            _ => self.on_unknown(
+                "response.reasoning_summary_text.delta",
+                payload,
+                events,
+                warnings,
+            ),
         }
     }
 
@@ -404,7 +470,14 @@ impl ResponsesStreamParser {
         let idx = payload.get("output_index").and_then(Value::as_u64);
         let delta = payload.get("delta").and_then(Value::as_str);
         match (idx.and_then(|i| self.items.get_mut(&i)), delta) {
-            (Some(ItemState::Reasoning { index, last_text_part, .. }), Some(delta)) => {
+            (
+                Some(ItemState::Reasoning {
+                    index,
+                    last_text_part,
+                    ..
+                }),
+                Some(delta),
+            ) => {
                 let index = *index;
                 let part = payload.get("content_index").and_then(Value::as_u64);
                 if last_text_part.is_some() && *last_text_part != part {
@@ -461,8 +534,14 @@ impl ResponsesStreamParser {
             // pairs from the final item.
             for block in to_ir::assistant_item_to_blocks(&item, &ptr, warnings) {
                 let index = self.alloc_index();
-                events.push(StreamEvent::BlockStart { index, block: block.clone() });
-                events.push(StreamEvent::BlockStop { index, block: Some(block) });
+                events.push(StreamEvent::BlockStart {
+                    index,
+                    block: block.clone(),
+                });
+                events.push(StreamEvent::BlockStop {
+                    index,
+                    block: Some(block),
+                });
             }
             return;
         };
@@ -479,7 +558,10 @@ impl ResponsesStreamParser {
                             .unwrap_or_else(|| ContentBlock::opaque(FORMAT, p.clone()));
                         fold_annotations(block, &part_state.annotations)
                     });
-                    events.push(StreamEvent::BlockStop { index: part_state.index, block });
+                    events.push(StreamEvent::BlockStop {
+                        index: part_state.index,
+                        block,
+                    });
                 }
                 for (ci, part) in final_parts.iter().enumerate() {
                     if parts.contains_key(&(ci as u64)) {
@@ -488,17 +570,29 @@ impl ResponsesStreamParser {
                     let block = to_ir::assistant_text_block_from_part(part, &meta)
                         .unwrap_or_else(|| ContentBlock::opaque(FORMAT, part.clone()));
                     let index = self.alloc_index();
-                    events.push(StreamEvent::BlockStart { index, block: block.clone() });
-                    events.push(StreamEvent::BlockStop { index, block: Some(block) });
+                    events.push(StreamEvent::BlockStart {
+                        index,
+                        block: block.clone(),
+                    });
+                    events.push(StreamEvent::BlockStop {
+                        index,
+                        block: Some(block),
+                    });
                 }
             }
             ItemState::Reasoning { index, .. } => {
                 let block = to_ir::thinking_from_reasoning(&item, &ptr, warnings);
-                events.push(StreamEvent::BlockStop { index, block: Some(block) });
+                events.push(StreamEvent::BlockStop {
+                    index,
+                    block: Some(block),
+                });
             }
             ItemState::FunctionCall { index } => {
                 let block = to_ir::function_call_to_block(&item, &ptr, warnings);
-                events.push(StreamEvent::BlockStop { index, block: Some(block) });
+                events.push(StreamEvent::BlockStop {
+                    index,
+                    block: Some(block),
+                });
             }
             ItemState::Opaque { index } => {
                 events.push(StreamEvent::BlockStop {
@@ -532,7 +626,9 @@ impl ResponsesStreamParser {
             (Some("completed"), None)
         };
         let stop_reason = to_ir::derive_stop_reason(status, reason, has_function_call);
-        let usage = resp.and_then(|r| r.get("usage")).and_then(to_ir::usage_from_value);
+        let usage = resp
+            .and_then(|r| r.get("usage"))
+            .and_then(to_ir::usage_from_value);
         events.push(StreamEvent::MessageDelta { stop_reason, usage });
         events.push(StreamEvent::MessageStop);
     }
@@ -547,7 +643,10 @@ impl ResponsesStreamParser {
         if let Some(index) = self.attributed_index(payload) {
             // Recognizable coordinates: surface the payload on that block
             // (built-in tool progress, MCP argument streams, …).
-            events.push(StreamEvent::BlockDelta { index, delta: BlockDelta::Other(payload.clone()) });
+            events.push(StreamEvent::BlockDelta {
+                index,
+                delta: BlockDelta::Other(payload.clone()),
+            });
             return;
         }
         events.push(StreamEvent::Unknown);
@@ -613,7 +712,9 @@ impl StreamParser for ResponsesStreamParser {
             | "response.reasoning_summary_part.done"
             | "response.reasoning_text.done" => {}
             "response.output_item.added" => self.on_item_added(&payload, &mut events),
-            "response.content_part.added" => self.on_part_added(&payload, &mut events, &mut warnings),
+            "response.content_part.added" => {
+                self.on_part_added(&payload, &mut events, &mut warnings);
+            }
             "response.output_text.delta" | "response.refusal.delta" => {
                 self.on_text_delta(&event_type, &payload, &mut events, &mut warnings);
             }

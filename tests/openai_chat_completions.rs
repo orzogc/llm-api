@@ -20,8 +20,10 @@ use llm_api::{
 const F: &str = "openai_chat_completions";
 
 fn fixture(name: &str) -> Vec<u8> {
-    let path =
-        format!("{}/tests/fixtures/openai_chat_completions/{name}", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/tests/fixtures/openai_chat_completions/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
     std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
 
@@ -30,15 +32,23 @@ fn fixture_json(name: &str) -> Value {
 }
 
 fn ctx(mode: CallMode) -> BuildCtx {
-    BuildCtx::new(EndpointUrl::base("https://api.openai.com/v1").unwrap(), "gpt-4.1", mode)
+    BuildCtx::new(
+        EndpointUrl::base("https://api.openai.com/v1").unwrap(),
+        "gpt-4.1",
+        mode,
+    )
 }
 
 fn build(req: &Request) -> BuiltRequest {
-    OpenAiChatCompletions.build_request(req, &ctx(CallMode::Unary)).expect("build succeeds")
+    OpenAiChatCompletions
+        .build_request(req, &ctx(CallMode::Unary))
+        .expect("build succeeds")
 }
 
 fn build_err(req: &Request) -> Error {
-    OpenAiChatCompletions.build_request(req, &ctx(CallMode::Unary)).unwrap_err()
+    OpenAiChatCompletions
+        .build_request(req, &ctx(CallMode::Unary))
+        .unwrap_err()
 }
 
 fn body_of(built: &BuiltRequest) -> Value {
@@ -71,8 +81,14 @@ fn chat_request_url_method_auth() {
     let req = Request::with_messages(vec![Message::user_text("hi")]);
     let built = build(&req);
     assert_eq!(built.method, http::Method::POST);
-    assert_eq!(built.url.to_string(), "https://api.openai.com/v1/chat/completions");
-    assert_eq!(built.headers.get("content-type").unwrap(), "application/json");
+    assert_eq!(
+        built.url.to_string(),
+        "https://api.openai.com/v1/chat/completions"
+    );
+    assert_eq!(
+        built.headers.get("content-type").unwrap(),
+        "application/json"
+    );
     let auth = built.auth.as_ref().expect("bearer auth");
     assert_eq!(auth.header, http::header::AUTHORIZATION);
     assert_eq!(auth.prefix.as_deref(), Some("Bearer "));
@@ -86,15 +102,22 @@ fn chat_request_url_method_auth() {
 #[test]
 fn streaming_sets_stream_and_injects_include_usage() {
     let req = Request::with_messages(vec![Message::user_text("hi")]);
-    let built = OpenAiChatCompletions.build_request(&req, &ctx(CallMode::Streaming)).unwrap();
+    let built = OpenAiChatCompletions
+        .build_request(&req, &ctx(CallMode::Streaming))
+        .unwrap();
     let body = body_of(&built);
     assert_eq!(body["stream"], json!(true));
     assert_eq!(body["stream_options"], json!({"include_usage": true}));
 
     // The injection knob turns the injection off; `stream` stays.
     let mut no_usage = ctx(CallMode::Streaming);
-    no_usage.format_options.openai_chat_completions.inject_include_usage = false;
-    let built = OpenAiChatCompletions.build_request(&req, &no_usage).unwrap();
+    no_usage
+        .format_options
+        .openai_chat_completions
+        .inject_include_usage = false;
+    let built = OpenAiChatCompletions
+        .build_request(&req, &no_usage)
+        .unwrap();
     let body = body_of(&built);
     assert_eq!(body["stream"], json!(true));
     assert!(body.get("stream_options").is_none());
@@ -122,12 +145,18 @@ fn sampling_parameters_map_or_warn() {
     req.seed = Some(7);
     req.frequency_penalty = Some(0.1);
     req.presence_penalty = Some(0.2);
-    req.metadata = Some(serde_json::Map::from_iter([("trace".to_owned(), json!("t1"))]));
+    req.metadata = Some(serde_json::Map::from_iter([(
+        "trace".to_owned(),
+        json!("t1"),
+    )]));
     req.cache_key = Some("cache-1".into());
     let built = build(&req);
     let body = body_of(&built);
     assert_eq!(body["max_completion_tokens"], json!(512));
-    assert!(body.get("max_tokens").is_none(), "legacy field must not be emitted");
+    assert!(
+        body.get("max_tokens").is_none(),
+        "legacy field must not be emitted"
+    );
     assert_eq!(body["temperature"], json!(0.5));
     assert_eq!(body["top_p"], json!(0.9));
     assert_eq!(body["stop"], json!(["END"]));
@@ -137,7 +166,11 @@ fn sampling_parameters_map_or_warn() {
     assert_eq!(body["metadata"], json!({"trace": "t1"}));
     assert_eq!(body["prompt_cache_key"], json!("cache-1"));
     assert!(body.get("top_k").is_none());
-    let w = built.warnings.iter().find(|w| w.code == WarningCode::SamplingParameterDropped).unwrap();
+    let w = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::SamplingParameterDropped)
+        .unwrap();
     assert_eq!(w.location, "/top_k");
     assert_eq!(w.severity, WarningSeverity::Cosmetic);
     assert_eq!(built.warnings.len(), 1, "{:?}", built.warnings);
@@ -151,14 +184,23 @@ fn strict_mode_escalates_unless_overridden() {
         ContentBlock::image_file_id("file-1"),
     ])]);
     let built = build(&req);
-    let w = built.warnings.iter().find(|w| w.code == WarningCode::ImageSourceUnsupported).unwrap();
+    let w = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::ImageSourceUnsupported)
+        .unwrap();
     assert_eq!(w.severity, WarningSeverity::Semantic);
     assert_eq!(w.location, "/messages/0/content/1");
 
     let mut strict_ctx = ctx(CallMode::Unary);
     strict_ctx.convert.strict = true;
-    let err = OpenAiChatCompletions.build_request(&req, &strict_ctx).unwrap_err();
-    assert!(matches!(err, Error::Conversion(ConversionError::Strict { .. })));
+    let err = OpenAiChatCompletions
+        .build_request(&req, &strict_ctx)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        Error::Conversion(ConversionError::Strict { .. })
+    ));
 
     // A message-level extra that replaces `content` (an array is a scalar
     // replace under RFC 7396) addresses the pointer's ancestor: the
@@ -166,8 +208,14 @@ fn strict_mode_escalates_unless_overridden() {
     req.messages[0]
         .extra
         .set(F, "content", json!([{"type": "text", "text": "replaced"}]));
-    let built = OpenAiChatCompletions.build_request(&req, &strict_ctx).unwrap();
-    let w = built.warnings.iter().find(|w| w.code == WarningCode::ImageSourceUnsupported).unwrap();
+    let built = OpenAiChatCompletions
+        .build_request(&req, &strict_ctx)
+        .unwrap();
+    let w = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::ImageSourceUnsupported)
+        .unwrap();
     assert!(w.overridden);
     assert_eq!(
         body_of(&built)["messages"][0]["content"],
@@ -206,15 +254,24 @@ fn system_inserted_at_front_as_message() {
     assert!(built.warnings.is_empty());
 
     // Non-text system blocks are structural errors, Opaque included.
-    req.system = Some(vec![ContentBlock::opaque(F, json!({"type": "text", "text": "x"}))]);
+    req.system = Some(vec![ContentBlock::opaque(
+        F,
+        json!({"type": "text", "text": "x"}),
+    )]);
     assert!(matches!(
         build_err(&req),
-        Error::Conversion(ConversionError::InvalidBlockForRole { role: Role::System, .. })
+        Error::Conversion(ConversionError::InvalidBlockForRole {
+            role: Role::System,
+            ..
+        })
     ));
     req.system = Some(vec![ContentBlock::image_url("https://x/i.png")]);
     assert!(matches!(
         build_err(&req),
-        Error::Conversion(ConversionError::InvalidBlockForRole { role: Role::System, .. })
+        Error::Conversion(ConversionError::InvalidBlockForRole {
+            role: Role::System,
+            ..
+        })
     ));
 }
 
@@ -225,14 +282,23 @@ fn content_string_shorthand_rules() {
     assert_eq!(body_of(&built)["messages"][0]["content"], json!("hi"));
 
     // A cache hint forces the array form (breakpoints need a part).
-    let msg = Message::user(vec![ContentBlock::text("hi").with_cache(CacheHint::with_ttl("5m"))]);
+    let msg = Message::user(vec![
+        ContentBlock::text("hi").with_cache(CacheHint::with_ttl("5m")),
+    ]);
     let built = build(&Request::with_messages(vec![msg]));
     assert_eq!(
         body_of(&built)["messages"][0]["content"],
         json!([{"type": "text", "text": "hi", "prompt_cache_breakpoint": {"mode": "explicit"}}])
     );
-    let ttl = built.warnings.iter().find(|w| w.code == WarningCode::CacheTtlDropped).unwrap();
-    assert_eq!(ttl.location, "/messages/0/content/0/prompt_cache_breakpoint");
+    let ttl = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::CacheTtlDropped)
+        .unwrap();
+    assert_eq!(
+        ttl.location,
+        "/messages/0/content/0/prompt_cache_breakpoint"
+    );
     assert_eq!(ttl.severity, WarningSeverity::Cosmetic);
 
     // Block extra forces the array form so it has a landing spot.
@@ -260,10 +326,16 @@ fn content_string_shorthand_rules() {
 fn user_images_map_per_source() {
     let msg = Message::user(vec![
         ContentBlock::text("look"),
-        ContentBlock::image_url("https://example.com/a.png")
-            .with_extra(F, "image_url", json!({"detail": "low"})),
+        ContentBlock::image_url("https://example.com/a.png").with_extra(
+            F,
+            "image_url",
+            json!({"detail": "low"}),
+        ),
         ContentBlock::image_base64("image/png", "QUJD").with_cache(CacheHint::new()),
-        ContentBlock::opaque(F, json!({"type": "input_audio", "input_audio": {"data": "QQ==", "format": "wav"}})),
+        ContentBlock::opaque(
+            F,
+            json!({"type": "input_audio", "input_audio": {"data": "QQ==", "format": "wav"}}),
+        ),
     ]);
     let built = build(&Request::with_messages(vec![msg]));
     assert_eq!(
@@ -284,9 +356,19 @@ fn user_images_map_per_source() {
         ContentBlock::opaque("google_generate_content", json!({"executableCode": {}})),
     ]);
     let built = build(&Request::with_messages(vec![msg]));
-    let w = built.warnings.iter().find(|w| w.code == WarningCode::OpaqueDropped).unwrap();
+    let w = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::OpaqueDropped)
+        .unwrap();
     assert_eq!(w.severity, WarningSeverity::Semantic);
-    assert_eq!(body_of(&built)["messages"][0]["content"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        body_of(&built)["messages"][0]["content"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -310,7 +392,10 @@ fn assistant_message_maps_thinking_text_and_tool_calls() {
         ContentBlock::text("Checking now."),
         ContentBlock::tool_call_with_id("call_1", "get_weather", "{\"city\":\"Paris\"}"),
     ]);
-    let tool = Message::tool(vec![ContentBlock::tool_result_text(Some("call_1".into()), "ok")]);
+    let tool = Message::tool(vec![ContentBlock::tool_result_text(
+        Some("call_1".into()),
+        "ok",
+    )]);
     let built = build(&Request::with_messages(vec![msg, tool]));
     let body = body_of(&built);
     assert_eq!(
@@ -354,15 +439,24 @@ fn assistant_thinking_provenance() {
     ]);
     let built = build(&Request::with_messages(vec![msg]));
     let body = body_of(&built);
-    assert_eq!(body["messages"][0]["reasoning_content"], json!("First.\n\nSecond."));
+    assert_eq!(
+        body["messages"][0]["reasoning_content"],
+        json!("First.\n\nSecond.")
+    );
     assert!(built.warnings.is_empty());
 
     // A signature has no plaintext channel: text kept, signature dropped.
     let msg = Message::assistant(vec![ContentBlock::thinking_signed("plan", "sig")]);
     let built = build(&Request::with_messages(vec![msg]));
-    assert_eq!(body_of(&built)["messages"][0]["reasoning_content"], json!("plan"));
-    let w =
-        built.warnings.iter().find(|w| w.code == WarningCode::ThinkingSignatureDropped).unwrap();
+    assert_eq!(
+        body_of(&built)["messages"][0]["reasoning_content"],
+        json!("plan")
+    );
+    let w = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::ThinkingSignatureDropped)
+        .unwrap();
     assert_eq!(w.severity, WarningSeverity::Semantic);
 
     // Foreign thinking drops…
@@ -378,9 +472,13 @@ fn assistant_thinking_provenance() {
     // …unless thinking_as_text re-emits its text.
     let mut tctx = ctx(CallMode::Unary);
     tctx.convert.thinking_as_text = true;
-    let built =
-        OpenAiChatCompletions.build_request(&Request::with_messages(vec![foreign]), &tctx).unwrap();
-    assert_eq!(body_of(&built)["messages"][0]["reasoning_content"], json!("chain"));
+    let built = OpenAiChatCompletions
+        .build_request(&Request::with_messages(vec![foreign]), &tctx)
+        .unwrap();
+    assert_eq!(
+        body_of(&built)["messages"][0]["reasoning_content"],
+        json!("chain")
+    );
     assert!(!has_code(&built.warnings, &WarningCode::ThinkingDropped));
 
     // Thinking-block extras merge into the containing message.
@@ -391,7 +489,10 @@ fn assistant_thinking_provenance() {
     let built = build(&Request::with_messages(vec![msg]));
     let body = body_of(&built);
     assert_eq!(body["messages"][0]["reasoning_content"], json!("t"));
-    assert_eq!(body["messages"][0]["reasoning_details"], json!([{"type": "x"}]));
+    assert_eq!(
+        body["messages"][0]["reasoning_details"],
+        json!([{"type": "x"}])
+    );
 }
 
 #[test]
@@ -401,14 +502,21 @@ fn assistant_images_drop_and_tool_results_error() {
         ContentBlock::image_url("https://example.com/x.png"),
     ]);
     let built = build(&Request::with_messages(vec![msg]));
-    let w = built.warnings.iter().find(|w| w.code == WarningCode::ImageSourceUnsupported).unwrap();
+    let w = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::ImageSourceUnsupported)
+        .unwrap();
     assert_eq!(w.severity, WarningSeverity::Semantic);
     assert_eq!(body_of(&built)["messages"][0]["content"], json!("see"));
 
     let msg = Message::assistant(vec![ContentBlock::tool_result_text(Some("c".into()), "x")]);
     assert!(matches!(
         build_err(&Request::with_messages(vec![msg])),
-        Error::Conversion(ConversionError::InvalidBlockForRole { role: Role::Assistant, .. })
+        Error::Conversion(ConversionError::InvalidBlockForRole {
+            role: Role::Assistant,
+            ..
+        })
     ));
 }
 
@@ -432,8 +540,14 @@ fn tool_call_requires_id_and_custom_kind_reconstructs() {
 
     // Cache hints on tool calls drop cosmetically.
     let call = ContentBlock::tool_call_with_id("c", "f", "{}").with_cache(CacheHint::new());
-    let built = build(&Request::with_messages(vec![Message::assistant(vec![call])]));
-    let w = built.warnings.iter().find(|w| w.code == WarningCode::CacheHintDropped).unwrap();
+    let built = build(&Request::with_messages(vec![Message::assistant(vec![
+        call,
+    ])]));
+    let w = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::CacheHintDropped)
+        .unwrap();
     assert_eq!(w.location, "/messages/0/tool_calls/0");
 }
 
@@ -479,15 +593,26 @@ fn tool_message_images_drop_and_flags_warn() {
     let built = build(&Request::with_messages(vec![tool]));
     let body = body_of(&built);
     // Text is kept; both images drop with semantic warnings.
-    assert_eq!(body["messages"][0]["content"], json!([{"type": "text", "text": "kept"}]));
+    assert_eq!(
+        body["messages"][0]["content"],
+        json!([{"type": "text", "text": "kept"}])
+    );
     let images: Vec<_> = built
         .warnings
         .iter()
         .filter(|w| w.code == WarningCode::ToolResultImageDropped)
         .collect();
     assert_eq!(images.len(), 2);
-    assert!(images.iter().all(|w| w.severity == WarningSeverity::Semantic));
-    let e = built.warnings.iter().find(|w| w.code == WarningCode::IsErrorDropped).unwrap();
+    assert!(
+        images
+            .iter()
+            .all(|w| w.severity == WarningSeverity::Semantic)
+    );
+    let e = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::IsErrorDropped)
+        .unwrap();
     assert_eq!(e.severity, WarningSeverity::Semantic);
     assert!(has_code(&built.warnings, &WarningCode::CacheHintDropped));
 
@@ -497,7 +622,10 @@ fn tool_message_images_drop_and_flags_warn() {
         json!({"type": "text", "text": "x", "cache": {}}),
     )
     .unwrap();
-    let tool = Message::tool(vec![ContentBlock::tool_result(Some("c2".into()), vec![hinted])]);
+    let tool = Message::tool(vec![ContentBlock::tool_result(
+        Some("c2".into()),
+        vec![hinted],
+    )]);
     let built = build(&Request::with_messages(vec![tool]));
     assert_eq!(body_of(&built)["messages"][0]["content"], json!("x"));
     assert!(has_code(&built.warnings, &WarningCode::CacheHintDropped));
@@ -513,15 +641,27 @@ fn tool_message_images_drop_and_flags_warn() {
 #[test]
 fn role_block_validity_enforced() {
     let cases: Vec<(Message, Role)> = vec![
-        (Message::user(vec![ContentBlock::tool_call_with_id("c", "f", "{}")]), Role::User),
-        (Message::user(vec![ContentBlock::thinking("t")]), Role::User),
-        (Message::user(vec![ContentBlock::tool_result_text(Some("c".into()), "x")]), Role::User),
         (
-            Message::new(Role::System, vec![ContentBlock::image_url("https://x/i.png")]),
+            Message::user(vec![ContentBlock::tool_call_with_id("c", "f", "{}")]),
+            Role::User,
+        ),
+        (Message::user(vec![ContentBlock::thinking("t")]), Role::User),
+        (
+            Message::user(vec![ContentBlock::tool_result_text(Some("c".into()), "x")]),
+            Role::User,
+        ),
+        (
+            Message::new(
+                Role::System,
+                vec![ContentBlock::image_url("https://x/i.png")],
+            ),
             Role::System,
         ),
         (
-            Message::new(Role::Developer, vec![ContentBlock::image_url("https://x/i.png")]),
+            Message::new(
+                Role::Developer,
+                vec![ContentBlock::image_url("https://x/i.png")],
+            ),
             Role::Developer,
         ),
         (Message::tool(vec![ContentBlock::text("plain")]), Role::Tool),
@@ -541,7 +681,9 @@ fn role_block_validity_enforced() {
 fn tools_map_nested_shape() {
     let mut req = Request::with_messages(vec![Message::user_text("hi")]);
     let mut with_extra = FunctionTool::new("ext");
-    with_extra.extra.set(F, "function", json!({"custom_field": 1}));
+    with_extra
+        .extra
+        .set(F, "function", json!({"custom_field": 1}));
     with_extra.extra.set(F, "top_level", "x");
     req.tools = Some(vec![
         Tool::function(
@@ -577,7 +719,11 @@ fn tools_map_nested_shape() {
     let built = build(&req);
     assert_eq!(body_of(&built)["tools"].as_array().unwrap().len(), 1);
     assert!(has_code(&built.warnings, &WarningCode::CacheHintDropped));
-    let w = built.warnings.iter().find(|w| w.code == WarningCode::OpaqueDropped).unwrap();
+    let w = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::OpaqueDropped)
+        .unwrap();
     assert_eq!(w.severity, WarningSeverity::Semantic);
 }
 
@@ -608,12 +754,18 @@ fn parallel_tool_calls_requires_tools() {
     req.parallel_tool_calls = Some(false);
     let built = build(&req);
     assert!(body_of(&built).get("parallel_tool_calls").is_none());
-    assert!(has_code(&built.warnings, &WarningCode::ParallelToolCallsIgnored));
+    assert!(has_code(
+        &built.warnings,
+        &WarningCode::ParallelToolCallsIgnored
+    ));
 
     req.tools = Some(vec![Tool::function(FunctionTool::new("t"))]);
     let built = build(&req);
     assert_eq!(body_of(&built)["parallel_tool_calls"], json!(false));
-    assert!(!has_code(&built.warnings, &WarningCode::ParallelToolCallsIgnored));
+    assert!(!has_code(
+        &built.warnings,
+        &WarningCode::ParallelToolCallsIgnored
+    ));
 }
 
 #[test]
@@ -641,7 +793,11 @@ fn reasoning_mapping() {
         req.reasoning = Some(Reasoning::effort(effort.clone()));
         let built = build(&req);
         assert_eq!(body_of(&built)["reasoning_effort"], json!(effort.as_str()));
-        assert!(built.warnings.is_empty(), "{effort:?}: {:?}", built.warnings);
+        assert!(
+            built.warnings.is_empty(),
+            "{effort:?}: {:?}",
+            built.warnings
+        );
     }
 
     // Conflicts: effort wins with a cosmetic warning.
@@ -650,7 +806,11 @@ fn reasoning_mapping() {
     req.reasoning = Some(r);
     let built = build(&req);
     assert_eq!(body_of(&built)["reasoning_effort"], json!("none"));
-    let w = built.warnings.iter().find(|w| w.code == WarningCode::ReasoningConflict).unwrap();
+    let w = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::ReasoningConflict)
+        .unwrap();
     assert_eq!(w.severity, WarningSeverity::Cosmetic);
 
     let mut r = Reasoning::enabled(false);
@@ -687,7 +847,11 @@ fn reasoning_mapping() {
     r.extra.set(F, "budget_tokens", 512);
     req.reasoning = Some(r);
     let built = build(&req);
-    let w = built.warnings.iter().find(|w| w.code == WarningCode::ExtraDropped).unwrap();
+    let w = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::ExtraDropped)
+        .unwrap();
     assert_eq!(w.severity, WarningSeverity::Semantic);
 }
 
@@ -711,11 +875,17 @@ fn output_format_mapping() {
     // without a warning (§ 4.9).
     req.output_format = Some(OutputFormat::json_schema(json!({"type": "object"})));
     let built = build(&req);
-    assert_eq!(body_of(&built)["response_format"]["json_schema"]["name"], json!("response"));
+    assert_eq!(
+        body_of(&built)["response_format"]["json_schema"]["name"],
+        json!("response")
+    );
     assert!(built.warnings.is_empty());
 
     req.output_format = Some(OutputFormat::json_object());
-    assert_eq!(body_of(&build(&req))["response_format"], json!({"type": "json_object"}));
+    assert_eq!(
+        body_of(&build(&req))["response_format"],
+        json!({"type": "json_object"})
+    );
 }
 
 #[test]
@@ -726,7 +896,11 @@ fn orphan_tool_call_policies() {
         Message::user_text("continue"),
     ]);
     let built = build(&mid);
-    let w = built.warnings.iter().find(|w| w.code == WarningCode::OrphanToolCalls).unwrap();
+    let w = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::OrphanToolCalls)
+        .unwrap();
     assert_eq!(w.severity, WarningSeverity::Semantic);
     assert_eq!(body_of(&built)["messages"].as_array().unwrap().len(), 2);
 
@@ -745,12 +919,17 @@ fn orphan_tool_call_policies() {
     // DropTrailing removes the calls and flags the now-orphaned thinking.
     let mut dctx = ctx(CallMode::Unary);
     dctx.convert.orphan_tool_calls = OrphanToolCalls::DropTrailing;
-    let built = OpenAiChatCompletions.build_request(&trailing, &dctx).unwrap();
+    let built = OpenAiChatCompletions
+        .build_request(&trailing, &dctx)
+        .unwrap();
     let body = body_of(&built);
     assert_eq!(body["messages"].as_array().unwrap().len(), 2);
     assert_eq!(body["messages"][1]["reasoning_content"], json!("plan"));
     assert!(body["messages"][1].get("tool_calls").is_none());
-    assert!(has_code(&built.warnings, &WarningCode::OrphanToolCallsDropped));
+    assert!(has_code(
+        &built.warnings,
+        &WarningCode::OrphanToolCallsDropped
+    ));
     assert!(has_code(&built.warnings, &WarningCode::ThinkingOrphaned));
 
     // A message left empty by the drop is removed entirely.
@@ -758,20 +937,27 @@ fn orphan_tool_call_policies() {
         Message::user_text("go"),
         Message::assistant(vec![ContentBlock::tool_call_with_id("c9", "f", "{}")]),
     ]);
-    let built = OpenAiChatCompletions.build_request(&only_call, &dctx).unwrap();
+    let built = OpenAiChatCompletions
+        .build_request(&only_call, &dctx)
+        .unwrap();
     assert_eq!(body_of(&built)["messages"].as_array().unwrap().len(), 1);
 
     // SynthesizeError appends an error tool result per orphan; the error
     // marker itself has no CC channel and warns.
     let mut sctx = ctx(CallMode::Unary);
     sctx.convert.orphan_tool_calls = OrphanToolCalls::SynthesizeError;
-    let built = OpenAiChatCompletions.build_request(&trailing, &sctx).unwrap();
+    let built = OpenAiChatCompletions
+        .build_request(&trailing, &sctx)
+        .unwrap();
     let body = body_of(&built);
     assert_eq!(
         body["messages"].as_array().unwrap().last().unwrap(),
         &json!({"role": "tool", "tool_call_id": "c2", "content": "cancelled", "name": "f"})
     );
-    assert!(has_code(&built.warnings, &WarningCode::OrphanToolCallsSynthesized));
+    assert!(has_code(
+        &built.warnings,
+        &WarningCode::OrphanToolCallsSynthesized
+    ));
     assert!(has_code(&built.warnings, &WarningCode::IsErrorDropped));
 }
 
@@ -780,7 +966,10 @@ fn missing_thinking_and_fill_helps_on_plaintext_channel() {
     let mut req = Request::with_messages(vec![
         Message::user_text("go"),
         Message::assistant(vec![ContentBlock::tool_call_with_id("c1", "f", "{}")]),
-        Message::tool(vec![ContentBlock::tool_result_text(Some("c1".into()), "ok")]),
+        Message::tool(vec![ContentBlock::tool_result_text(
+            Some("c1".into()),
+            "ok",
+        )]),
     ]);
     req.reasoning = Some(Reasoning::effort(Effort::Medium));
     let built = build(&req);
@@ -801,10 +990,19 @@ fn missing_thinking_and_fill_helps_on_plaintext_channel() {
     let mut fctx = ctx(CallMode::Unary);
     fctx.convert.fill_missing_thinking = Some("tool call".into());
     let built = OpenAiChatCompletions.build_request(&req, &fctx).unwrap();
-    assert_eq!(body_of(&built)["messages"][1]["reasoning_content"], json!("tool call"));
-    assert!(has_code(&built.warnings, &WarningCode::MissingThinkingFilled));
+    assert_eq!(
+        body_of(&built)["messages"][1]["reasoning_content"],
+        json!("tool call")
+    );
+    assert!(has_code(
+        &built.warnings,
+        &WarningCode::MissingThinkingFilled
+    ));
     assert!(!has_code(&built.warnings, &WarningCode::ThinkingDropped));
-    assert!(!has_code(&built.warnings, &WarningCode::MissingThinkingWithToolCalls));
+    assert!(!has_code(
+        &built.warnings,
+        &WarningCode::MissingThinkingWithToolCalls
+    ));
 }
 
 #[test]
@@ -860,7 +1058,10 @@ fn hook_error_aborts() {
     let mut hctx = ctx(CallMode::Unary);
     hctx.hooks = RequestHooks::new().with_on_request(|_| Err(llm_api::HookError::new("nope")));
     let err = OpenAiChatCompletions
-        .build_request(&Request::with_messages(vec![Message::user_text("hi")]), &hctx)
+        .build_request(
+            &Request::with_messages(vec![Message::user_text("hi")]),
+            &hctx,
+        )
         .unwrap_err();
     assert!(matches!(err, Error::Hook(_)));
 }
@@ -871,12 +1072,19 @@ fn extra_overrides_and_deletes_generated_fields() {
     req.temperature = Some(0.7);
     // RFC 7396: null deletes, scalars replace, new keys are added.
     req.extra.set(F, "temperature", Value::Null);
-    req.extra.set(F, "web_search_options", json!({"search_context_size": "low"}));
+    req.extra.set(
+        F,
+        "web_search_options",
+        json!({"search_context_size": "low"}),
+    );
     req.messages[0].extra.set(F, "name", "alice");
     let built = build(&req);
     let body = body_of(&built);
     assert!(body.get("temperature").is_none(), "extra null must delete");
-    assert_eq!(body["web_search_options"], json!({"search_context_size": "low"}));
+    assert_eq!(
+        body["web_search_options"],
+        json!({"search_context_size": "low"})
+    );
     assert_eq!(body["messages"][0]["name"], json!("alice"));
 }
 
@@ -915,7 +1123,9 @@ fn canonical_request_round_trip_is_idempotent() {
 
 #[test]
 fn canonical_request_parses_expected_ir_shape() {
-    let (req, _) = OpenAiChatCompletions.parse_request(&fixture("request_canonical.json")).unwrap();
+    let (req, _) = OpenAiChatCompletions
+        .parse_request(&fixture("request_canonical.json"))
+        .unwrap();
     // Leading system stays in-array — no hoisting (implementation contract).
     assert!(req.system.is_none());
     let roles: Vec<Role> = req.messages.iter().map(|m| m.role).collect();
@@ -934,22 +1144,41 @@ fn canonical_request_parses_expected_ir_shape() {
     );
     let user = &req.messages[2];
     assert_eq!(user.content.len(), 4);
-    assert!(matches!(&user.content[0], ContentBlock::Text { cache: Some(_), .. }));
-    assert!(matches!(&user.content[1], ContentBlock::Image { source: ImageSource::Url(u), .. }
-        if u == "https://example.com/cat.png"));
-    assert!(matches!(&user.content[2], ContentBlock::Image { source: ImageSource::Base64 { media_type, .. }, .. }
-        if media_type == "image/png"));
+    assert!(matches!(
+        &user.content[0],
+        ContentBlock::Text { cache: Some(_), .. }
+    ));
+    assert!(
+        matches!(&user.content[1], ContentBlock::Image { source: ImageSource::Url(u), .. }
+        if u == "https://example.com/cat.png")
+    );
+    assert!(
+        matches!(&user.content[2], ContentBlock::Image { source: ImageSource::Base64 { media_type, .. }, .. }
+        if media_type == "image/png")
+    );
     assert!(matches!(&user.content[3], ContentBlock::Opaque { format, .. } if format == F));
 
     let assistant = &req.messages[3];
     assert_eq!(assistant.content.len(), 4);
-    assert!(matches!(&assistant.content[0], ContentBlock::Thinking { text: Some(t), signature: None, .. }
-        if t == "The image shows a cat."));
-    assert!(matches!(&assistant.content[1], ContentBlock::Text { text, .. }
-        if text == "A cat. Let me check the weather too."));
-    assert!(matches!(&assistant.content[2], ContentBlock::ToolCall { id: Some(id), name, .. }
-        if id == "call_1" && name == "get_weather"));
-    let ContentBlock::ToolCall { name, arguments, extra, .. } = &assistant.content[3] else {
+    assert!(
+        matches!(&assistant.content[0], ContentBlock::Thinking { text: Some(t), signature: None, .. }
+        if t == "The image shows a cat.")
+    );
+    assert!(
+        matches!(&assistant.content[1], ContentBlock::Text { text, .. }
+        if text == "A cat. Let me check the weather too.")
+    );
+    assert!(
+        matches!(&assistant.content[2], ContentBlock::ToolCall { id: Some(id), name, .. }
+        if id == "call_1" && name == "get_weather")
+    );
+    let ContentBlock::ToolCall {
+        name,
+        arguments,
+        extra,
+        ..
+    } = &assistant.content[3]
+    else {
         panic!("expected custom tool call");
     };
     assert_eq!(name, "run_sql");
@@ -957,11 +1186,17 @@ fn canonical_request_parses_expected_ir_shape() {
     assert_eq!(extra.get(F).unwrap().get("type"), Some(&json!("custom")));
 
     // Tool messages carry one result each; empty vs string vs parts hold.
-    assert!(matches!(&req.messages[4].content[0], ContentBlock::ToolResult { content, name: Some(n), .. }
-        if content.len() == 1 && n == "get_weather"));
-    assert!(matches!(&req.messages[5].content[0], ContentBlock::ToolResult { content, name: None, .. }
-        if content.len() == 2));
-    assert!(matches!(&req.messages[6].content[0], ContentBlock::Opaque { format, .. } if format == F));
+    assert!(
+        matches!(&req.messages[4].content[0], ContentBlock::ToolResult { content, name: Some(n), .. }
+        if content.len() == 1 && n == "get_weather")
+    );
+    assert!(
+        matches!(&req.messages[5].content[0], ContentBlock::ToolResult { content, name: None, .. }
+        if content.len() == 2)
+    );
+    assert!(
+        matches!(&req.messages[6].content[0], ContentBlock::Opaque { format, .. } if format == F)
+    );
 
     // Parameters and knobs.
     assert_eq!(req.max_output_tokens, Some(512));
@@ -969,7 +1204,10 @@ fn canonical_request_parses_expected_ir_shape() {
     assert_eq!(req.seed, Some(42));
     assert_eq!(req.cache_key.as_deref(), Some("cache-1"));
     assert_eq!(req.reasoning.as_ref().unwrap().effort, Some(Effort::Medium));
-    assert!(matches!(req.output_format, Some(OutputFormat::JsonSchema { .. })));
+    assert!(matches!(
+        req.output_format,
+        Some(OutputFormat::JsonSchema { .. })
+    ));
     assert_eq!(req.tools.as_ref().unwrap().len(), 3);
     assert!(matches!(&req.tools.as_ref().unwrap()[2], Tool::Opaque { format, .. } if format == F));
     assert_eq!(req.tool_choice, Some(ToolChoice::Auto));
@@ -994,13 +1232,18 @@ fn ir_round_trip_preserves_modeled_fields() {
             ContentBlock::text("answer"),
             ContentBlock::tool_call_with_id("c1", "f", "{\"a\":1}"),
         ]),
-        Message::tool(vec![ContentBlock::tool_result_text(Some("c1".into()), "ok")]),
+        Message::tool(vec![ContentBlock::tool_result_text(
+            Some("c1".into()),
+            "ok",
+        )]),
     ]);
     req.max_output_tokens = Some(9);
     req.temperature = Some(0.1);
     req.stop_sequences = Some(vec!["X".into(), "Y".into()]);
     req.tool_choice = Some(ToolChoice::Required);
-    req.tools = Some(vec![Tool::function(FunctionTool::new("f").with_strict(true))]);
+    req.tools = Some(vec![Tool::function(
+        FunctionTool::new("f").with_strict(true),
+    )]);
     req.parallel_tool_calls = Some(true);
     req.reasoning = Some(Reasoning::effort(Effort::Medium));
     req.output_format = Some(OutputFormat::json_object());
@@ -1079,7 +1322,10 @@ fn request_parse_mirrors_unmodeled_fields_into_extra() {
     assert!(ns.contains_key("tool_choice"));
     assert!(ns.contains_key("prediction"));
     // The participant name mirrors on the message.
-    assert_eq!(req.messages[0].extra.get(F).unwrap().get("name"), Some(&json!("alice")));
+    assert_eq!(
+        req.messages[0].extra.get(F).unwrap().get("name"),
+        Some(&json!("alice"))
+    );
 
     // Everything restores verbatim.
     let (body, _) = from_ir_unary(&req);
@@ -1097,7 +1343,10 @@ fn request_parse_mirrors_unmodeled_fields_into_extra() {
         }},
     });
     let (req, _) = request_to_ir(&serde_json::to_vec(&wire).unwrap()).unwrap();
-    assert!(matches!(req.output_format, Some(OutputFormat::JsonSchema { .. })));
+    assert!(matches!(
+        req.output_format,
+        Some(OutputFormat::JsonSchema { .. })
+    ));
     assert_eq!(
         req.extra.get(F).unwrap().get("response_format"),
         Some(&json!({"json_schema": {"vendor_hint": true}}))
@@ -1116,7 +1365,10 @@ fn null_valued_unknown_fields_canonicalize_to_absent() {
     assert!(req.extra.is_empty());
     assert!(req.messages[0].extra.is_empty());
     let (body, _) = from_ir_unary(&req);
-    assert_eq!(body, json!({"messages": [{"role": "user", "content": "hi"}]}));
+    assert_eq!(
+        body,
+        json!({"messages": [{"role": "user", "content": "hi"}]})
+    );
 }
 
 #[test]
@@ -1132,11 +1384,18 @@ fn legacy_function_role_and_unknown_roles_round_trip() {
     // `function` is a documented legacy role and parses silently to Tool;
     // the unknown role warns.
     assert_eq!(req.messages[1].role, Role::Tool);
-    assert!(matches!(&req.messages[1].content[0], ContentBlock::Opaque { format, .. } if format == F));
+    assert!(
+        matches!(&req.messages[1].content[0], ContentBlock::Opaque { format, .. } if format == F)
+    );
     assert_eq!(req.messages[2].role, Role::User);
-    assert!(matches!(&req.messages[2].content[0], ContentBlock::Opaque { .. }));
-    let unknown: Vec<_> =
-        warnings.iter().filter(|w| w.code == WarningCode::MalformedField).collect();
+    assert!(matches!(
+        &req.messages[2].content[0],
+        ContentBlock::Opaque { .. }
+    ));
+    let unknown: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.code == WarningCode::MalformedField)
+        .collect();
     assert_eq!(unknown.len(), 1, "{warnings:?}");
 
     let (body, build_warnings) = from_ir_unary(&req);
@@ -1214,7 +1473,12 @@ fn response_text_parses_envelope_blocks_and_usage() {
     assert_eq!(resp.text(), "Hello from Paris.");
     // Message-level unknown fields (annotations) ride the message extra.
     let ns = resp.message.extra.get(F).unwrap();
-    assert_eq!(ns.get("annotations").and_then(Value::as_array).map(Vec::len), Some(1));
+    assert_eq!(
+        ns.get("annotations")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(1)
+    );
     let usage = resp.usage.as_ref().unwrap();
     assert_eq!(usage.input_tokens, 36); // prompt_tokens already includes cached
     assert_eq!(usage.output_tokens, 87);
@@ -1233,10 +1497,18 @@ fn response_tool_calls_parse_and_replay() {
     let resp = response_to_ir(&fixture("response_tool_calls.json"), &meta_ok()).unwrap();
     assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
     assert_eq!(resp.message.content.len(), 2);
-    assert!(matches!(&resp.message.content[0], ContentBlock::ToolCall { id: Some(id), name, arguments, .. }
+    assert!(
+        matches!(&resp.message.content[0], ContentBlock::ToolCall { id: Some(id), name, arguments, .. }
         if id == "call_abc123" && name == "get_current_weather"
-           && arguments == "{\"location\": \"Boston, MA\"}"));
-    let ContentBlock::ToolCall { name, arguments, extra, .. } = &resp.message.content[1] else {
+           && arguments == "{\"location\": \"Boston, MA\"}")
+    );
+    let ContentBlock::ToolCall {
+        name,
+        arguments,
+        extra,
+        ..
+    } = &resp.message.content[1]
+    else {
         panic!("expected custom call");
     };
     assert_eq!(name, "run_sql");
@@ -1272,7 +1544,13 @@ fn response_tool_calls_parse_and_replay() {
 fn response_reasoning_content_parses_to_thinking_and_replays() {
     let resp = response_to_ir(&fixture("response_reasoning.json"), &meta_ok()).unwrap();
     assert_eq!(resp.message.content.len(), 2);
-    let ContentBlock::Thinking { text, signature, extra, .. } = &resp.message.content[0] else {
+    let ContentBlock::Thinking {
+        text,
+        signature,
+        extra,
+        ..
+    } = &resp.message.content[0]
+    else {
         panic!("expected thinking block");
     };
     assert!(text.as_deref().unwrap().starts_with("Compare 9.11"));
@@ -1282,7 +1560,10 @@ fn response_reasoning_content_parses_to_thinking_and_replays() {
     let usage = resp.usage.as_ref().unwrap();
     assert_eq!(usage.reasoning_tokens, Some(45));
     // Dialect usage fields survive in the raw usage object.
-    assert_eq!(usage.raw.as_ref().unwrap()["prompt_cache_miss_tokens"], json!(20));
+    assert_eq!(
+        usage.raw.as_ref().unwrap()["prompt_cache_miss_tokens"],
+        json!(20)
+    );
 
     // Replay: the thinking block is native and re-emits as
     // reasoning_content, warning-free.
@@ -1314,11 +1595,21 @@ fn response_refusal_normalizes_stop_reason() {
 fn response_multi_choice_reads_first_and_warns() {
     let resp = response_to_ir(&fixture("response_multi_choice.json"), &meta_ok()).unwrap();
     assert_eq!(resp.text(), "First answer.");
-    let w = resp.warnings.iter().find(|w| w.code == WarningCode::MultipleCandidates).unwrap();
+    let w = resp
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::MultipleCandidates)
+        .unwrap();
     assert_eq!(w.severity, WarningSeverity::Semantic);
     assert_eq!(w.location, "/choices");
     // The skipped choice stays in raw.
-    assert_eq!(resp.raw.as_ref().unwrap()["choices"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        resp.raw.as_ref().unwrap()["choices"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[test]
@@ -1336,8 +1627,7 @@ fn response_finish_reasons_map() {
         ("content_filter", StopReason::ContentFilter),
         ("function_call", StopReason::Other("function_call".into())),
     ] {
-        let resp =
-            response_to_ir(&serde_json::to_vec(&body(reason)).unwrap(), &meta_ok()).unwrap();
+        let resp = response_to_ir(&serde_json::to_vec(&body(reason)).unwrap(), &meta_ok()).unwrap();
         assert_eq!(resp.stop_reason, Some(expected), "reason {reason}");
     }
     // tool_calls → ToolUse (and EndTurn + tool calls normalizes too).
@@ -1363,22 +1653,35 @@ fn response_without_choices_is_empty_with_warning() {
 
 #[test]
 fn models_request_and_response() {
-    let built = OpenAiChatCompletions.build_models_request(&ctx(CallMode::Unary), None).unwrap();
+    let built = OpenAiChatCompletions
+        .build_models_request(&ctx(CallMode::Unary), None)
+        .unwrap();
     assert_eq!(built.method, http::Method::GET);
     assert_eq!(built.url.to_string(), "https://api.openai.com/v1/models");
     assert!(built.auth.is_some());
     assert!(built.body.is_empty());
 
-    let (models, cursor) =
-        OpenAiChatCompletions.parse_models_response(&fixture("models_list.json")).unwrap();
+    let (models, cursor) = OpenAiChatCompletions
+        .parse_models_response(&fixture("models_list.json"))
+        .unwrap();
     assert!(cursor.is_none(), "OpenAI model listing is a single page");
     assert_eq!(models.len(), 2, "the id-less entry is skipped");
     assert_eq!(models[0].id, "gpt-4.1");
     assert!(models[0].display_name.is_none());
     let created = models[0].created.unwrap();
-    assert_eq!(created.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(), 1_686_935_002);
+    assert_eq!(
+        created
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        1_686_935_002
+    );
     assert_eq!(models[1].id, "deepseek-reasoner");
-    assert!(OpenAiChatCompletions.parse_models_response(b"garbage").is_err());
+    assert!(
+        OpenAiChatCompletions
+            .parse_models_response(b"garbage")
+            .is_err()
+    );
 }
 
 // ---------------------------------------------------------------- count tokens
@@ -1434,10 +1737,15 @@ fn parse_error_maps_types_and_codes() {
             llm_api::ApiErrorKind::ServerError,
         ),
         // Unknown shapes fall back to status classification.
-        (429, r#"{"error": {"message": "slow", "type": "weird"}}"#, llm_api::ApiErrorKind::RateLimit),
+        (
+            429,
+            r#"{"error": {"message": "slow", "type": "weird"}}"#,
+            llm_api::ApiErrorKind::RateLimit,
+        ),
     ];
     for (status, body, expected) in cases {
-        let err = OpenAiChatCompletions.parse_error(status, &http::HeaderMap::new(), body.as_bytes());
+        let err =
+            OpenAiChatCompletions.parse_error(status, &http::HeaderMap::new(), body.as_bytes());
         match err {
             Error::Api { kind, parsed, .. } => {
                 assert_eq!(kind, expected, "body: {body}");
@@ -1451,10 +1759,21 @@ fn parse_error_maps_types_and_codes() {
 #[test]
 fn parse_error_keeps_raw_and_retry_after() {
     let mut headers = http::HeaderMap::new();
-    headers.insert(http::header::RETRY_AFTER, http::HeaderValue::from_static("7"));
+    headers.insert(
+        http::header::RETRY_AFTER,
+        http::HeaderValue::from_static("7"),
+    );
     let err = OpenAiChatCompletions.parse_error(429, &headers, b"<html>overloaded</html>");
     match err {
-        Error::Api { status, kind, message, raw, retry_after, parsed, .. } => {
+        Error::Api {
+            status,
+            kind,
+            message,
+            raw,
+            retry_after,
+            parsed,
+            ..
+        } => {
             assert_eq!(status, 429);
             assert_eq!(kind, llm_api::ApiErrorKind::RateLimit);
             assert!(message.contains("overloaded"));
@@ -1469,5 +1788,8 @@ fn parse_error_keeps_raw_and_retry_after() {
 #[test]
 fn format_id_is_registered_constant() {
     assert_eq!(OpenAiChatCompletions.id(), "openai_chat_completions");
-    assert_eq!(OpenAiChatCompletions.id(), llm_api::ids::OPENAI_CHAT_COMPLETIONS);
+    assert_eq!(
+        OpenAiChatCompletions.id(),
+        llm_api::ids::OPENAI_CHAT_COMPLETIONS
+    );
 }

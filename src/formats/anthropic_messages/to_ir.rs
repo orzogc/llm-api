@@ -8,9 +8,8 @@ use crate::convert::{ConversionWarning, WarningCode};
 use crate::error::{Error, Result};
 use crate::format::ResponseMeta;
 use crate::ir::{
-    CacheHint, ContentBlock, Effort, Extra, ImageSource, Message, OutputFormat, Reasoning,
-    Request, Response, Role, StopReason, ToolChoice, ToolOutputBlock, Usage,
-    normalize_stop_reason,
+    CacheHint, ContentBlock, Effort, Extra, ImageSource, Message, OutputFormat, Reasoning, Request,
+    Response, Role, StopReason, ToolChoice, ToolOutputBlock, Usage, normalize_stop_reason,
 };
 use crate::ir::{FunctionTool, Tool};
 
@@ -21,12 +20,19 @@ use super::types::{
 };
 use super::{FORMAT_ID as FMT, in_array_system_meta};
 
-fn pwarn(code: WarningCode, location: impl Into<String>, text: impl Into<String>) -> ConversionWarning {
+fn pwarn(
+    code: WarningCode,
+    location: impl Into<String>,
+    text: impl Into<String>,
+) -> ConversionWarning {
     ConversionWarning::from_format(code, FMT, location, text)
 }
 
 fn parse_error(message: impl Into<String>, raw: &[u8]) -> Error {
-    Error::Parse { message: message.into(), raw: bytes::Bytes::copy_from_slice(raw) }
+    Error::Parse {
+        message: message.into(),
+        raw: bytes::Bytes::copy_from_slice(raw),
+    }
 }
 
 /// Reads a block's `type` discriminator.
@@ -105,7 +111,11 @@ pub(crate) fn parse_assistant_block(
             Ok(t) => {
                 let mut rest = t.extra;
                 let cache = split_cache_control(t.cache_control, &mut rest);
-                ContentBlock::Text { text: t.text, cache, extra: extra_from(rest) }
+                ContentBlock::Text {
+                    text: t.text,
+                    cache,
+                    extra: extra_from(rest),
+                }
             }
             Err(op) => op,
         },
@@ -116,8 +126,7 @@ pub(crate) fn parse_assistant_block(
                 ContentBlock::ToolCall {
                     id: Some(t.id),
                     name: t.name,
-                    arguments: serde_json::to_string(&t.input)
-                        .unwrap_or_else(|_| "{}".to_owned()),
+                    arguments: serde_json::to_string(&t.input).unwrap_or_else(|_| "{}".to_owned()),
                     cache,
                     extra: extra_from(rest),
                 }
@@ -230,7 +239,11 @@ fn parse_nested_tool_block(
                 .filter(|(k, _)| k.as_str() != "type" && k.as_str() != "text")
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            ToolOutputBlock::Text { text: text.to_owned(), cache: None, extra: extra_from(rest) }
+            ToolOutputBlock::Text {
+                text: text.to_owned(),
+                cache: None,
+                extra: extra_from(rest),
+            }
         }
         Some("image") => {
             let source = value
@@ -344,7 +357,11 @@ fn parse_wire_message(
             };
             let mut out: Vec<Message> = Vec::new();
             for (is_tool, run) in runs {
-                let mut m = if is_tool { Message::tool(run) } else { Message::user(run) };
+                let mut m = if is_tool {
+                    Message::tool(run)
+                } else {
+                    Message::user(run)
+                };
                 if let Some(g) = group {
                     m = m.with_turn_group(g);
                 }
@@ -400,8 +417,9 @@ pub(crate) fn parse_request_body(body: &[u8]) -> Result<(Request, Vec<Conversion
 
     // `model` selects configuration, not IR state; `stream` is decided by
     // the call mode — both are dropped (canonicalization).
-    req.max_output_tokens =
-        wire.max_tokens.map(|v| u32::try_from(v).unwrap_or(u32::MAX));
+    req.max_output_tokens = wire
+        .max_tokens
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
     req.temperature = wire.temperature;
     req.top_p = wire.top_p;
     req.top_k = wire.top_k.map(|v| u32::try_from(v).unwrap_or(u32::MAX));
@@ -585,9 +603,14 @@ pub(crate) fn parse_request_body(body: &[u8]) -> Result<(Request, Vec<Conversion
         }
         if let Some(format) = oc.format {
             if format.kind == "json_schema" && format.schema.is_some() {
-                req.output_format =
-                    Some(OutputFormat::json_schema(format.schema.clone().expect("checked")));
-                mirror_map(&mut unknown_root, &["output_config", "format"], format.extra);
+                req.output_format = Some(OutputFormat::json_schema(
+                    format.schema.clone().expect("checked"),
+                ));
+                mirror_map(
+                    &mut unknown_root,
+                    &["output_config", "format"],
+                    format.extra,
+                );
             } else {
                 if let Ok(v) = serde_json::to_value(&format) {
                     mirror(&mut unknown_root, &["output_config", "format"], v);
@@ -628,8 +651,10 @@ pub(crate) fn unify_usage(wire: &UsageWire, raw: Value) -> Usage {
     };
     usage.cache_read_tokens = wire.cache_read_input_tokens;
     usage.cache_write_tokens = wire.cache_creation_input_tokens;
-    usage.reasoning_tokens =
-        wire.output_tokens_details.as_ref().and_then(|d| d.thinking_tokens);
+    usage.reasoning_tokens = wire
+        .output_tokens_details
+        .as_ref()
+        .and_then(|d| d.thinking_tokens);
     usage.raw = Some(raw);
     usage
 }

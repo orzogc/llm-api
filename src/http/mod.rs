@@ -44,7 +44,10 @@ impl HttpError {
         kind: HttpErrorKind,
         source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
     ) -> Self {
-        Self { kind, source: Some(source.into()) }
+        Self {
+            kind,
+            source: Some(source.into()),
+        }
     }
 }
 

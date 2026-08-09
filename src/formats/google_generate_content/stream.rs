@@ -67,7 +67,10 @@ impl GoogleStreamParser {
     fn close_open(&mut self, events: &mut Vec<StreamEvent>) {
         if let Some(open) = self.open.take() {
             let index = open.index;
-            events.push(StreamEvent::BlockStop { index, block: Some(open.finalize()) });
+            events.push(StreamEvent::BlockStop {
+                index,
+                block: Some(open.finalize()),
+            });
         }
     }
 
@@ -99,8 +102,13 @@ impl GoogleStreamParser {
             ContentBlock::text("")
         };
         events.push(StreamEvent::BlockStart { index, block });
-        self.open =
-            Some(OpenBlock { index, thought, text: String::new(), signature: None, ns: Map::new() });
+        self.open = Some(OpenBlock {
+            index,
+            thought,
+            text: String::new(),
+            signature: None,
+            ns: Map::new(),
+        });
     }
 
     /// Processes one text-like part: continues the open block or opens a new
@@ -119,9 +127,15 @@ impl GoogleStreamParser {
         }
         let open = self.open.as_mut().expect("block just ensured open");
         if !text.is_empty() {
-            let delta =
-                if thought { BlockDelta::Thinking(text.clone()) } else { BlockDelta::Text(text.clone()) };
-            events.push(StreamEvent::BlockDelta { index: open.index, delta });
+            let delta = if thought {
+                BlockDelta::Thinking(text.clone())
+            } else {
+                BlockDelta::Text(text.clone())
+            };
+            events.push(StreamEvent::BlockDelta {
+                index: open.index,
+                delta,
+            });
             open.text.push_str(&text);
         }
         if let Some(sig) = signature {
@@ -161,11 +175,7 @@ impl GoogleStreamParser {
         events.push(StreamEvent::BlockStop { index, block: None });
     }
 
-    fn terminate(
-        &mut self,
-        stop_reason: StopReason,
-        events: &mut Vec<StreamEvent>,
-    ) {
+    fn terminate(&mut self, stop_reason: StopReason, events: &mut Vec<StreamEvent>) {
         self.close_open(events);
         events.push(StreamEvent::MessageDelta {
             stop_reason: Some(stop_reason),
@@ -179,8 +189,7 @@ impl GoogleStreamParser {
 impl StreamParser for GoogleStreamParser {
     fn parse(&mut self, event: &SseEvent) -> Result<(Vec<StreamEvent>, Vec<ConversionWarning>)> {
         let mut warnings = Vec::new();
-        let Ok(chunk) = serde_json::from_str::<types::GenerateContentResponse>(&event.data)
-        else {
+        let Ok(chunk) = serde_json::from_str::<types::GenerateContentResponse>(&event.data) else {
             warnings.push(ConversionWarning::from_format(
                 WarningCode::UnknownStreamEvent,
                 ID,
@@ -244,7 +253,12 @@ impl StreamParser for GoogleStreamParser {
                 for (pi, part) in content.parts.iter().enumerate() {
                     let location = format!("/candidates/0/content/parts/{pi}");
                     match classify_assistant_part(part, &location, &mut warnings) {
-                        AssistantPart::TextLike { thought, text, signature, ns } => {
+                        AssistantPart::TextLike {
+                            thought,
+                            text,
+                            signature,
+                            ns,
+                        } => {
                             self.text_part(thought, text, signature, ns, &mut events);
                         }
                         AssistantPart::Complete(block) => self.whole_block(block, &mut events),

@@ -95,8 +95,8 @@ use serde_json::Value;
 use crate::convert::{ConversionWarning, ConvertOptions, WarningCode, strict_gate};
 use crate::error::{ApiErrorKind, Error, Result, retry_after_from_headers};
 use crate::format::{
-    ApiFormat, AuthScheme, BuildCtx, BuiltRequest, CallMode, ResponseMeta, StreamParser,
-    build_url, finalize_request, ids,
+    ApiFormat, AuthScheme, BuildCtx, BuiltRequest, CallMode, ResponseMeta, StreamParser, build_url,
+    finalize_request, ids,
 };
 use crate::ir::{Request, Response, escape_pointer_token};
 use crate::models::{Model, system_time_from_unix_seconds};
@@ -185,7 +185,14 @@ impl ApiFormat for OpenAiResponses {
             &ctx.hooks,
             &built.messages,
         )?;
-        let url = build_url(&ctx.url, "responses", &ctx.model, None, &[], &ctx.extra_query)?;
+        let url = build_url(
+            &ctx.url,
+            "responses",
+            &ctx.model,
+            None,
+            &[],
+            &ctx.extra_query,
+        )?;
         let mut request = BuiltRequest::post_json(url, &built.body);
         request.auth = Some(AuthScheme::bearer());
         request.warnings = built.warnings;
@@ -253,7 +260,9 @@ impl ApiFormat for OpenAiResponses {
         for entry in list.data {
             // Entries without a string id cannot be addressed and are
             // skipped; `created` degrades to `None` silently (§ 13).
-            let Some(id) = entry.get("id").and_then(Value::as_str) else { continue };
+            let Some(id) = entry.get("id").and_then(Value::as_str) else {
+                continue;
+            };
             let mut model = Model::new(id, entry.clone());
             model.created = entry
                 .get("created")
@@ -303,8 +312,14 @@ impl ApiFormat for OpenAiResponses {
             }
         }
         strict_gate(ctx.convert.strict, &warnings)?;
-        let url =
-            build_url(&ctx.url, "responses/input_tokens", &ctx.model, None, &[], &ctx.extra_query)?;
+        let url = build_url(
+            &ctx.url,
+            "responses/input_tokens",
+            &ctx.model,
+            None,
+            &[],
+            &ctx.extra_query,
+        )?;
         let mut request = BuiltRequest::post_json(url, &built.body);
         request.auth = Some(AuthScheme::bearer());
         request.warnings = warnings;

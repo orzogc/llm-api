@@ -20,8 +20,10 @@ use llm_api::{
 const F: &str = "openai_chat_completions";
 
 fn fixture(name: &str) -> Vec<u8> {
-    let path =
-        format!("{}/tests/fixtures/openai_chat_completions/{name}", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/tests/fixtures/openai_chat_completions/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
     std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
 
@@ -36,7 +38,11 @@ fn sse_events(bytes: &[u8]) -> Vec<SseEvent> {
 /// succeed. Returns the unified events, warnings and the `finish` result.
 fn run_stream(
     name: &str,
-) -> (Vec<StreamEvent>, Vec<ConversionWarning>, llm_api::Result<Vec<StreamEvent>>) {
+) -> (
+    Vec<StreamEvent>,
+    Vec<ConversionWarning>,
+    llm_api::Result<Vec<StreamEvent>>,
+) {
     let mut parser = OpenAiChatCompletions.stream_parser();
     let mut events = Vec::new();
     let mut warnings = Vec::new();
@@ -60,7 +66,8 @@ fn ev(event: &StreamEvent) -> Value {
 fn accumulate(events: &[StreamEvent]) -> llm_api::Response {
     let mut acc = Accumulator::new();
     for event in events {
-        acc.push(&StreamItem::new(event.clone())).expect("accumulates");
+        acc.push(&StreamItem::new(event.clone()))
+            .expect("accumulates");
     }
     acc.finish().expect("accumulation finishes")
 }
@@ -101,7 +108,10 @@ fn text_stream_with_include_usage_final_chunk() {
         json!({"type": "message_delta", "stop_reason": "end_turn"})
     );
     // The include_usage final chunk (empty choices) carries the snapshot.
-    let StreamEvent::MessageDelta { stop_reason, usage, .. } = &events[6] else {
+    let StreamEvent::MessageDelta {
+        stop_reason, usage, ..
+    } = &events[6]
+    else {
         panic!("expected MessageDelta, got {:?}", events[6]);
     };
     assert!(stop_reason.is_none());
@@ -174,12 +184,20 @@ fn reasoning_content_transitions_open_new_blocks() {
     let resp = accumulate(&events);
     // Interleaved thinking→text→thinking→text survives verbatim (§ 9).
     assert_eq!(resp.message.content.len(), 4);
-    assert!(matches!(&resp.message.content[0], ContentBlock::Thinking { text: Some(t), .. }
-        if t == "Compare the decimals."));
-    assert!(matches!(&resp.message.content[1], ContentBlock::Text { text, .. } if text == "9.8 is larger."));
-    assert!(matches!(&resp.message.content[2], ContentBlock::Thinking { text: Some(t), .. }
-        if t == "Double-check."));
-    assert!(matches!(&resp.message.content[3], ContentBlock::Text { text, .. } if text == " Confirmed."));
+    assert!(
+        matches!(&resp.message.content[0], ContentBlock::Thinking { text: Some(t), .. }
+        if t == "Compare the decimals.")
+    );
+    assert!(
+        matches!(&resp.message.content[1], ContentBlock::Text { text, .. } if text == "9.8 is larger.")
+    );
+    assert!(
+        matches!(&resp.message.content[2], ContentBlock::Thinking { text: Some(t), .. }
+        if t == "Double-check.")
+    );
+    assert!(
+        matches!(&resp.message.content[3], ContentBlock::Text { text, .. } if text == " Confirmed.")
+    );
     assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
     assert_eq!(resp.usage.as_ref().unwrap().reasoning_tokens, Some(18));
 }
@@ -237,7 +255,10 @@ fn interleaved_tool_call_fragments_group_by_index() {
         })
     );
     // The finish chunk carried usage too — one MessageDelta with both.
-    let StreamEvent::MessageDelta { stop_reason, usage, .. } = &events[8] else {
+    let StreamEvent::MessageDelta {
+        stop_reason, usage, ..
+    } = &events[8]
+    else {
         panic!("expected MessageDelta, got {:?}", events[8]);
     };
     assert_eq!(*stop_reason, Some(StopReason::ToolUse));
@@ -247,10 +268,14 @@ fn interleaved_tool_call_fragments_group_by_index() {
     let resp = accumulate(&events);
     assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
     assert_eq!(resp.message.content.len(), 2);
-    assert!(matches!(&resp.message.content[0], ContentBlock::ToolCall { arguments, .. }
-        if arguments == "{\"city\":\"Paris\"}"));
-    assert!(matches!(&resp.message.content[1], ContentBlock::ToolCall { id: Some(id), .. }
-        if id == "call_b"));
+    assert!(
+        matches!(&resp.message.content[0], ContentBlock::ToolCall { arguments, .. }
+        if arguments == "{\"city\":\"Paris\"}")
+    );
+    assert!(
+        matches!(&resp.message.content[1], ContentBlock::ToolCall { id: Some(id), .. }
+        if id == "call_b")
+    );
 }
 
 #[test]
@@ -260,11 +285,17 @@ fn refusal_stream_accumulates_to_refusal_stop() {
     assert!(finish.is_ok());
 
     // The refusal channel opens a refusal-marked text block.
-    let StreamEvent::BlockStart { index: 0, block, .. } = &events[1] else {
+    let StreamEvent::BlockStart {
+        index: 0, block, ..
+    } = &events[1]
+    else {
         panic!("expected BlockStart, got {:?}", events[1]);
     };
     assert!(matches!(block, ContentBlock::Text { .. }));
-    assert_eq!(block.extra().unwrap().get(F).unwrap().get("refusal"), Some(&json!(true)));
+    assert_eq!(
+        block.extra().unwrap().get(F).unwrap().get("refusal"),
+        Some(&json!(true))
+    );
     assert_eq!(
         ev(&events[2]),
         json!({"type": "block_delta", "index": 0, "delta": {"type": "text", "value": "I cannot"}})
@@ -299,10 +330,15 @@ fn multi_choice_chunks_surface_as_unknown_once_warned() {
 
     // Three chunks carry choice index 1 → three Unknown events, one
     // warning for the whole stream.
-    let unknown = events.iter().filter(|e| matches!(e, StreamEvent::Unknown)).count();
+    let unknown = events
+        .iter()
+        .filter(|e| matches!(e, StreamEvent::Unknown))
+        .count();
     assert_eq!(unknown, 3, "{events:#?}");
-    let multi: Vec<_> =
-        warnings.iter().filter(|w| w.code == WarningCode::MultipleCandidates).collect();
+    let multi: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.code == WarningCode::MultipleCandidates)
+        .collect();
     assert_eq!(multi.len(), 1, "{warnings:?}");
 
     // Choice 0 still parses fully.
@@ -346,10 +382,7 @@ fn done_without_finish_reason_closes_open_blocks() {
     let (evs, _) = parser.parse(&SseEvent::new(None, "[DONE]")).unwrap();
     events.extend(evs);
     assert!(parser.finish().is_ok());
-    assert_eq!(
-        ev(&events[3]),
-        json!({"type": "block_stop", "index": 0})
-    );
+    assert_eq!(ev(&events[3]), json!({"type": "block_stop", "index": 0}));
     let resp = accumulate(&events);
     assert_eq!(resp.text(), "partial");
     assert!(resp.stop_reason.is_none());
@@ -365,7 +398,11 @@ fn tool_call_fragment_without_id_or_name_warns() {
         ]}, "finish_reason": null}],
     });
     let (events, warnings) = parser.parse(&chunk_event(&chunk)).unwrap();
-    assert!(warnings.iter().any(|w| w.code == WarningCode::MalformedField));
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.code == WarningCode::MalformedField)
+    );
     // The block still opens (empty name) and the arguments still stream.
     assert_eq!(
         ev(&events[1]),
@@ -405,8 +442,10 @@ fn late_name_fragments_fold_into_finalized_block() {
             _ => None,
         })
         .expect("finalized block");
-    assert!(matches!(&stop, ContentBlock::ToolCall { name, arguments, .. }
-        if name == "get_weather" && arguments == "{}"));
+    assert!(
+        matches!(&stop, ContentBlock::ToolCall { name, arguments, .. }
+        if name == "get_weather" && arguments == "{}")
+    );
 }
 
 #[test]
@@ -417,7 +456,11 @@ fn unknown_delta_fields_attach_to_open_block_or_unknown() {
         "finish_reason": null}]});
     let (events, warnings) = parser.parse(&chunk_event(&chunk)).unwrap();
     assert!(events.contains(&StreamEvent::Unknown));
-    assert!(warnings.iter().any(|w| w.code == WarningCode::UnknownStreamEvent));
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.code == WarningCode::UnknownStreamEvent)
+    );
     // Repeats of the same field do not warn again.
     let (_, warnings) = parser.parse(&chunk_event(&chunk)).unwrap();
     assert!(warnings.is_empty());
@@ -430,7 +473,11 @@ fn unknown_delta_fields_attach_to_open_block_or_unknown() {
         "delta": {"content": "!", "annotations": [{"type": "url_citation"}]}, "finish_reason": null}]});
     let (events, warnings) = parser.parse(&chunk_event(&annotated)).unwrap();
     assert!(warnings.is_empty(), "{warnings:?}");
-    let StreamEvent::BlockDelta { index: 0, delta: BlockDelta::Other(payload), .. } = &events[1]
+    let StreamEvent::BlockDelta {
+        index: 0,
+        delta: BlockDelta::Other(payload),
+        ..
+    } = &events[1]
     else {
         panic!("expected Other delta, got {events:#?}");
     };
@@ -460,7 +507,9 @@ fn custom_tool_call_type_survives_streaming() {
             _ => None,
         })
         .expect("finalized block");
-    let ContentBlock::ToolCall { id, extra, .. } = &stop else { panic!("expected tool call") };
+    let ContentBlock::ToolCall { id, extra, .. } = &stop else {
+        panic!("expected tool call")
+    };
     assert_eq!(id.as_deref(), Some("call_c"));
     let ns = extra.get(F).unwrap();
     assert_eq!(ns.get("type"), Some(&json!("custom")));

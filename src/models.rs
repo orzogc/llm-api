@@ -29,7 +29,12 @@ impl Model {
     /// A model with just an id and its raw entry.
     #[must_use]
     pub fn new(id: impl Into<String>, raw: Value) -> Self {
-        Self { id: id.into(), display_name: None, created: None, raw }
+        Self {
+            id: id.into(),
+            display_name: None,
+            created: None,
+            raw,
+        }
     }
 }
 
@@ -59,7 +64,10 @@ mod tests {
     #[test]
     fn unix_seconds() {
         let t = system_time_from_unix_seconds(1_700_000_000).unwrap();
-        assert_eq!(t.duration_since(UNIX_EPOCH).unwrap().as_secs(), 1_700_000_000);
+        assert_eq!(
+            t.duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            1_700_000_000
+        );
         // Pre-epoch values still parse.
         assert!(system_time_from_unix_seconds(-1).is_some());
     }

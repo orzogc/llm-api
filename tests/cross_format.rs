@@ -9,8 +9,7 @@ use llm_api::formats::openai_chat_completions::OpenAiChatCompletions;
 use llm_api::formats::openai_responses::OpenAiResponses;
 use llm_api::{
     ApiFormat, BuildCtx, CallMode, ContentBlock, ConversionError, ConvertOptions, Effort,
-    EndpointUrl, Error, Message, Reasoning, Request, Role, Tool, ToolChoice, WarningCode,
-    ids,
+    EndpointUrl, Error, Message, Reasoning, Request, Role, Tool, ToolChoice, WarningCode, ids,
 };
 use serde_json::Value;
 
@@ -83,7 +82,10 @@ fn is_error_true_native_on_anthropic_and_google_only() {
             ids::ANTHROPIC_MESSAGES => {
                 assert!(!dropped);
                 let s = body.to_string();
-                assert!(s.contains("\"is_error\":true"), "missing native is_error: {s}");
+                assert!(
+                    s.contains("\"is_error\":true"),
+                    "missing native is_error: {s}"
+                );
             }
             ids::GOOGLE_GENERATE_CONTENT => {
                 assert!(!dropped);
@@ -139,14 +141,20 @@ fn foreign_opaque_drops_with_warning_native_survives() {
 fn foreign_opaque_fails_under_strict_everywhere_but_home() {
     let mut req = Request::with_messages(vec![Message::user(vec![
         ContentBlock::text("hi"),
-        ContentBlock::opaque(ids::ANTHROPIC_MESSAGES, serde_json::json!({"type": "document"})),
+        ContentBlock::opaque(
+            ids::ANTHROPIC_MESSAGES,
+            serde_json::json!({"type": "document"}),
+        ),
     ])]);
     req.max_output_tokens = Some(64);
 
     for format in formats() {
         let result = format.build_request(&req, &strict_ctx());
         if format.id() == ids::ANTHROPIC_MESSAGES {
-            assert!(result.is_ok(), "native target must accept its own opaque node");
+            assert!(
+                result.is_ok(),
+                "native target must accept its own opaque node"
+            );
         } else {
             match result {
                 Err(Error::Conversion(ConversionError::Strict { .. })) => {}
@@ -169,7 +177,10 @@ fn effort_other_passes_verbatim_everywhere() {
         (ids::OPENAI_CHAT_COMPLETIONS, "/reasoning_effort"),
         (ids::OPENAI_RESPONSES, "/reasoning/effort"),
         (ids::ANTHROPIC_MESSAGES, "/output_config/effort"),
-        (ids::GOOGLE_GENERATE_CONTENT, "/generationConfig/thinkingConfig/thinkingLevel"),
+        (
+            ids::GOOGLE_GENERATE_CONTENT,
+            "/generationConfig/thinkingConfig/thinkingLevel",
+        ),
     ];
     for format in formats() {
         let (body, codes) = body_of(format.as_ref(), &req, &ctx());
@@ -197,7 +208,10 @@ fn tool_choice_required_mapping_table() {
         let (body, _) = body_of(format.as_ref(), &req, &ctx());
         match format.id() {
             ids::OPENAI_CHAT_COMPLETIONS | ids::OPENAI_RESPONSES => {
-                assert_eq!(body.pointer("/tool_choice").and_then(Value::as_str), Some("required"));
+                assert_eq!(
+                    body.pointer("/tool_choice").and_then(Value::as_str),
+                    Some("required")
+                );
             }
             ids::ANTHROPIC_MESSAGES => {
                 assert_eq!(
@@ -231,7 +245,12 @@ fn dynamic_round_trip_is_idempotent_on_every_format() {
         let second = format.build_request(&reparsed, &ctx()).unwrap();
         let a: Value = serde_json::from_slice(&first.body).unwrap();
         let b: Value = serde_json::from_slice(&second.body).unwrap();
-        assert_eq!(a, b, "{}: build→parse→build must be a fixed point", format.id());
+        assert_eq!(
+            a,
+            b,
+            "{}: build→parse→build must be a fixed point",
+            format.id()
+        );
     }
 }
 
@@ -253,7 +272,12 @@ fn on_message_hook_sees_serialized_sequence_on_every_format() {
         assert!(!seen.is_empty(), "{}: hook must run", format.id());
         // Indices are the serialized sequence: 0..n in order.
         for (expect, (index, _)) in seen.iter().enumerate() {
-            assert_eq!(*index, expect, "{}: indices must be sequential", format.id());
+            assert_eq!(
+                *index,
+                expect,
+                "{}: indices must be sequential",
+                format.id()
+            );
         }
         // The first serialized message is the user turn on every format.
         assert_eq!(seen[0].1, Role::User, "{}", format.id());

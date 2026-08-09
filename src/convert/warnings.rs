@@ -257,7 +257,13 @@ impl ConversionWarning {
         location: impl Into<String>,
         message: impl Into<String>,
     ) -> Self {
-        Self::new(code, format, ConversionDirection::ToFormat, location, message)
+        Self::new(
+            code,
+            format,
+            ConversionDirection::ToFormat,
+            location,
+            message,
+        )
     }
 
     /// Parse-side constructor shorthand.
@@ -268,7 +274,13 @@ impl ConversionWarning {
         location: impl Into<String>,
         message: impl Into<String>,
     ) -> Self {
-        Self::new(code, format, ConversionDirection::FromFormat, location, message)
+        Self::new(
+            code,
+            format,
+            ConversionDirection::FromFormat,
+            location,
+            message,
+        )
     }
 }
 

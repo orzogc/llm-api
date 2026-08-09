@@ -111,13 +111,19 @@ impl Reasoning {
     /// A configuration that just sets `enabled`.
     #[must_use]
     pub fn enabled(on: bool) -> Self {
-        Self { enabled: Some(on), ..Self::default() }
+        Self {
+            enabled: Some(on),
+            ..Self::default()
+        }
     }
 
     /// A configuration that just sets an effort tier.
     #[must_use]
     pub fn effort(effort: Effort) -> Self {
-        Self { effort: Some(effort), ..Self::default() }
+        Self {
+            effort: Some(effort),
+            ..Self::default()
+        }
     }
 }
 
@@ -128,7 +134,10 @@ mod tests {
     #[test]
     fn effort_serde() {
         assert_eq!(serde_json::to_string(&Effort::XHigh).unwrap(), "\"xhigh\"");
-        assert_eq!(serde_json::from_str::<Effort>("\"max\"").unwrap(), Effort::Max);
+        assert_eq!(
+            serde_json::from_str::<Effort>("\"max\"").unwrap(),
+            Effort::Max
+        );
         let other: Effort = serde_json::from_str("\"turbo\"").unwrap();
         assert_eq!(other, Effort::Other("turbo".into()));
         assert_eq!(serde_json::to_string(&other).unwrap(), "\"turbo\"");

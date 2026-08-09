@@ -187,7 +187,14 @@ impl ApiFormat for OpenAiChatCompletions {
             &ctx.hooks,
             &built.messages,
         )?;
-        let url = build_url(&ctx.url, "chat/completions", &ctx.model, None, &[], &ctx.extra_query)?;
+        let url = build_url(
+            &ctx.url,
+            "chat/completions",
+            &ctx.model,
+            None,
+            &[],
+            &ctx.extra_query,
+        )?;
         let mut request = BuiltRequest::post_json(url, &built.body);
         request.auth = Some(AuthScheme::bearer());
         request.warnings = built.warnings;
@@ -204,7 +211,10 @@ impl ApiFormat for OpenAiChatCompletions {
             .as_ref()
             .and_then(|v| serde_json::from_value::<types::ErrorBody>(v.clone()).ok())
             .and_then(|b| b.error);
-        let code = detail.as_ref().and_then(|d| d.code.as_ref()).and_then(Value::as_str);
+        let code = detail
+            .as_ref()
+            .and_then(|d| d.code.as_ref())
+            .and_then(Value::as_str);
         // Codes refine types: OpenAI reports auth failures as
         // `invalid_request_error` with `code: "invalid_api_key"`.
         let kind = match code {
@@ -267,7 +277,9 @@ impl ApiFormat for OpenAiChatCompletions {
         for entry in list.data {
             // Entries without a string id cannot be addressed and are
             // skipped; `created` degrades to `None` silently (§ 13).
-            let Some(id) = entry.get("id").and_then(Value::as_str) else { continue };
+            let Some(id) = entry.get("id").and_then(Value::as_str) else {
+                continue;
+            };
             let mut model = Model::new(id, entry.clone());
             model.created = entry
                 .get("created")

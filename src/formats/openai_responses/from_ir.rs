@@ -34,7 +34,11 @@ pub(crate) struct BuiltBody {
 }
 
 /// Build-side warning shorthand.
-fn warn(code: WarningCode, location: impl Into<String>, message: impl Into<String>) -> ConversionWarning {
+fn warn(
+    code: WarningCode,
+    location: impl Into<String>,
+    message: impl Into<String>,
+) -> ConversionWarning {
     ConversionWarning::to_format(code, FORMAT, location, message)
 }
 
@@ -64,7 +68,15 @@ pub(crate) fn build_body(
     let mut items: Vec<Value> = Vec::new();
     let mut pointers: Vec<(String, Role)> = Vec::new();
     for (mi, msg) in messages.iter().enumerate() {
-        build_message(msg, mi, options, &mut items, &mut pointers, &mut warnings, &mut log)?;
+        build_message(
+            msg,
+            mi,
+            options,
+            &mut items,
+            &mut pointers,
+            &mut warnings,
+            &mut log,
+        )?;
     }
     if !items.is_empty() {
         body.insert("input".to_owned(), Value::Array(items));
@@ -124,7 +136,10 @@ pub(crate) fn build_body(
         build_reasoning(reasoning, &mut body, &mut warnings, &mut log);
     }
     if let Some(format) = &req.output_format {
-        body.insert("text".to_owned(), json!({ "format": build_text_format(format) }));
+        body.insert(
+            "text".to_owned(),
+            json!({ "format": build_text_format(format) }),
+        );
     }
     if let Some(tools) = &req.tools {
         let built = build_tools(tools, &mut warnings, &mut log);
@@ -155,7 +170,13 @@ pub(crate) fn build_body(
     let mut body = Value::Object(body);
     req.extra.merge_into(FORMAT, &mut body, "", &mut log);
 
-    Ok(BuiltBody { body, warnings, merge_log: log, messages: pointers, generated_keys })
+    Ok(BuiltBody {
+        body,
+        warnings,
+        merge_log: log,
+        messages: pointers,
+        generated_keys,
+    })
 }
 
 /// Applies the § 7.3 orphan-tool-call policy and missing-thinking handling,
@@ -252,8 +273,13 @@ fn preprocess_messages<'a>(
             .enumerate()
             .filter(|(_, m)| {
                 m.role == Role::Assistant
-                    && m.content.iter().any(|b| matches!(b, ContentBlock::ToolCall { .. }))
-                    && !m.content.iter().any(|b| matches!(b, ContentBlock::Thinking { .. }))
+                    && m.content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolCall { .. }))
+                    && !m
+                        .content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::Thinking { .. }))
             })
             .map(|(i, _)| i)
             .collect();
@@ -301,10 +327,17 @@ fn find_orphans(messages: &[Message]) -> Vec<(usize, Vec<usize>)> {
         }
         let mut orphans = Vec::new();
         for (bi, block) in msg.content.iter().enumerate() {
-            let ContentBlock::ToolCall { id, name, .. } = block else { continue };
+            let ContentBlock::ToolCall { id, name, .. } = block else {
+                continue;
+            };
             let matched = messages.iter().skip(i + 1).any(|later| {
                 later.content.iter().any(|b| {
-                    let ContentBlock::ToolResult { tool_call_id, name: result_name, .. } = b else {
+                    let ContentBlock::ToolResult {
+                        tool_call_id,
+                        name: result_name,
+                        ..
+                    } = b
+                    else {
                         return false;
                     };
                     match id {
@@ -333,7 +366,9 @@ fn build_instructions(
     let mut texts: Vec<&str> = Vec::new();
     for (i, block) in system.iter().enumerate() {
         match block {
-            ContentBlock::Text { text, cache, extra, .. } => {
+            ContentBlock::Text {
+                text, cache, extra, ..
+            } => {
                 if cache.is_some() {
                     warnings.push(warn(
                         WarningCode::CacheHintDropped,
@@ -363,7 +398,11 @@ fn build_instructions(
             }
         }
     }
-    if texts.is_empty() { Ok(None) } else { Ok(Some(texts.join("\n\n"))) }
+    if texts.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(texts.join("\n\n")))
+    }
 }
 
 /// Serializes one IR message into `input` items.
@@ -421,7 +460,11 @@ fn build_input_message_item(
                 extra.merge_into(FORMAT, &mut part, &part_ptr, log);
                 parts.push(part);
             }
-            ContentBlock::Image { source, cache, extra } if msg.role == Role::User => {
+            ContentBlock::Image {
+                source,
+                cache,
+                extra,
+            } if msg.role == Role::User => {
                 let mut part = json!({"type": "input_image"});
                 set_image_source(&mut part, source);
                 apply_breakpoint(&mut part, cache.as_ref(), &part_ptr, warnings);
@@ -471,21 +514,20 @@ fn build_assistant_items(
     let mut text_group: Vec<&ContentBlock> = Vec::new();
     let mut group_key: Option<Value> = None;
 
-    let flush =
-        |group: &mut Vec<&ContentBlock>,
-         items: &mut Vec<Value>,
-         pointers: &mut Vec<(String, Role)>,
-         warnings: &mut Vec<ConversionWarning>,
-         log: &mut MergeLog| {
-            if group.is_empty() {
-                return;
-            }
-            let ptr = format!("/input/{}", items.len());
-            let item = build_assistant_message_item(group, &ptr, warnings, log);
-            items.push(item);
-            pointers.push((ptr, Role::Assistant));
-            group.clear();
-        };
+    let flush = |group: &mut Vec<&ContentBlock>,
+                 items: &mut Vec<Value>,
+                 pointers: &mut Vec<(String, Role)>,
+                 warnings: &mut Vec<ConversionWarning>,
+                 log: &mut MergeLog| {
+        if group.is_empty() {
+            return;
+        }
+        let ptr = format!("/input/{}", items.len());
+        let item = build_assistant_message_item(group, &ptr, warnings, log);
+        items.push(item);
+        pointers.push((ptr, Role::Assistant));
+        group.clear();
+    };
 
     for (bi, block) in msg.content.iter().enumerate() {
         match block {
@@ -500,22 +542,40 @@ fn build_assistant_items(
                 group_key = key;
                 text_group.push(block);
             }
-            ContentBlock::Thinking { text, signature, extra } => {
+            ContentBlock::Thinking {
+                text,
+                signature,
+                extra,
+            } => {
                 flush(&mut text_group, items, pointers, warnings, log);
                 let ptr = format!("/input/{}", items.len());
-                if let Some(item) =
-                    build_reasoning_item(text.as_deref(), signature.as_deref(), extra, options, &ptr, warnings, log)
-                {
+                if let Some(item) = build_reasoning_item(
+                    text.as_deref(),
+                    signature.as_deref(),
+                    extra,
+                    options,
+                    &ptr,
+                    warnings,
+                    log,
+                ) {
                     items.push(item);
                     pointers.push((ptr, Role::Assistant));
                 }
             }
-            ContentBlock::ToolCall { id, name, arguments, cache, extra } => {
+            ContentBlock::ToolCall {
+                id,
+                name,
+                arguments,
+                cache,
+                extra,
+            } => {
                 flush(&mut text_group, items, pointers, warnings, log);
                 let ptr = format!("/input/{}", items.len());
                 let call_id = id.clone().ok_or_else(|| {
                     ConversionError::missing(
-                        format!("tool call `{name}` requires an id (`call_id`) on the Responses API"),
+                        format!(
+                            "tool call `{name}` requires an id (`call_id`) on the Responses API"
+                        ),
                         ptr.clone(),
                     )
                 })?;
@@ -573,7 +633,8 @@ fn build_assistant_items(
     // The message-level extra merges into the first produced item.
     if items.len() > first_item {
         let ptr = format!("/input/{first_item}");
-        msg.extra.merge_into(FORMAT, &mut items[first_item], &ptr, log);
+        msg.extra
+            .merge_into(FORMAT, &mut items[first_item], &ptr, log);
     }
     Ok(())
 }
@@ -592,7 +653,9 @@ fn build_assistant_message_item(
     let mut content: Vec<Value> = Vec::new();
     let mut item_patch = Map::new();
     for (pi, block) in group.iter().enumerate() {
-        let ContentBlock::Text { text, cache, extra } = block else { continue };
+        let ContentBlock::Text { text, cache, extra } = block else {
+            continue;
+        };
         let part_ptr = format!("{item_ptr}/content/{pi}");
         let ns = extra.get(FORMAT).cloned().unwrap_or_default();
         if cache.is_some() {
@@ -709,7 +772,9 @@ fn is_native_thinking(signature: Option<&str>, extra: &Extra) -> bool {
     if has_own {
         return true;
     }
-    let has_any = extra.formats().any(|f| extra.get(f).is_some_and(|ns| !ns.is_empty()));
+    let has_any = extra
+        .formats()
+        .any(|f| extra.get(f).is_some_and(|ns| !ns.is_empty()));
     signature.is_some() && !has_any
 }
 
@@ -727,7 +792,14 @@ fn build_tool_items(
     for (bi, block) in msg.content.iter().enumerate() {
         let ptr = format!("/input/{}", items.len());
         match block {
-            ContentBlock::ToolResult { tool_call_id, name, content, is_error, cache, extra } => {
+            ContentBlock::ToolResult {
+                tool_call_id,
+                name,
+                content,
+                is_error,
+                cache,
+                extra,
+            } => {
                 let call_id = tool_call_id.clone().ok_or_else(|| {
                     ConversionError::missing(
                         "tool result requires `tool_call_id` (`call_id`) on the Responses API",
@@ -785,7 +857,8 @@ fn build_tool_items(
     }
     if items.len() > first_item {
         let ptr = format!("/input/{first_item}");
-        msg.extra.merge_into(FORMAT, &mut items[first_item], &ptr, log);
+        msg.extra
+            .merge_into(FORMAT, &mut items[first_item], &ptr, log);
     }
     Ok(())
 }
@@ -830,7 +903,11 @@ fn build_tool_output(
                 extra.merge_into(FORMAT, &mut part, &part_ptr, log);
                 parts.push(part);
             }
-            ToolOutputBlock::Image { source, cache, extra } => {
+            ToolOutputBlock::Image {
+                source,
+                cache,
+                extra,
+            } => {
                 if cache.is_some() {
                     nested_hint(warnings, part_ptr.clone());
                 }
@@ -859,7 +936,9 @@ fn build_tool_output(
 fn set_image_source(part: &mut Value, source: &ImageSource) {
     match source {
         ImageSource::Url(url) => part["image_url"] = Value::from(url.clone()),
-        ImageSource::Base64 { media_type, data, .. } => {
+        ImageSource::Base64 {
+            media_type, data, ..
+        } => {
             part["image_url"] = Value::from(to_data_url(media_type, data));
         }
         ImageSource::FileId(id) => part["file_id"] = Value::from(id.clone()),
@@ -920,7 +999,9 @@ fn build_reasoning(
         return;
     }
     let mut value = Value::Object(obj);
-    reasoning.extra.merge_into(FORMAT, &mut value, "/reasoning", log);
+    reasoning
+        .extra
+        .merge_into(FORMAT, &mut value, "/reasoning", log);
     body.insert("reasoning".to_owned(), value);
 }
 
@@ -928,7 +1009,13 @@ fn build_reasoning(
 /// `"response"` — the field is required upstream.
 fn build_text_format(format: &OutputFormat) -> Value {
     match format {
-        OutputFormat::JsonSchema { name, description, schema, strict, .. } => {
+        OutputFormat::JsonSchema {
+            name,
+            description,
+            schema,
+            strict,
+            ..
+        } => {
             let mut obj = json!({
                 "type": "json_schema",
                 "name": name.clone().unwrap_or_else(|| "response".to_owned()),
@@ -965,8 +1052,14 @@ fn build_tools(
                 if let Some(description) = &f.description {
                     obj.insert("description".to_owned(), Value::from(description.clone()));
                 }
-                obj.insert("parameters".to_owned(), f.parameters.clone().unwrap_or(Value::Null));
-                obj.insert("strict".to_owned(), f.strict.map(Value::from).unwrap_or(Value::Null));
+                obj.insert(
+                    "parameters".to_owned(),
+                    f.parameters.clone().unwrap_or(Value::Null),
+                );
+                obj.insert(
+                    "strict".to_owned(),
+                    f.strict.map(Value::from).unwrap_or(Value::Null),
+                );
                 if f.cache.is_some() {
                     warnings.push(warn(
                         WarningCode::CacheHintDropped,

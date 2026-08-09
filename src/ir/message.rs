@@ -35,7 +35,9 @@ impl RoundTripMeta {
         let mut map = Map::new();
         map.insert("v".to_owned(), Value::from(Self::VERSION));
         map.extend(fields);
-        Self { raw: Value::Object(map) }
+        Self {
+            raw: Value::Object(map),
+        }
     }
 
     /// Reads a field of a valid v1 payload; `None` for malformed or
@@ -85,7 +87,12 @@ impl Message {
     /// A message with the given role and content.
     #[must_use]
     pub fn new(role: Role, content: Vec<ContentBlock>) -> Self {
-        Self { role, content, round_trip: None, extra: Extra::new() }
+        Self {
+            role,
+            content,
+            round_trip: None,
+            extra: Extra::new(),
+        }
     }
 
     /// A user message.
@@ -152,7 +159,9 @@ impl Message {
     /// Reads a valid turn-group id off this message, if any.
     #[must_use]
     pub fn turn_group_id(&self) -> Option<u64> {
-        self.round_trip.as_ref().and_then(RoundTripMeta::turn_group_id)
+        self.round_trip
+            .as_ref()
+            .and_then(RoundTripMeta::turn_group_id)
     }
 }
 
@@ -166,10 +175,18 @@ mod tests {
         // Valid v1.
         let m = RoundTripMeta::turn_group(3);
         assert_eq!(m.turn_group_id(), Some(3));
-        assert_eq!(serde_json::to_value(&m).unwrap(), json!({"v": 1, "turn_group": 3}));
+        assert_eq!(
+            serde_json::to_value(&m).unwrap(),
+            json!({"v": 1, "turn_group": 3})
+        );
 
         // Malformed / future values degrade to None instead of failing.
-        for raw in [json!(null), json!("junk"), json!({"v": 99, "turn_group": 3}), json!({})] {
+        for raw in [
+            json!(null),
+            json!("junk"),
+            json!({"v": 99, "turn_group": 3}),
+            json!({}),
+        ] {
             let meta: RoundTripMeta = serde_json::from_value(raw.clone()).unwrap();
             assert_eq!(meta.turn_group_id(), None);
             // Future payloads survive re-serialization verbatim.

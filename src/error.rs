@@ -190,7 +190,10 @@ impl ConversionError {
     /// crate).
     #[must_use]
     pub fn missing(what: impl Into<String>, location: impl Into<String>) -> Self {
-        Self::MissingRequired { what: what.into(), location: location.into() }
+        Self::MissingRequired {
+            what: what.into(),
+            location: location.into(),
+        }
     }
 
     /// An `InvalidToolArguments` error.
@@ -216,13 +219,19 @@ impl ConversionError {
         block: &'static str,
         location: impl Into<String>,
     ) -> Self {
-        Self::InvalidBlockForRole { role, block, location: location.into() }
+        Self::InvalidBlockForRole {
+            role,
+            block,
+            location: location.into(),
+        }
     }
 
     /// An `Other` structural error.
     #[must_use]
     pub fn other(message: impl Into<String>) -> Self {
-        Self::Other { message: message.into() }
+        Self::Other {
+            message: message.into(),
+        }
     }
 }
 
@@ -231,7 +240,10 @@ impl Error {
     /// [`crate::ApiFormat`] / [`crate::StreamParser`] implementations.
     #[must_use]
     pub fn parse(message: impl Into<String>, raw: impl Into<Bytes>) -> Self {
-        Self::Parse { message: message.into(), raw: raw.into() }
+        Self::Parse {
+            message: message.into(),
+            raw: raw.into(),
+        }
     }
 
     /// An `Api` error with the given classification; `retry_after` is
@@ -266,21 +278,44 @@ impl fmt::Display for ConversionError {
             Self::MissingRequired { what, location, .. } => {
                 write!(f, "missing required data: {what} (at {location})")
             }
-            Self::InvalidToolArguments { name, reason, location, .. } => {
-                write!(f, "tool call `{name}`: arguments are not a JSON object: {reason} (at {location})")
+            Self::InvalidToolArguments {
+                name,
+                reason,
+                location,
+                ..
+            } => {
+                write!(
+                    f,
+                    "tool call `{name}`: arguments are not a JSON object: {reason} (at {location})"
+                )
             }
-            Self::InvalidBlockForRole { role, block, location, .. } => {
-                write!(f, "{block} block is not valid in a {role:?} message (at {location})")
+            Self::InvalidBlockForRole {
+                role,
+                block,
+                location,
+                ..
+            } => {
+                write!(
+                    f,
+                    "{block} block is not valid in a {role:?} message (at {location})"
+                )
             }
             Self::Strict { warnings, .. } => {
-                write!(f, "strict mode: {} semantic warning(s) escalated to an error", warnings.len())?;
+                write!(
+                    f,
+                    "strict mode: {} semantic warning(s) escalated to an error",
+                    warnings.len()
+                )?;
                 if let Some(w) = warnings.first() {
                     write!(f, "; first: {}", w.message)?;
                 }
                 Ok(())
             }
             Self::ProtectedQueryKey { key, .. } => {
-                write!(f, "query key `{key}` is required by the format and cannot be overridden")
+                write!(
+                    f,
+                    "query key `{key}` is required by the format and cannot be overridden"
+                )
             }
             Self::Other { message, .. } => f.write_str(message),
         }
@@ -300,7 +335,10 @@ impl HookError {
     /// Creates a hook error from a message.
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into(), source: None }
+        Self {
+            message: message.into(),
+            source: None,
+        }
     }
 
     /// Creates a hook error wrapping another error.
@@ -309,7 +347,10 @@ impl HookError {
         message: impl Into<String>,
         source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
     ) -> Self {
-        Self { message: message.into(), source: Some(source.into()) }
+        Self {
+            message: message.into(),
+            source: Some(source.into()),
+        }
     }
 }
 
@@ -329,7 +370,13 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Transport(e) => write!(f, "transport error: {e}"),
-            Self::Api { status, kind, message, truncated, .. } => {
+            Self::Api {
+                status,
+                kind,
+                message,
+                truncated,
+                ..
+            } => {
                 write!(f, "API error (HTTP {status}, {kind:?}): {message}")?;
                 if *truncated {
                     write!(f, " [body truncated]")?;
@@ -399,7 +446,10 @@ mod tests {
     fn api_error_kind_from_status() {
         assert_eq!(ApiErrorKind::from_status(400), ApiErrorKind::InvalidRequest);
         assert_eq!(ApiErrorKind::from_status(401), ApiErrorKind::Auth);
-        assert_eq!(ApiErrorKind::from_status(403), ApiErrorKind::PermissionDenied);
+        assert_eq!(
+            ApiErrorKind::from_status(403),
+            ApiErrorKind::PermissionDenied
+        );
         assert_eq!(ApiErrorKind::from_status(404), ApiErrorKind::NotFound);
         assert_eq!(ApiErrorKind::from_status(422), ApiErrorKind::InvalidRequest);
         assert_eq!(ApiErrorKind::from_status(429), ApiErrorKind::RateLimit);
@@ -411,7 +461,10 @@ mod tests {
     #[test]
     fn retry_after_parses_seconds_only() {
         let mut h = http::HeaderMap::new();
-        h.insert(http::header::RETRY_AFTER, http::HeaderValue::from_static("12"));
+        h.insert(
+            http::header::RETRY_AFTER,
+            http::HeaderValue::from_static("12"),
+        );
         assert_eq!(retry_after_from_headers(&h), Some(Duration::from_secs(12)));
 
         h.insert(

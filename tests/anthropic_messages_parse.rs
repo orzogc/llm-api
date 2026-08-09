@@ -12,7 +12,10 @@ use serde_json::{Value, json};
 const FMT: &str = "anthropic_messages";
 
 fn fixture(name: &str) -> Vec<u8> {
-    let path = format!("{}/tests/fixtures/anthropic_messages/{name}", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/tests/fixtures/anthropic_messages/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
     std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
 }
 
@@ -25,7 +28,9 @@ fn ctx_for(model: &str) -> BuildCtx {
 }
 
 fn rebuild(req: &Request, model: &str) -> Value {
-    let built = AnthropicMessages.build_request(req, &ctx_for(model)).unwrap();
+    let built = AnthropicMessages
+        .build_request(req, &ctx_for(model))
+        .unwrap();
     serde_json::from_slice(&built.body).unwrap()
 }
 
@@ -36,8 +41,13 @@ fn assert_round_trip(bytes: &[u8]) -> Request {
     let model = original["model"].as_str().unwrap().to_owned();
     let (req, _) = AnthropicMessages.parse_request(bytes).unwrap();
     let first = rebuild(&req, &model);
-    assert_eq!(first, original, "first pass must reproduce the canonical fixture");
-    let (req2, _) = AnthropicMessages.parse_request(&serde_json::to_vec(&first).unwrap()).unwrap();
+    assert_eq!(
+        first, original,
+        "first pass must reproduce the canonical fixture"
+    );
+    let (req2, _) = AnthropicMessages
+        .parse_request(&serde_json::to_vec(&first).unwrap())
+        .unwrap();
     let second = rebuild(&req2, &model);
     assert_eq!(second, first, "second pass must be idempotent");
     req
@@ -56,12 +66,18 @@ fn round_trip_full_request() {
     assert_eq!(req.tool_choice, Some(ToolChoice::Auto));
     let metadata = req.metadata.as_ref().unwrap();
     assert_eq!(metadata.get("user_id"), Some(&json!("u-1")));
-    assert!(!metadata.contains_key("session"), "unknown metadata keys ride extra");
+    assert!(
+        !metadata.contains_key("session"),
+        "unknown metadata keys ride extra"
+    );
     let reasoning = req.reasoning.as_ref().unwrap();
     assert_eq!(reasoning.enabled, Some(true));
     assert_eq!(reasoning.include_thoughts, Some(false));
     assert_eq!(reasoning.effort, Some(Effort::High));
-    assert!(matches!(req.output_format, Some(OutputFormat::JsonSchema { .. })));
+    assert!(matches!(
+        req.output_format,
+        Some(OutputFormat::JsonSchema { .. })
+    ));
     let system = req.system.as_ref().unwrap();
     assert!(matches!(&system[0], ContentBlock::Text { text, .. } if text == "Be helpful."));
     let tools = req.tools.as_ref().unwrap();
@@ -76,7 +92,10 @@ fn round_trip_full_request() {
     }
     assert!(matches!(&tools[1], Tool::Opaque { format, .. } if format == FMT));
     // Unknown top-level field mirrored into the request extra.
-    assert_eq!(req.extra.get(FMT).unwrap().get("service_tier"), Some(&json!("auto")));
+    assert_eq!(
+        req.extra.get(FMT).unwrap().get("service_tier"),
+        Some(&json!("auto"))
+    );
 }
 
 #[test]
@@ -115,14 +134,20 @@ fn round_trip_mixed_tool_turn() {
     assert_eq!(g2, g3);
     // Tool results parsed with ids and content shapes.
     match &req.messages[2].content[0] {
-        ContentBlock::ToolResult { tool_call_id, content, .. } => {
+        ContentBlock::ToolResult {
+            tool_call_id,
+            content,
+            ..
+        } => {
             assert_eq!(tool_call_id.as_deref(), Some("toolu_1"));
             assert!(matches!(&content[0], ToolOutputBlock::Text { text, .. } if text == "sunny"));
         }
         other => panic!("unexpected block: {other:?}"),
     }
     match &req.messages[2].content[1] {
-        ContentBlock::ToolResult { content, is_error, .. } => {
+        ContentBlock::ToolResult {
+            content, is_error, ..
+        } => {
             assert_eq!(content.len(), 2);
             assert_eq!(*is_error, Some(false));
         }
@@ -140,14 +165,21 @@ fn round_trip_block_zoo() {
     ));
     // Thinking and redacted thinking.
     match &req.messages[1].content[0] {
-        ContentBlock::Thinking { text, signature, .. } => {
+        ContentBlock::Thinking {
+            text, signature, ..
+        } => {
             assert_eq!(text.as_deref(), Some("reasoning..."));
             assert_eq!(signature.as_deref(), Some("sig-1"));
         }
         other => panic!("unexpected block: {other:?}"),
     }
     match &req.messages[1].content[1] {
-        ContentBlock::Thinking { text, signature, extra, .. } => {
+        ContentBlock::Thinking {
+            text,
+            signature,
+            extra,
+            ..
+        } => {
             assert_eq!(*text, None);
             assert_eq!(signature.as_deref(), Some("opaque-blob"));
             assert_eq!(extra.get(FMT).unwrap().get("redacted"), Some(&json!(true)));
@@ -156,9 +188,17 @@ fn round_trip_block_zoo() {
     }
     // Tool call keeps `caller` in extra and the arguments as a string.
     match &req.messages[1].content[2] {
-        ContentBlock::ToolCall { id, arguments, extra, .. } => {
+        ContentBlock::ToolCall {
+            id,
+            arguments,
+            extra,
+            ..
+        } => {
             assert_eq!(id.as_deref(), Some("toolu_9"));
-            assert_eq!(serde_json::from_str::<Value>(arguments).unwrap(), json!({"q": "x"}));
+            assert_eq!(
+                serde_json::from_str::<Value>(arguments).unwrap(),
+                json!({"q": "x"})
+            );
             assert!(extra.get(FMT).unwrap().contains_key("caller"));
         }
         other => panic!("unexpected block: {other:?}"),
@@ -167,7 +207,10 @@ fn round_trip_block_zoo() {
     // rides the nested block's extra instead.
     match &req.messages[2].content[0] {
         ContentBlock::ToolResult { content, cache, .. } => {
-            assert!(cache.is_some(), "the tool_result's own cache_control is modeled");
+            assert!(
+                cache.is_some(),
+                "the tool_result's own cache_control is modeled"
+            );
             match &content[0] {
                 ToolOutputBlock::Text { cache, extra, .. } => {
                     assert!(cache.is_none());
@@ -196,7 +239,9 @@ fn non_canonical_forms_converge() {
             ]},
         ],
     });
-    let (req, _) = AnthropicMessages.parse_request(&serde_json::to_vec(&body).unwrap()).unwrap();
+    let (req, _) = AnthropicMessages
+        .parse_request(&serde_json::to_vec(&body).unwrap())
+        .unwrap();
     let first = rebuild(&req, "m");
     assert_eq!(
         first,
@@ -212,7 +257,9 @@ fn non_canonical_forms_converge() {
             ],
         })
     );
-    let (req2, _) = AnthropicMessages.parse_request(&serde_json::to_vec(&first).unwrap()).unwrap();
+    let (req2, _) = AnthropicMessages
+        .parse_request(&serde_json::to_vec(&first).unwrap())
+        .unwrap();
     assert_eq!(rebuild(&req2, "m"), first);
 }
 
@@ -223,7 +270,9 @@ fn parse_thinking_config_variants() {
         "messages": [{"role": "user", "content": "hi"}],
         "thinking": {"type": "disabled"},
     });
-    let (req, _) = AnthropicMessages.parse_request(&serde_json::to_vec(&body).unwrap()).unwrap();
+    let (req, _) = AnthropicMessages
+        .parse_request(&serde_json::to_vec(&body).unwrap())
+        .unwrap();
     assert_eq!(req.reasoning.as_ref().unwrap().enabled, Some(false));
 
     let body2 = json!({
@@ -231,7 +280,9 @@ fn parse_thinking_config_variants() {
         "messages": [{"role": "user", "content": "hi"}],
         "thinking": {"type": "adaptive", "display": "summarized"},
     });
-    let (req2, _) = AnthropicMessages.parse_request(&serde_json::to_vec(&body2).unwrap()).unwrap();
+    let (req2, _) = AnthropicMessages
+        .parse_request(&serde_json::to_vec(&body2).unwrap())
+        .unwrap();
     let reasoning = req2.reasoning.as_ref().unwrap();
     assert_eq!(reasoning.enabled, Some(true));
     assert_eq!(reasoning.include_thoughts, Some(true));
@@ -242,10 +293,15 @@ fn parse_thinking_config_variants() {
         "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
         "thinking": {"type": "hyperdrive", "warp": 9},
     });
-    let (req3, _) = AnthropicMessages.parse_request(&serde_json::to_vec(&body3).unwrap()).unwrap();
+    let (req3, _) = AnthropicMessages
+        .parse_request(&serde_json::to_vec(&body3).unwrap())
+        .unwrap();
     assert!(req3.reasoning.is_none());
     let rebuilt = rebuild(&req3, "m");
-    assert_eq!(rebuilt["thinking"], json!({"type": "hyperdrive", "warp": 9}));
+    assert_eq!(
+        rebuilt["thinking"],
+        json!({"type": "hyperdrive", "warp": 9})
+    );
 }
 
 #[test]
@@ -256,7 +312,9 @@ fn disable_parallel_tool_use_false_round_trips() {
         "tools": [{"name": "f", "input_schema": {"type": "object"}}],
         "tool_choice": {"type": "any", "disable_parallel_tool_use": false},
     });
-    let (req, _) = AnthropicMessages.parse_request(&serde_json::to_vec(&body).unwrap()).unwrap();
+    let (req, _) = AnthropicMessages
+        .parse_request(&serde_json::to_vec(&body).unwrap())
+        .unwrap();
     assert_eq!(req.tool_choice, Some(ToolChoice::Required));
     assert_eq!(req.parallel_tool_calls, Some(true));
     assert_eq!(rebuild(&req, "m"), body);
@@ -274,10 +332,15 @@ fn parse_unknown_role_warns_and_degrades_to_user() {
         "model": "m", "max_tokens": 5,
         "messages": [{"role": "critic", "content": "meh"}],
     });
-    let (req, warnings) =
-        AnthropicMessages.parse_request(&serde_json::to_vec(&body).unwrap()).unwrap();
+    let (req, warnings) = AnthropicMessages
+        .parse_request(&serde_json::to_vec(&body).unwrap())
+        .unwrap();
     assert_eq!(req.messages[0].role, Role::User);
-    assert!(warnings.iter().any(|w| w.code == WarningCode::MalformedField));
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.code == WarningCode::MalformedField)
+    );
 }
 
 fn meta() -> ResponseMeta {
@@ -309,10 +372,17 @@ fn parse_response_text_and_usage_unification() {
 
 #[test]
 fn parse_response_tool_use() {
-    let resp = AnthropicMessages.parse_response(&fixture("response_tool_use.json"), &meta()).unwrap();
+    let resp = AnthropicMessages
+        .parse_response(&fixture("response_tool_use.json"), &meta())
+        .unwrap();
     assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
     match &resp.message.content[1] {
-        ContentBlock::ToolCall { id, name, arguments, .. } => {
+        ContentBlock::ToolCall {
+            id,
+            name,
+            arguments,
+            ..
+        } => {
             assert_eq!(id.as_deref(), Some("toolu_01T1"));
             assert_eq!(name, "get_weather");
             assert_eq!(
@@ -326,7 +396,9 @@ fn parse_response_tool_use() {
 
 #[test]
 fn parse_response_thinking_blocks_and_history_replay() {
-    let resp = AnthropicMessages.parse_response(&fixture("response_thinking.json"), &meta()).unwrap();
+    let resp = AnthropicMessages
+        .parse_response(&fixture("response_thinking.json"), &meta())
+        .unwrap();
     assert_eq!(resp.message.content.len(), 3);
     assert_eq!(resp.usage.as_ref().unwrap().reasoning_tokens, Some(150));
     // Feeding the assistant message back as history reconstructs the wire
@@ -346,8 +418,9 @@ fn parse_response_thinking_blocks_and_history_replay() {
 
 #[test]
 fn parse_response_unmodeled_blocks_and_pause_turn() {
-    let resp =
-        AnthropicMessages.parse_response(&fixture("response_server_tool.json"), &meta()).unwrap();
+    let resp = AnthropicMessages
+        .parse_response(&fixture("response_server_tool.json"), &meta())
+        .unwrap();
     assert_eq!(resp.stop_reason, Some(StopReason::PauseTurn));
     assert!(matches!(
         &resp.message.content[0],
@@ -371,7 +444,10 @@ fn stop_reason_mapping_and_normalization() {
             .parse_response(&serde_json::to_vec(&body).unwrap(), &meta())
             .unwrap()
     };
-    assert_eq!(make("refusal", json!([])).stop_reason, Some(StopReason::Refusal));
+    assert_eq!(
+        make("refusal", json!([])).stop_reason,
+        Some(StopReason::Refusal)
+    );
     assert_eq!(
         make("model_context_window_exceeded", json!([])).stop_reason,
         Some(StopReason::Other("model_context_window_exceeded".into()))
@@ -390,9 +466,17 @@ fn stop_reason_mapping_and_normalization() {
 
 #[test]
 fn parse_error_mapping() {
-    let err = AnthropicMessages.parse_error(529, &Default::default(), &fixture("error_overloaded.json"));
+    let err =
+        AnthropicMessages.parse_error(529, &Default::default(), &fixture("error_overloaded.json"));
     match err {
-        Error::Api { status, kind, message, parsed, retry_after, .. } => {
+        Error::Api {
+            status,
+            kind,
+            message,
+            parsed,
+            retry_after,
+            ..
+        } => {
             assert_eq!(status, 529);
             assert_eq!(kind, ApiErrorKind::Overloaded);
             assert_eq!(message, "Overloaded");
@@ -414,7 +498,11 @@ fn parse_error_mapping() {
         ("billing_error", ApiErrorKind::Other("billing_error".into())),
     ] {
         let body = json!({"type": "error", "error": {"type": t, "message": "m"}});
-        let err = AnthropicMessages.parse_error(400, &Default::default(), &serde_json::to_vec(&body).unwrap());
+        let err = AnthropicMessages.parse_error(
+            400,
+            &Default::default(),
+            &serde_json::to_vec(&body).unwrap(),
+        );
         match err {
             Error::Api { kind: k, .. } => assert_eq!(k, kind, "for {t}"),
             other => panic!("unexpected error: {other:?}"),
@@ -443,10 +531,15 @@ fn parse_error_mapping() {
 
 #[test]
 fn models_request_and_response() {
-    let built = AnthropicMessages.build_models_request(&ctx_for("claude-sonnet-5"), None).unwrap();
+    let built = AnthropicMessages
+        .build_models_request(&ctx_for("claude-sonnet-5"), None)
+        .unwrap();
     assert_eq!(built.method.as_str(), "GET");
     assert_eq!(built.url.to_string(), "https://api.anthropic.com/v1/models");
-    assert_eq!(built.headers.get("anthropic-version").unwrap(), "2023-06-01");
+    assert_eq!(
+        built.headers.get("anthropic-version").unwrap(),
+        "2023-06-01"
+    );
     assert_eq!(built.auth.as_ref().unwrap().header.as_str(), "x-api-key");
 
     let with_cursor = AnthropicMessages
@@ -457,7 +550,9 @@ fn models_request_and_response() {
         "https://api.anthropic.com/v1/models?after_id=claude-opus-4-6"
     );
 
-    let (models, next) = AnthropicMessages.parse_models_response(&fixture("models_page.json")).unwrap();
+    let (models, next) = AnthropicMessages
+        .parse_models_response(&fixture("models_page.json"))
+        .unwrap();
     assert_eq!(models.len(), 2);
     assert_eq!(models[0].id, "claude-opus-4-6");
     assert_eq!(models[0].display_name.as_deref(), Some("Claude Opus 4.6"));
@@ -482,7 +577,9 @@ fn count_tokens_adapter() {
     req.max_output_tokens = Some(1024);
     req.temperature = Some(0.5);
     req.seed = Some(1); // chat-build cosmetic warning, kept in the output
-    let built = AnthropicMessages.build_count_tokens_request(&req, &ctx_for("claude-sonnet-5")).unwrap();
+    let built = AnthropicMessages
+        .build_count_tokens_request(&req, &ctx_for("claude-sonnet-5"))
+        .unwrap();
     assert_eq!(
         built.url.to_string(),
         "https://api.anthropic.com/v1/messages/count_tokens"
@@ -497,15 +594,27 @@ fn count_tokens_adapter() {
             "messages": [{"role": "user", "content": [{"type": "text", "text": "Hello, world"}]}],
         })
     );
-    assert!(built.warnings.iter().any(|w| w.code == WarningCode::SamplingParameterDropped));
-    assert!(!built.warnings.iter().any(|w| w.code == WarningCode::CountTokensFieldDropped));
+    assert!(
+        built
+            .warnings
+            .iter()
+            .any(|w| w.code == WarningCode::SamplingParameterDropped)
+    );
+    assert!(
+        !built
+            .warnings
+            .iter()
+            .any(|w| w.code == WarningCode::CountTokensFieldDropped)
+    );
 
     // Injected fields the endpoint rejects make the count inexact.
     let mut req2 = req.clone();
     req2.extra.set(FMT, "service_tier", "auto");
-    req2.extra.set(FMT, "context_management", json!({"edits": []}));
-    let built2 =
-        AnthropicMessages.build_count_tokens_request(&req2, &ctx_for("claude-sonnet-5")).unwrap();
+    req2.extra
+        .set(FMT, "context_management", json!({"edits": []}));
+    let built2 = AnthropicMessages
+        .build_count_tokens_request(&req2, &ctx_for("claude-sonnet-5"))
+        .unwrap();
     let body2: Value = serde_json::from_slice(&built2.body).unwrap();
     assert!(body2.get("service_tier").is_none());
     assert_eq!(body2["context_management"], json!({"edits": []})); // accepted key survives
@@ -519,8 +628,13 @@ fn count_tokens_adapter() {
     // Under strict the inexact count is an error.
     let mut strict_ctx = ctx_for("claude-sonnet-5");
     strict_ctx.convert = ConvertOptions::new().strict(true);
-    let err = AnthropicMessages.build_count_tokens_request(&req2, &strict_ctx).unwrap_err();
-    assert!(matches!(err, Error::Conversion(ConversionError::Strict { .. })));
+    let err = AnthropicMessages
+        .build_count_tokens_request(&req2, &strict_ctx)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        Error::Conversion(ConversionError::Strict { .. })
+    ));
 }
 
 #[test]
@@ -530,5 +644,8 @@ fn count_tokens_response_parses() {
         .parse_count_tokens_response(&serde_json::to_vec(&body).unwrap())
         .unwrap();
     assert_eq!(count.input_tokens, 2095);
-    assert_eq!(count.raw.as_ref().unwrap()["context_management"]["original_input_tokens"], json!(0));
+    assert_eq!(
+        count.raw.as_ref().unwrap()["context_management"]["original_input_tokens"],
+        json!(0)
+    );
 }

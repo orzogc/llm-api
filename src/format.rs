@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 use serde_json::Value;
 
-use crate::convert::{ConvertOptions, ConversionWarning, RequestHooks};
+use crate::convert::{ConversionWarning, ConvertOptions, RequestHooks};
 use crate::error::{ConversionError, Error, Result};
 use crate::http::SseEvent;
 use crate::ir::{Request, Response, StreamEvent};
@@ -90,13 +90,19 @@ impl AuthScheme {
     /// `Authorization: Bearer <key>`.
     #[must_use]
     pub fn bearer() -> Self {
-        Self { header: http::header::AUTHORIZATION, prefix: Some("Bearer ".to_owned()) }
+        Self {
+            header: http::header::AUTHORIZATION,
+            prefix: Some("Bearer ".to_owned()),
+        }
     }
 
     /// `<name>: <key>` with no prefix.
     #[must_use]
     pub fn header(name: http::HeaderName) -> Self {
-        Self { header: name, prefix: None }
+        Self {
+            header: name,
+            prefix: None,
+        }
     }
 }
 
@@ -163,7 +169,10 @@ impl BuiltRequest {
     #[must_use]
     pub fn post_json(url: http::Uri, body: &Value) -> Self {
         let mut headers = http::HeaderMap::new();
-        headers.insert(http::header::CONTENT_TYPE, http::HeaderValue::from_static("application/json"));
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/json"),
+        );
         Self {
             method: http::Method::POST,
             url,
@@ -277,7 +286,9 @@ pub struct OpenAiChatCompletionsOptions {
 
 impl Default for OpenAiChatCompletionsOptions {
     fn default() -> Self {
-        Self { inject_include_usage: true }
+        Self {
+            inject_include_usage: true,
+        }
     }
 }
 
@@ -313,13 +324,17 @@ pub trait ApiFormat: Send + Sync {
     /// returned by the previous page.
     fn build_models_request(&self, ctx: &BuildCtx, cursor: Option<&str>) -> Result<BuiltRequest> {
         let _ = (ctx, cursor);
-        Err(Error::NotSupported("model listing is not supported by this format"))
+        Err(Error::NotSupported(
+            "model listing is not supported by this format",
+        ))
     }
 
     /// Parses one model-list page into models plus the next cursor.
     fn parse_models_response(&self, body: &[u8]) -> Result<(Vec<Model>, Option<String>)> {
         let _ = body;
-        Err(Error::NotSupported("model listing is not supported by this format"))
+        Err(Error::NotSupported(
+            "model listing is not supported by this format",
+        ))
     }
 
     /// Builds a token-count request from the prospective chat request
@@ -327,13 +342,17 @@ pub trait ApiFormat: Send + Sync {
     /// all act on it — then the per-format count adapter reshapes it).
     fn build_count_tokens_request(&self, req: &Request, ctx: &BuildCtx) -> Result<BuiltRequest> {
         let _ = (req, ctx);
-        Err(Error::NotSupported("token counting is not supported by this format"))
+        Err(Error::NotSupported(
+            "token counting is not supported by this format",
+        ))
     }
 
     /// Parses a token-count response.
     fn parse_count_tokens_response(&self, body: &[u8]) -> Result<TokenCount> {
         let _ = body;
-        Err(Error::NotSupported("token counting is not supported by this format"))
+        Err(Error::NotSupported(
+            "token counting is not supported by this format",
+        ))
     }
 }
 
@@ -341,8 +360,7 @@ pub trait ApiFormat: Send + Sync {
 pub trait StreamParser: Send {
     /// Parses one SSE event into unified events plus parse-side warnings
     /// (skipped extra candidates, lossy inference, …).
-    fn parse(&mut self, event: &SseEvent)
-    -> Result<(Vec<StreamEvent>, Vec<ConversionWarning>)>;
+    fn parse(&mut self, event: &SseEvent) -> Result<(Vec<StreamEvent>, Vec<ConversionWarning>)>;
 
     /// Called exactly once when the byte stream ends: flushes held warnings
     /// and safely finalizable blocks, then validates terminal state — it
@@ -434,7 +452,10 @@ pub fn extract_error_message(body: &Value) -> Option<String> {
     match body.get("error") {
         Some(Value::String(s)) => Some(s.clone()),
         Some(Value::Object(o)) => o.get("message").and_then(Value::as_str).map(str::to_owned),
-        _ => body.get("message").and_then(Value::as_str).map(str::to_owned),
+        _ => body
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
     }
 }
 
@@ -536,10 +557,11 @@ pub fn build_url(
     // Format-required keys are protected: a user-supplied same-name key —
     // from the URL itself or from extra_query — is an error.
     for (key, value) in protected_query {
-        if query_pairs.iter().any(|(k, _)| k == key)
-            || extra_query.iter().any(|(k, _)| k == key)
-        {
-            return Err(ConversionError::ProtectedQueryKey { key: (*key).to_owned() }.into());
+        if query_pairs.iter().any(|(k, _)| k == key) || extra_query.iter().any(|(k, _)| k == key) {
+            return Err(ConversionError::ProtectedQueryKey {
+                key: (*key).to_owned(),
+            }
+            .into());
         }
         query_pairs.push(((*key).to_owned(), (*value).to_owned()));
     }
@@ -559,7 +581,13 @@ pub fn build_url(
     if !query_pairs.is_empty() {
         let qs: Vec<String> = query_pairs
             .iter()
-            .map(|(k, v)| if v.is_empty() { k.clone() } else { format!("{k}={v}") })
+            .map(|(k, v)| {
+                if v.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{k}={v}")
+                }
+            })
             .collect();
         url.push('?');
         url.push_str(&qs.join("&"));
@@ -591,7 +619,10 @@ mod tests {
     fn base_join_trims_and_appends() {
         let base = EndpointUrl::base("https://api.example.com/v1/").unwrap();
         let url = build_url(&base, "chat/completions", "m", None, &[], &[]).unwrap();
-        assert_eq!(url.to_string(), "https://api.example.com/v1/chat/completions");
+        assert_eq!(
+            url.to_string(),
+            "https://api.example.com/v1/chat/completions"
+        );
     }
 
     #[test]
@@ -613,7 +644,10 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(url.to_string(), "https://gl/v1beta/models/gemini-2.5-flash:generateContent");
+        assert_eq!(
+            url.to_string(),
+            "https://gl/v1beta/models/gemini-2.5-flash:generateContent"
+        );
 
         // Special characters are percent-encoded as one segment.
         let url2 = build_url(&base, "models/{model}", "a/b c", None, &[], &[]).unwrap();
@@ -630,9 +664,19 @@ mod tests {
     #[test]
     fn full_url_used_verbatim_with_substitution() {
         let full = EndpointUrl::full("https://h/api/custom/{model}:{method}?x=1");
-        let url =
-            build_url(&full, "ignored", "m", Some("streamGenerateContent"), &[], &[]).unwrap();
-        assert_eq!(url.to_string(), "https://h/api/custom/m:streamGenerateContent?x=1");
+        let url = build_url(
+            &full,
+            "ignored",
+            "m",
+            Some("streamGenerateContent"),
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            url.to_string(),
+            "https://h/api/custom/m:streamGenerateContent?x=1"
+        );
 
         // Without placeholders the URL is used as-is.
         let plain = EndpointUrl::full("https://h/chat");
@@ -643,8 +687,7 @@ mod tests {
     #[test]
     fn protected_query_conflicts_error() {
         let base = EndpointUrl::base("https://h/v1?alt=json").unwrap();
-        let err =
-            build_url(&base, "p", "m", None, &[("alt", "sse")], &[]).unwrap_err();
+        let err = build_url(&base, "p", "m", None, &[("alt", "sse")], &[]).unwrap_err();
         assert!(matches!(
             err,
             Error::Conversion(ConversionError::ProtectedQueryKey { .. })
@@ -679,7 +722,10 @@ mod tests {
             "m",
             None,
             &[],
-            &[("a".to_owned(), "9".to_owned()), ("c".to_owned(), "3".to_owned())],
+            &[
+                ("a".to_owned(), "9".to_owned()),
+                ("c".to_owned(), "3".to_owned()),
+            ],
         )
         .unwrap();
         assert_eq!(url.to_string(), "https://h/v1/p?a=9&b=2&c=3");
@@ -689,7 +735,10 @@ mod tests {
     fn data_url_round_trip() {
         let url = to_data_url("image/png", "AAAA");
         assert_eq!(url, "data:image/png;base64,AAAA");
-        assert_eq!(parse_data_url(&url).unwrap(), ("image/png".to_owned(), "AAAA".to_owned()));
+        assert_eq!(
+            parse_data_url(&url).unwrap(),
+            ("image/png".to_owned(), "AAAA".to_owned())
+        );
         assert!(parse_data_url("https://x/y.png").is_none());
         assert!(parse_data_url("data:text/plain,hello").is_none());
     }
@@ -703,7 +752,9 @@ mod tests {
         // Warning at /top_k gets overridden by an extra merge that set it.
         let mut body = json!({"messages": [{"role": "user", "content": "hi"}]});
         let mut log = MergeLog::new();
-        let Value::Object(patch) = json!({"top_k": 40}) else { unreachable!() };
+        let Value::Object(patch) = json!({"top_k": 40}) else {
+            unreachable!()
+        };
         merge_patch(&mut body, &patch, "", &mut log);
 
         let mut warnings = vec![ConversionWarning::to_format(
@@ -740,8 +791,8 @@ mod tests {
     #[test]
     fn finalize_request_hook_error_aborts() {
         let mut body = serde_json::json!({});
-        let hooks = RequestHooks::new()
-            .with_on_request(|_| Err(crate::error::HookError::new("nope")));
+        let hooks =
+            RequestHooks::new().with_on_request(|_| Err(crate::error::HookError::new("nope")));
         let err = finalize_request(
             &mut body,
             &mut [],
@@ -763,7 +814,13 @@ mod tests {
             br#"{"error": {"message": "slow down", "type": "rate_limit"}}"#,
         );
         match err {
-            Error::Api { status, kind, message, parsed, .. } => {
+            Error::Api {
+                status,
+                kind,
+                message,
+                parsed,
+                ..
+            } => {
                 assert_eq!(status, 429);
                 assert_eq!(kind, crate::error::ApiErrorKind::RateLimit);
                 assert_eq!(message, "slow down");
@@ -775,7 +832,9 @@ mod tests {
         // Non-JSON body degrades to a text prefix.
         let err2 = generic_api_error(502, &headers, b"<html>Bad Gateway</html>");
         match err2 {
-            Error::Api { message, parsed, .. } => {
+            Error::Api {
+                message, parsed, ..
+            } => {
                 assert!(message.contains("Bad Gateway"));
                 assert!(parsed.is_none());
             }

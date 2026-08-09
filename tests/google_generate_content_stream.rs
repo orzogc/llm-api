@@ -49,13 +49,17 @@ fn accumulate(events: &[StreamEvent]) -> llm_api::Response {
 
 #[test]
 fn text_stream_builds_one_block() {
-    let (events, warnings, finish) =
-        run_stream(include_str!("fixtures/google_generate_content/stream_text.sse"));
+    let (events, warnings, finish) = run_stream(include_str!(
+        "fixtures/google_generate_content/stream_text.sse"
+    ));
     assert!(warnings.is_empty(), "{warnings:?}");
     finish.unwrap();
 
     // MessageStart carries the envelope and the first usage snapshot.
-    let StreamEvent::MessageStart { id, model, usage, .. } = &events[0] else {
+    let StreamEvent::MessageStart {
+        id, model, usage, ..
+    } = &events[0]
+    else {
         panic!("expected MessageStart, got {:?}", events[0]);
     };
     assert_eq!(id.as_deref(), Some("r-abc123"));
@@ -64,20 +68,38 @@ fn text_stream_builds_one_block() {
 
     assert!(matches!(
         &events[1],
-        StreamEvent::BlockStart { index: 0, block: ContentBlock::Text { .. }, .. }
+        StreamEvent::BlockStart {
+            index: 0,
+            block: ContentBlock::Text { .. },
+            ..
+        }
     ));
     let deltas: Vec<&str> = events
         .iter()
         .filter_map(|e| match e {
-            StreamEvent::BlockDelta { delta: BlockDelta::Text(t), .. } => Some(t.as_str()),
+            StreamEvent::BlockDelta {
+                delta: BlockDelta::Text(t),
+                ..
+            } => Some(t.as_str()),
             _ => None,
         })
         .collect();
-    assert_eq!(deltas, vec!["Once upon", " a time, a magic backpack", " granted wishes. The end."]);
+    assert_eq!(
+        deltas,
+        vec![
+            "Once upon",
+            " a time, a magic backpack",
+            " granted wishes. The end."
+        ]
+    );
 
     // The final chunk's usage is authoritative on MessageDelta.
-    let StreamEvent::MessageDelta { stop_reason, usage, .. } =
-        events.iter().find(|e| matches!(e, StreamEvent::MessageDelta { .. })).unwrap()
+    let StreamEvent::MessageDelta {
+        stop_reason, usage, ..
+    } = events
+        .iter()
+        .find(|e| matches!(e, StreamEvent::MessageDelta { .. }))
+        .unwrap()
     else {
         unreachable!()
     };
@@ -88,7 +110,10 @@ fn text_stream_builds_one_block() {
     assert!(matches!(events.last().unwrap(), StreamEvent::MessageStop));
 
     let resp = accumulate(&events);
-    assert_eq!(resp.text(), "Once upon a time, a magic backpack granted wishes. The end.");
+    assert_eq!(
+        resp.text(),
+        "Once upon a time, a magic backpack granted wishes. The end."
+    );
     assert_eq!(resp.id.as_deref(), Some("r-abc123"));
     assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
     assert_eq!(resp.usage.as_ref().unwrap().output_tokens, 58);
@@ -97,52 +122,94 @@ fn text_stream_builds_one_block() {
 
 #[test]
 fn thinking_stream_infers_block_boundaries() {
-    let (events, warnings, finish) =
-        run_stream(include_str!("fixtures/google_generate_content/stream_thinking.sse"));
+    let (events, warnings, finish) = run_stream(include_str!(
+        "fixtures/google_generate_content/stream_thinking.sse"
+    ));
     assert!(warnings.is_empty(), "{warnings:?}");
     finish.unwrap();
 
     // Block 0: thinking across two chunks, sealed by its signature.
     assert!(matches!(
         &events[1],
-        StreamEvent::BlockStart { index: 0, block: ContentBlock::Thinking { .. }, .. }
+        StreamEvent::BlockStart {
+            index: 0,
+            block: ContentBlock::Thinking { .. },
+            ..
+        }
     ));
     let sig_deltas: Vec<&str> = events
         .iter()
         .filter_map(|e| match e {
-            StreamEvent::BlockDelta { delta: BlockDelta::Signature(s), .. } => Some(s.as_str()),
+            StreamEvent::BlockDelta {
+                delta: BlockDelta::Signature(s),
+                ..
+            } => Some(s.as_str()),
             _ => None,
         })
         .collect();
     assert_eq!(sig_deltas, vec!["c2lnLTE="]);
-    let StreamEvent::BlockStop { index: 0, block: Some(finalized), .. } = events
+    let StreamEvent::BlockStop {
+        index: 0,
+        block: Some(finalized),
+        ..
+    } = events
         .iter()
         .find(|e| matches!(e, StreamEvent::BlockStop { index: 0, .. }))
         .unwrap()
     else {
         panic!("thinking block must finalize");
     };
-    let ContentBlock::Thinking { text, signature, extra, .. } = finalized else {
+    let ContentBlock::Thinking {
+        text,
+        signature,
+        extra,
+        ..
+    } = finalized
+    else {
         panic!("finalized block must be thinking");
     };
     assert_eq!(text.as_deref(), Some("**Plan** check the weather"));
     assert_eq!(signature.as_deref(), Some("c2lnLTE="));
-    assert_eq!(extra.get(FMT).unwrap().get("thought").unwrap(), &json!(true));
+    assert_eq!(
+        extra.get(FMT).unwrap().get("thought").unwrap(),
+        &json!(true)
+    );
 
     // Block 1: plain text. Block 2: the complete function call.
     assert!(matches!(
-        events.iter().find(|e| matches!(e, StreamEvent::BlockStart { index: 1, .. })).unwrap(),
-        StreamEvent::BlockStart { block: ContentBlock::Text { .. }, .. }
+        events
+            .iter()
+            .find(|e| matches!(e, StreamEvent::BlockStart { index: 1, .. }))
+            .unwrap(),
+        StreamEvent::BlockStart {
+            block: ContentBlock::Text { .. },
+            ..
+        }
     ));
-    let StreamEvent::BlockStart { block: ContentBlock::ToolCall { id, name, arguments, extra, .. }, .. } =
-        events.iter().find(|e| matches!(e, StreamEvent::BlockStart { index: 2, .. })).unwrap()
+    let StreamEvent::BlockStart {
+        block:
+            ContentBlock::ToolCall {
+                id,
+                name,
+                arguments,
+                extra,
+                ..
+            },
+        ..
+    } = events
+        .iter()
+        .find(|e| matches!(e, StreamEvent::BlockStart { index: 2, .. }))
+        .unwrap()
     else {
         panic!("expected complete tool call");
     };
     assert_eq!(id.as_deref(), Some("c1"));
     assert_eq!(name, "get_weather");
     assert_eq!(arguments, r#"{"city":"Paris"}"#);
-    assert_eq!(extra.get(FMT).unwrap().get("thoughtSignature").unwrap(), &json!("c2lnLTI="));
+    assert_eq!(
+        extra.get(FMT).unwrap().get("thoughtSignature").unwrap(),
+        &json!("c2lnLTI=")
+    );
 
     let resp = accumulate(&events);
     assert_eq!(resp.message.content.len(), 3);
@@ -156,14 +223,18 @@ fn thinking_stream_infers_block_boundaries() {
 
 #[test]
 fn blocked_prompt_stream_terminates_immediately() {
-    let (events, warnings, finish) =
-        run_stream(include_str!("fixtures/google_generate_content/stream_blocked.sse"));
+    let (events, warnings, finish) = run_stream(include_str!(
+        "fixtures/google_generate_content/stream_blocked.sse"
+    ));
     assert!(warnings.is_empty(), "{warnings:?}");
     finish.unwrap();
     assert!(matches!(&events[0], StreamEvent::MessageStart { .. }));
     assert!(matches!(
         &events[1],
-        StreamEvent::MessageDelta { stop_reason: Some(StopReason::ContentFilter), .. }
+        StreamEvent::MessageDelta {
+            stop_reason: Some(StopReason::ContentFilter),
+            ..
+        }
     ));
     assert!(matches!(&events[2], StreamEvent::MessageStop));
     assert_eq!(events.len(), 3);
@@ -176,15 +247,24 @@ fn blocked_prompt_stream_terminates_immediately() {
 
 #[test]
 fn multi_candidate_chunks_surface_as_unknown_with_one_warning() {
-    let (events, warnings, finish) =
-        run_stream(include_str!("fixtures/google_generate_content/stream_multi_candidate.sse"));
+    let (events, warnings, finish) = run_stream(include_str!(
+        "fixtures/google_generate_content/stream_multi_candidate.sse"
+    ));
     finish.unwrap();
     // The warning fires once per stream even though two chunks carried
     // extra candidates.
-    let multi: Vec<_> =
-        warnings.iter().filter(|w| w.code == WarningCode::MultipleCandidates).collect();
+    let multi: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.code == WarningCode::MultipleCandidates)
+        .collect();
     assert_eq!(multi.len(), 1);
-    assert_eq!(events.iter().filter(|e| matches!(e, StreamEvent::Unknown)).count(), 2);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::Unknown))
+            .count(),
+        2
+    );
 
     // Candidate 0 still parses normally.
     let resp = accumulate(&events);
@@ -194,8 +274,9 @@ fn multi_candidate_chunks_surface_as_unknown_with_one_warning() {
 
 #[test]
 fn truncated_stream_fails_finish() {
-    let (events, warnings, finish) =
-        run_stream(include_str!("fixtures/google_generate_content/stream_truncated.sse"));
+    let (events, warnings, finish) = run_stream(include_str!(
+        "fixtures/google_generate_content/stream_truncated.sse"
+    ));
     assert!(warnings.is_empty());
     let err = finish.unwrap_err();
     match err {
@@ -204,7 +285,11 @@ fn truncated_stream_fails_finish() {
     }
     // No terminal events were fabricated.
     assert!(!events.iter().any(|e| matches!(e, StreamEvent::MessageStop)));
-    assert!(!events.iter().any(|e| matches!(e, StreamEvent::MessageDelta { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::MessageDelta { .. }))
+    );
 }
 
 #[test]
@@ -257,7 +342,10 @@ fn plain_text_signature_folds_into_the_finalized_block() {
         panic!("expected text");
     };
     assert_eq!(text, "hello");
-    assert_eq!(extra.get(FMT).unwrap().get("thoughtSignature").unwrap(), &json!("dHh0"));
+    assert_eq!(
+        extra.get(FMT).unwrap().get("thoughtSignature").unwrap(),
+        &json!("dHh0")
+    );
 }
 
 #[test]
@@ -276,9 +364,15 @@ fn interleaved_thought_text_thought_opens_new_blocks() {
     finish.unwrap();
     let resp = accumulate(&events);
     assert_eq!(resp.message.content.len(), 3);
-    assert!(matches!(&resp.message.content[0], ContentBlock::Thinking { text: Some(t), .. } if t == "t1"));
-    assert!(matches!(&resp.message.content[1], ContentBlock::Text { text, .. } if text == "visible"));
-    assert!(matches!(&resp.message.content[2], ContentBlock::Thinking { text: Some(t), .. } if t == "t2"));
+    assert!(
+        matches!(&resp.message.content[0], ContentBlock::Thinking { text: Some(t), .. } if t == "t1")
+    );
+    assert!(
+        matches!(&resp.message.content[1], ContentBlock::Text { text, .. } if text == "visible")
+    );
+    assert!(
+        matches!(&resp.message.content[2], ContentBlock::Thinking { text: Some(t), .. } if t == "t2")
+    );
 }
 
 #[test]
@@ -287,8 +381,9 @@ fn unknown_payloads_and_post_terminal_chunks() {
     let mut parser = format.stream_parser();
 
     // Undecodable data surfaces as Unknown with a cosmetic warning.
-    let (events, warnings) =
-        parser.parse(&llm_api::http::SseEvent::new(None, "not json")).unwrap();
+    let (events, warnings) = parser
+        .parse(&llm_api::http::SseEvent::new(None, "not json"))
+        .unwrap();
     assert!(matches!(events[..], [StreamEvent::Unknown]));
     assert_eq!(warnings[0].code, WarningCode::UnknownStreamEvent);
 

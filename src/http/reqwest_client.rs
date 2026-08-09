@@ -65,7 +65,9 @@ impl HttpClient for reqwest::Client {
             if let Some(h) = builder.headers_mut() {
                 *h = headers;
             }
-            builder.body(body).map_err(|e| HttpError::with_source(HttpErrorKind::Other, e))
+            builder
+                .body(body)
+                .map_err(|e| HttpError::with_source(HttpErrorKind::Other, e))
         })
     }
 }
@@ -86,8 +88,8 @@ where
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        Pin::new(&mut self.inner).poll_next(cx).map(|opt| {
-            opt.map(|res| res.map_err(|e| HttpError::with_source(classify(&e), e)))
-        })
+        Pin::new(&mut self.inner)
+            .poll_next(cx)
+            .map(|opt| opt.map(|res| res.map_err(|e| HttpError::with_source(classify(&e), e))))
     }
 }

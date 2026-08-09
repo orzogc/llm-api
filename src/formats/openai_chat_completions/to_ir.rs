@@ -15,7 +15,11 @@ use crate::ir::{
 use super::{FORMAT, tool_call_reserved_key, types};
 
 /// Parse-side warning shorthand.
-fn warn(code: WarningCode, location: impl Into<String>, message: impl Into<String>) -> ConversionWarning {
+fn warn(
+    code: WarningCode,
+    location: impl Into<String>,
+    message: impl Into<String>,
+) -> ConversionWarning {
     ConversionWarning::from_format(code, FORMAT, location, message)
 }
 
@@ -124,7 +128,8 @@ pub fn request_to_ir(body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)> {
 /// Parses a 2xx `chat.completion` body into the IR (§ 8). Reads the first
 /// choice; more than one adds a `MultipleCandidates` warning.
 pub fn response_to_ir(body: &[u8], meta: &ResponseMeta) -> Result<Response> {
-    let raw: Value = serde_json::from_slice(body).map_err(|e| parse_failure("response", e, body))?;
+    let raw: Value =
+        serde_json::from_slice(body).map_err(|e| parse_failure("response", e, body))?;
     let wire: types::Response =
         serde_json::from_value(raw.clone()).map_err(|e| parse_failure("response", e, body))?;
     let mut warnings = Vec::new();
@@ -341,7 +346,11 @@ fn assistant_fields_to_blocks(
 /// A refusal-marked `Text` block (§ 9).
 fn refusal_text_block(text: String, mut ns: Map<String, Value>) -> ContentBlock {
     ns.insert("refusal".to_owned(), Value::from(true));
-    ContentBlock::Text { text, cache: None, extra: Extra::from_unknown(FORMAT, ns) }
+    ContentBlock::Text {
+        text,
+        cache: None,
+        extra: Extra::from_unknown(FORMAT, ns),
+    }
 }
 
 /// Parses one `tool_calls[]` entry into a `ToolCall` block. `function`
@@ -378,10 +387,16 @@ pub(crate) fn tool_call_entry_to_block(
                     serde_json::to_value(custom).unwrap_or(Value::Null),
                 );
             }
-            (payload.name.unwrap_or_default(), payload.arguments.unwrap_or_default())
+            (
+                payload.name.unwrap_or_default(),
+                payload.arguments.unwrap_or_default(),
+            )
         }
         Some("custom") => {
-            ns.insert(tool_call_reserved_key::TYPE.to_owned(), Value::from("custom"));
+            ns.insert(
+                tool_call_reserved_key::TYPE.to_owned(),
+                Value::from("custom"),
+            );
             let payload = wire.custom.unwrap_or_default();
             if !payload.extra.is_empty() {
                 ns.insert("custom".to_owned(), Value::Object(payload.extra));
@@ -392,7 +407,10 @@ pub(crate) fn tool_call_entry_to_block(
                     serde_json::to_value(function).unwrap_or(Value::Null),
                 );
             }
-            (payload.name.unwrap_or_default(), payload.input.unwrap_or_default())
+            (
+                payload.name.unwrap_or_default(),
+                payload.input.unwrap_or_default(),
+            )
         }
         Some(other) => {
             // Unknown call kinds: mirror every field except `id` wholesale
@@ -425,11 +443,7 @@ pub(crate) fn tool_call_entry_to_block(
 /// Parses one wire message (request side) into an IR message. Unmodeled
 /// roles (legacy `function`, dialect roles) and structurally garbage
 /// entries keep the whole message verbatim as a lone `Opaque` block.
-fn parse_message(
-    value: &Value,
-    index: usize,
-    warnings: &mut Vec<ConversionWarning>,
-) -> Message {
+fn parse_message(value: &Value, index: usize, warnings: &mut Vec<ConversionWarning>) -> Message {
     let ptr = format!("/messages/{index}");
     let wire: types::Message = match serde_json::from_value(value.clone()) {
         Ok(m) => m,
@@ -566,7 +580,10 @@ fn tool_message_to_ir(
         Some(Value::String(s)) => content.push(ToolOutputBlock::text(s.clone())),
         Some(Value::Array(parts)) => {
             for (pi, part) in parts.iter().enumerate() {
-                content.push(tool_output_part_to_block(part, &format!("{ptr}/content/{pi}")));
+                content.push(tool_output_part_to_block(
+                    part,
+                    &format!("{ptr}/content/{pi}"),
+                ));
             }
         }
         Some(other) => {
@@ -611,7 +628,11 @@ fn tool_output_part_to_block(part: &Value, _ptr: &str) -> ToolOutputBlock {
         if let Some(pcb) = w.prompt_cache_breakpoint {
             ns.insert("prompt_cache_breakpoint".to_owned(), pcb);
         }
-        return ToolOutputBlock::Text { text: w.text, cache: None, extra: Extra::from_unknown(FORMAT, ns) };
+        return ToolOutputBlock::Text {
+            text: w.text,
+            cache: None,
+            extra: Extra::from_unknown(FORMAT, ns),
+        };
     }
     ToolOutputBlock::opaque(FORMAT, part.clone())
 }
@@ -661,7 +682,11 @@ fn content_part_to_block(
                     }
                     None
                 };
-                ContentBlock::Text { text: w.text, cache, extra: Extra::from_unknown(FORMAT, ns) }
+                ContentBlock::Text {
+                    text: w.text,
+                    cache,
+                    extra: Extra::from_unknown(FORMAT, ns),
+                }
             }
             Err(e) => {
                 malformed(warnings, &e);
@@ -690,7 +715,11 @@ fn content_part_to_block(
                     }
                     None
                 };
-                ContentBlock::Image { source, cache, extra: Extra::from_unknown(FORMAT, ns) }
+                ContentBlock::Image {
+                    source,
+                    cache,
+                    extra: Extra::from_unknown(FORMAT, ns),
+                }
             }
             Err(e) => {
                 malformed(warnings, &e);
@@ -716,9 +745,18 @@ pub(crate) fn usage_to_ir(u: &types::Usage) -> Usage {
         input_tokens: u.prompt_tokens.unwrap_or(0),
         output_tokens: u.completion_tokens.unwrap_or(0),
         total_tokens: u.total_tokens,
-        cache_read_tokens: u.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens),
-        cache_write_tokens: u.prompt_tokens_details.as_ref().and_then(|d| d.cache_write_tokens),
-        reasoning_tokens: u.completion_tokens_details.as_ref().and_then(|d| d.reasoning_tokens),
+        cache_read_tokens: u
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|d| d.cached_tokens),
+        cache_write_tokens: u
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|d| d.cache_write_tokens),
+        reasoning_tokens: u
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|d| d.reasoning_tokens),
         raw: serde_json::to_value(u).ok(),
     }
 }
@@ -728,7 +766,9 @@ pub(crate) fn usage_from_value(value: &Value) -> Option<Usage> {
     if !value.is_object() {
         return None;
     }
-    serde_json::from_value::<types::Usage>(value.clone()).ok().map(|u| usage_to_ir(&u))
+    serde_json::from_value::<types::Usage>(value.clone())
+        .ok()
+        .map(|u| usage_to_ir(&u))
 }
 
 /// Removes and returns a string value from a map, leaving non-strings in
@@ -762,8 +802,12 @@ fn response_format_to_ir(format: Value, req: &mut Request, ns: &mut Map<String, 
                     }
                     _ => None,
                 };
-                req.output_format =
-                    Some(OutputFormat::JsonSchema { name, description, schema, strict });
+                req.output_format = Some(OutputFormat::JsonSchema {
+                    name,
+                    description,
+                    schema,
+                    strict,
+                });
                 let mut mirror = format.as_object().cloned().unwrap_or_default();
                 mirror.remove("type");
                 mirror.remove("json_schema");
@@ -846,7 +890,9 @@ fn tool_choice_to_ir(choice: Value, req: &mut Request, ns: &mut Map<String, Valu
                 && obj
                     .get("function")
                     .and_then(Value::as_object)
-                    .is_some_and(|f| f.len() == 1 && f.get("name").is_some_and(Value::is_string)) =>
+                    .is_some_and(|f| {
+                        f.len() == 1 && f.get("name").is_some_and(Value::is_string)
+                    }) =>
         {
             let name = choice
                 .pointer("/function/name")

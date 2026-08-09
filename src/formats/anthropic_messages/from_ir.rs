@@ -6,7 +6,7 @@ use crate::convert::{ConversionWarning, ConvertOptions, OrphanToolCalls, Warning
 use crate::error::{ConversionError, Error, Result};
 use crate::format::BuildCtx;
 use crate::ir::{
-    CacheHint, ContentBlock, Effort, Extra, Message, MergeLog, Reasoning, Request, Role, Tool,
+    CacheHint, ContentBlock, Effort, Extra, MergeLog, Message, Reasoning, Request, Role, Tool,
     ToolChoice, ToolOutputBlock, merge_patch,
 };
 
@@ -74,7 +74,11 @@ struct Pending {
     text: String,
 }
 
-fn warn(code: WarningCode, location: impl Into<String>, text: impl Into<String>) -> ConversionWarning {
+fn warn(
+    code: WarningCode,
+    location: impl Into<String>,
+    text: impl Into<String>,
+) -> ConversionWarning {
     ConversionWarning::to_format(code, FMT, location, text)
 }
 
@@ -98,10 +102,7 @@ pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) ->
     let mut plans: Vec<WirePlan> = Vec::new();
     let mut leading = true;
     for (i, m) in messages.iter().enumerate() {
-        if leading
-            && m.role == Role::System
-            && !has_in_array_system_meta(m.round_trip.as_ref())
-        {
+        if leading && m.role == Role::System && !has_in_array_system_meta(m.round_trip.as_ref()) {
             hoisted.push(i);
             continue;
         }
@@ -147,7 +148,10 @@ pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) ->
             last.parts.push(i);
             continue;
         }
-        plans.push(WirePlan { role: wire_role, parts: vec![i] });
+        plans.push(WirePlan {
+            role: wire_role,
+            parts: vec![i],
+        });
     }
 
     if opts.merge_consecutive_roles {
@@ -210,9 +214,7 @@ pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) ->
     body.insert("max_tokens".to_owned(), Value::from(max_tokens));
 
     // Top-level system channel.
-    if let Some(system) =
-        build_system(req, &messages, &hoisted, &mut warnings, &mut log)?
-    {
+    if let Some(system) = build_system(req, &messages, &hoisted, &mut warnings, &mut log)? {
         body.insert("system".to_owned(), system);
     }
 
@@ -238,7 +240,9 @@ pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) ->
             "content": Value::Array(content),
         });
         for &p in &plan.parts {
-            messages[p].extra.merge_into(FMT, &mut wire_msg, &msg_loc, &mut log);
+            messages[p]
+                .extra
+                .merge_into(FMT, &mut wire_msg, &msg_loc, &mut log);
         }
         wire_messages.push(wire_msg);
         message_pointers.push((msg_loc, plan.role.ir_role()));
@@ -265,7 +269,10 @@ pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) ->
             warnings.push(warn(
                 WarningCode::MetadataDropped,
                 "/metadata",
-                format!("Anthropic metadata only accepts user_id; dropped keys: {}", dropped.join(", ")),
+                format!(
+                    "Anthropic metadata only accepts user_id; dropped keys: {}",
+                    dropped.join(", ")
+                ),
             ));
         }
     }
@@ -379,7 +386,13 @@ pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) ->
     // Structured output (§ 4.9).
     if let Some(format) = &req.output_format {
         match format {
-            crate::ir::OutputFormat::JsonSchema { name, description, schema, strict, .. } => {
+            crate::ir::OutputFormat::JsonSchema {
+                name,
+                description,
+                schema,
+                strict,
+                ..
+            } => {
                 let mut detail: Vec<&str> = Vec::new();
                 if name.is_some() {
                     detail.push("name");
@@ -429,7 +442,9 @@ pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) ->
             body["thinking"] = json!({});
         }
         let target = body.get_mut("thinking").expect("just ensured");
-        reasoning.extra.merge_into(FMT, target, "/thinking", &mut log);
+        reasoning
+            .extra
+            .merge_into(FMT, target, "/thinking", &mut log);
     }
 
     // Snapshot of converter-generated top-level keys (before the
@@ -444,7 +459,13 @@ pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) ->
     // Request-level extra merges into the whole body, last.
     req.extra.merge_into(FMT, &mut body, "", &mut log);
 
-    Ok(ChatBody { body, warnings, merge_log: log, message_pointers, generated_keys })
+    Ok(ChatBody {
+        body,
+        warnings,
+        merge_log: log,
+        message_pointers,
+        generated_keys,
+    })
 }
 
 /// `true` when the message contains a signed block (§ 7.5): a `Thinking`
@@ -474,7 +495,11 @@ fn apply_orphan_policy(
     let matched = |messages: &[Message], i: usize, id: Option<&str>, name: &str| -> bool {
         messages.iter().skip(i + 1).any(|m| {
             m.content.iter().any(|b| match b {
-                ContentBlock::ToolResult { tool_call_id, name: rname, .. } => match id {
+                ContentBlock::ToolResult {
+                    tool_call_id,
+                    name: rname,
+                    ..
+                } => match id {
                     Some(id) => tool_call_id.as_deref() == Some(id),
                     None => rname.as_deref() == Some(name),
                 },
@@ -526,10 +551,14 @@ fn apply_orphan_policy(
                     if trailing.iter().any(|(tid, tname)| tid == id && tname == name))
             };
             m.content.retain(|b| !is_orphan(b));
-            let kept_thinking =
-                m.content.iter().any(|b| matches!(b, ContentBlock::Thinking { .. }));
-            let no_calls_left =
-                !m.content.iter().any(|b| matches!(b, ContentBlock::ToolCall { .. }));
+            let kept_thinking = m
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Thinking { .. }));
+            let no_calls_left = !m
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolCall { .. }));
             let removed = m.content.is_empty();
             if removed {
                 messages.pop();
@@ -545,8 +574,7 @@ fn apply_orphan_policy(
                     code: WarningCode::ThinkingOrphaned,
                     msg: Some(last),
                     at_first_block: false,
-                    text: "dropping trailing tool calls left a thinking block orphaned"
-                        .into(),
+                    text: "dropping trailing tool calls left a thinking block orphaned".into(),
                 });
             }
         }
@@ -587,8 +615,7 @@ fn apply_missing_thinking(
 ) {
     let enables = reasoning.is_some_and(|r| {
         r.enabled == Some(true)
-            || (r.enabled.is_none()
-                && r.effort.as_ref().is_some_and(|e| *e != Effort::None))
+            || (r.enabled.is_none() && r.effort.as_ref().is_some_and(|e| *e != Effort::None))
     });
     if !enables {
         return;
@@ -597,8 +624,14 @@ fn apply_missing_thinking(
         if m.role != Role::Assistant {
             continue;
         }
-        let has_call = m.content.iter().any(|b| matches!(b, ContentBlock::ToolCall { .. }));
-        let has_thinking = m.content.iter().any(|b| matches!(b, ContentBlock::Thinking { .. }));
+        let has_call = m
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolCall { .. }));
+        let has_thinking = m
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Thinking { .. }));
         if !has_call || has_thinking {
             continue;
         }
@@ -647,7 +680,11 @@ fn build_system(
             value["cache_control"] = cache_control_value(hint);
         }
         let text_form_ok = cache.is_none() && extra.get(FMT).is_none_or(Map::is_empty);
-        Entry { value, block_extra: Some(extra), text_form_ok }
+        Entry {
+            value,
+            block_extra: Some(extra),
+            text_form_ok,
+        }
     }
 
     let mut entries: Vec<Entry<'_>> = Vec::new();
@@ -656,7 +693,9 @@ fn build_system(
     if let Some(system) = &req.system {
         for block in system {
             match block {
-                ContentBlock::Text { text, cache, extra, .. } => {
+                ContentBlock::Text {
+                    text, cache, extra, ..
+                } => {
                     entries.push(text_entry(text, cache.as_ref(), extra));
                 }
                 other => {
@@ -677,7 +716,9 @@ fn build_system(
         for block in &m.content {
             let loc = format!("/system/{}", entries.len());
             match block {
-                ContentBlock::Text { text, cache, extra, .. } => {
+                ContentBlock::Text {
+                    text, cache, extra, ..
+                } => {
                     entries.push(text_entry(text, cache.as_ref(), extra));
                 }
                 ContentBlock::Opaque { format, value, .. } => {
@@ -756,7 +797,9 @@ fn convert_block(
         .into()
     };
     match block {
-        ContentBlock::Text { text, cache, extra, .. } => {
+        ContentBlock::Text {
+            text, cache, extra, ..
+        } => {
             if role == Role::Tool {
                 return Err(invalid(block));
             }
@@ -767,7 +810,12 @@ fn convert_block(
             extra.merge_into(FMT, &mut v, loc, log);
             Ok(Some(v))
         }
-        ContentBlock::Image { source, cache, extra, .. } => match role {
+        ContentBlock::Image {
+            source,
+            cache,
+            extra,
+            ..
+        } => match role {
             Role::User => {
                 let mut v = json!({"type": "image", "source": image_source_value(source)});
                 if let Some(hint) = cache {
@@ -786,7 +834,14 @@ fn convert_block(
             }
             _ => Err(invalid(block)),
         },
-        ContentBlock::ToolCall { id, name, arguments, cache, extra, .. } => {
+        ContentBlock::ToolCall {
+            id,
+            name,
+            arguments,
+            cache,
+            extra,
+            ..
+        } => {
             if role != Role::Assistant {
                 return Err(invalid(block));
             }
@@ -801,15 +856,23 @@ fn convert_block(
             extra.merge_into(FMT, &mut v, loc, log);
             Ok(Some(v))
         }
-        ContentBlock::ToolResult { tool_call_id, content, is_error, cache, extra, .. } => {
+        ContentBlock::ToolResult {
+            tool_call_id,
+            content,
+            is_error,
+            cache,
+            extra,
+            ..
+        } => {
             if role != Role::Tool {
                 return Err(invalid(block));
             }
             let Some(tool_use_id) = tool_call_id else {
-                return Err(
-                    ConversionError::missing("tool result id (tool_result.tool_use_id)", loc)
-                        .into(),
-                );
+                return Err(ConversionError::missing(
+                    "tool result id (tool_result.tool_use_id)",
+                    loc,
+                )
+                .into());
             };
             let mut v = json!({"type": "tool_result", "tool_use_id": tool_use_id});
             build_tool_result_content(content, loc, warnings, log, &mut v);
@@ -822,11 +885,24 @@ fn convert_block(
             extra.merge_into(FMT, &mut v, loc, log);
             Ok(Some(v))
         }
-        ContentBlock::Thinking { text, signature, extra, .. } => {
+        ContentBlock::Thinking {
+            text,
+            signature,
+            extra,
+            ..
+        } => {
             if role != Role::Assistant {
                 return Err(invalid(block));
             }
-            convert_thinking(text.as_deref(), signature.as_deref(), extra, loc, convert, warnings, log)
+            convert_thinking(
+                text.as_deref(),
+                signature.as_deref(),
+                extra,
+                loc,
+                convert,
+                warnings,
+                log,
+            )
         }
         ContentBlock::Opaque { format, value, .. } => {
             if format == FMT {
@@ -847,14 +923,13 @@ fn convert_block(
 /// requires; invalid JSON or a non-object is a `ConversionError` in both
 /// modes (§ 4.5).
 fn parse_tool_arguments(name: &str, arguments: &str, loc: &str) -> Result<Value> {
-    let parsed: Value = serde_json::from_str(arguments).map_err(|e| {
-        ConversionError::InvalidToolArguments {
+    let parsed: Value =
+        serde_json::from_str(arguments).map_err(|e| ConversionError::InvalidToolArguments {
             name: name.to_owned(),
             arguments: arguments.to_owned(),
             reason: format!("invalid JSON: {e}"),
             location: loc.to_owned(),
-        }
-    })?;
+        })?;
     if !parsed.is_object() {
         return Err(ConversionError::InvalidToolArguments {
             name: name.to_owned(),
@@ -888,7 +963,11 @@ fn build_tool_result_content(
     if content.is_empty() {
         return; // Empty result: `content` omitted (§ 7.2 pin).
     }
-    if let [ToolOutputBlock::Text { text, cache, extra, .. }] = content
+    if let [
+        ToolOutputBlock::Text {
+            text, cache, extra, ..
+        },
+    ] = content
         && extra.get(FMT).is_none_or(Map::is_empty)
     {
         if cache.is_some() {
@@ -902,7 +981,9 @@ fn build_tool_result_content(
         let k = array.len();
         let block_loc = format!("{loc}/content/{k}");
         match block {
-            ToolOutputBlock::Text { text, cache, extra, .. } => {
+            ToolOutputBlock::Text {
+                text, cache, extra, ..
+            } => {
                 if cache.is_some() {
                     nested_cache_warning(warnings, k);
                 }
@@ -910,7 +991,12 @@ fn build_tool_result_content(
                 extra.merge_into(FMT, &mut v, &block_loc, log);
                 array.push(v);
             }
-            ToolOutputBlock::Image { source, cache, extra, .. } => {
+            ToolOutputBlock::Image {
+                source,
+                cache,
+                extra,
+                ..
+            } => {
                 if cache.is_some() {
                     nested_cache_warning(warnings, k);
                 }
@@ -1009,11 +1095,19 @@ fn convert_thinking(
 
 /// Builds `tool_choice` (and folds `parallel_tool_calls` into it) per the
 /// § 4.5 combination table.
-fn build_tool_choice(req: &Request, body: &mut Map<String, Value>, warnings: &mut Vec<ConversionWarning>) {
+fn build_tool_choice(
+    req: &Request,
+    body: &mut Map<String, Value>,
+    warnings: &mut Vec<ConversionWarning>,
+) {
     let tools_present = req.tools.as_ref().is_some_and(|t| !t.is_empty());
     let parallel = req.parallel_tool_calls;
     let ignored = |warnings: &mut Vec<ConversionWarning>, why: &str| {
-        warnings.push(warn(WarningCode::ParallelToolCallsIgnored, "/tool_choice", why));
+        warnings.push(warn(
+            WarningCode::ParallelToolCallsIgnored,
+            "/tool_choice",
+            why,
+        ));
     };
     match &req.tool_choice {
         Some(choice) => {
@@ -1025,7 +1119,10 @@ fn build_tool_choice(req: &Request, body: &mut Map<String, Value>, warnings: &mu
             };
             if let Some(p) = parallel {
                 if !tools_present {
-                    ignored(warnings, "parallel_tool_calls is meaningless without tools; not emitted");
+                    ignored(
+                        warnings,
+                        "parallel_tool_calls is meaningless without tools; not emitted",
+                    );
                 } else if matches!(choice, ToolChoice::None) {
                     ignored(
                         warnings,
@@ -1039,7 +1136,10 @@ fn build_tool_choice(req: &Request, body: &mut Map<String, Value>, warnings: &mu
         }
         None => match parallel {
             Some(_) if !tools_present => {
-                ignored(warnings, "parallel_tool_calls is meaningless without tools; not emitted");
+                ignored(
+                    warnings,
+                    "parallel_tool_calls is meaningless without tools; not emitted",
+                );
             }
             Some(false) => {
                 body.insert(
@@ -1156,7 +1256,9 @@ pub(crate) fn cache_control_value(hint: &CacheHint) -> Value {
 fn image_source_value(source: &crate::ir::ImageSource) -> Value {
     match source {
         crate::ir::ImageSource::Url(url) => json!({"type": "url", "url": url}),
-        crate::ir::ImageSource::Base64 { media_type, data, .. } => {
+        crate::ir::ImageSource::Base64 {
+            media_type, data, ..
+        } => {
             json!({"type": "base64", "media_type": media_type, "data": data})
         }
         crate::ir::ImageSource::FileId(id) => json!({"type": "file", "file_id": id}),

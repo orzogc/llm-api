@@ -13,7 +13,10 @@ use serde_json::{Value, json};
 const FMT: &str = "anthropic_messages";
 
 fn fixture(name: &str) -> Vec<u8> {
-    let path = format!("{}/tests/fixtures/anthropic_messages/{name}", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/tests/fixtures/anthropic_messages/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
     std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
 }
 
@@ -53,7 +56,9 @@ fn basic_text_stream() {
     assert!(matches!(events[0], StreamEvent::MessageStart { .. }));
     assert!(matches!(events.last(), Some(StreamEvent::MessageStop)));
     match &events[0] {
-        StreamEvent::MessageStart { id, model, usage, .. } => {
+        StreamEvent::MessageStart {
+            id, model, usage, ..
+        } => {
             assert_eq!(id.as_deref(), Some("msg_1nZd"));
             assert_eq!(model.as_deref(), Some("claude-sonnet-5"));
             // Input side unified: 25 uncached + 3 write + 2 read.
@@ -91,7 +96,9 @@ fn tool_use_stream_accumulates_fragments() {
     let start = events
         .iter()
         .find_map(|e| match e {
-            StreamEvent::BlockStart { index: 1, block, .. } => Some(block.clone()),
+            StreamEvent::BlockStart {
+                index: 1, block, ..
+            } => Some(block.clone()),
             _ => None,
         })
         .unwrap();
@@ -103,17 +110,27 @@ fn tool_use_stream_accumulates_fragments() {
     let fragments: Vec<String> = events
         .iter()
         .filter_map(|e| match e {
-            StreamEvent::BlockDelta { index: 1, delta: BlockDelta::ToolArguments(s), .. } => {
-                Some(s.clone())
-            }
+            StreamEvent::BlockDelta {
+                index: 1,
+                delta: BlockDelta::ToolArguments(s),
+                ..
+            } => Some(s.clone()),
             _ => None,
         })
         .collect();
-    assert_eq!(fragments, vec!["", "{\"location\":", " \"San Francisco,", " CA\"}"]);
+    assert_eq!(
+        fragments,
+        vec!["", "{\"location\":", " \"San Francisco,", " CA\"}"]
+    );
 
     let resp = accumulate(&events);
     match &resp.message.content[1] {
-        ContentBlock::ToolCall { id, name, arguments, .. } => {
+        ContentBlock::ToolCall {
+            id,
+            name,
+            arguments,
+            ..
+        } => {
             assert_eq!(id.as_deref(), Some("toolu_01T1"));
             assert_eq!(name, "get_weather");
             assert_eq!(arguments, "{\"location\": \"San Francisco, CA\"}");
@@ -122,7 +139,9 @@ fn tool_use_stream_accumulates_fragments() {
     }
     // A tool block with no fragments falls back to its opening input.
     match &resp.message.content[2] {
-        ContentBlock::ToolCall { name, arguments, .. } => {
+        ContentBlock::ToolCall {
+            name, arguments, ..
+        } => {
             assert_eq!(name, "noop");
             assert_eq!(arguments, "{}");
         }
@@ -141,18 +160,29 @@ fn interleaved_thinking_stream() {
         StreamEvent::BlockDelta { index: 0, delta: BlockDelta::Signature(s), .. } if s == "SIGA"
     )));
     let resp = accumulate(&events);
-    let kinds: Vec<&'static str> =
-        resp.message.content.iter().map(ContentBlock::kind_name).collect();
+    let kinds: Vec<&'static str> = resp
+        .message
+        .content
+        .iter()
+        .map(ContentBlock::kind_name)
+        .collect();
     assert_eq!(kinds, vec!["Thinking", "Text", "Thinking", "Text"]);
     match &resp.message.content[0] {
-        ContentBlock::Thinking { text, signature, .. } => {
+        ContentBlock::Thinking {
+            text, signature, ..
+        } => {
             assert_eq!(text.as_deref(), Some("Let me think harder."));
             assert_eq!(signature.as_deref(), Some("SIGA"));
         }
         other => panic!("unexpected: {other:?}"),
     }
     match &resp.message.content[2] {
-        ContentBlock::Thinking { text, signature, extra, .. } => {
+        ContentBlock::Thinking {
+            text,
+            signature,
+            extra,
+            ..
+        } => {
             assert_eq!(*text, None);
             assert_eq!(signature.as_deref(), Some("RDATA"));
             assert_eq!(extra.get(FMT).unwrap().get("redacted"), Some(&json!(true)));
@@ -197,7 +227,11 @@ fn citations_delta_surfaces_and_folds() {
     let finalized = events
         .iter()
         .find_map(|e| match e {
-            StreamEvent::BlockStop { index: 0, block: Some(b), .. } => Some(b.clone()),
+            StreamEvent::BlockStop {
+                index: 0,
+                block: Some(b),
+                ..
+            } => Some(b.clone()),
             _ => None,
         })
         .unwrap();
@@ -222,11 +256,19 @@ fn server_tool_stream_stays_opaque_and_folds_input() {
     // as Other deltas.
     assert!(events.iter().any(|e| matches!(
         e,
-        StreamEvent::BlockStart { index: 0, block: ContentBlock::Opaque { .. }, .. }
+        StreamEvent::BlockStart {
+            index: 0,
+            block: ContentBlock::Opaque { .. },
+            ..
+        }
     )));
     assert!(events.iter().any(|e| matches!(
         e,
-        StreamEvent::BlockDelta { index: 0, delta: BlockDelta::Other(_), .. }
+        StreamEvent::BlockDelta {
+            index: 0,
+            delta: BlockDelta::Other(_),
+            ..
+        }
     )));
     let resp = accumulate(&events);
     match &resp.message.content[0] {
@@ -245,14 +287,22 @@ fn server_tool_stream_stays_opaque_and_folds_input() {
     let usage = resp.usage.as_ref().unwrap();
     assert_eq!(usage.input_tokens, 10682);
     assert_eq!(usage.output_tokens, 510);
-    assert_eq!(usage.raw.as_ref().unwrap()["server_tool_use"]["web_search_requests"], json!(1));
+    assert_eq!(
+        usage.raw.as_ref().unwrap()["server_tool_use"]["web_search_requests"],
+        json!(1)
+    );
 }
 
 #[test]
 fn error_event_fails_the_stream() {
     let err = feed("stream_error.sse").unwrap_err();
     match err {
-        Error::Api { status, kind, message, .. } => {
+        Error::Api {
+            status,
+            kind,
+            message,
+            ..
+        } => {
             assert_eq!(status, 200);
             assert_eq!(kind, ApiErrorKind::Overloaded);
             assert_eq!(message, "Overloaded");
@@ -274,7 +324,10 @@ fn truncated_stream_fails_finish() {
 fn unknown_event_surfaces_with_warning() {
     let mut parser = AnthropicMessages.stream_parser();
     let (events, warnings) = parser
-        .parse(&SseEvent::new(Some("mystery"), r#"{"type": "mystery", "x": 1}"#))
+        .parse(&SseEvent::new(
+            Some("mystery"),
+            r#"{"type": "mystery", "x": 1}"#,
+        ))
         .unwrap();
     assert_eq!(events, vec![StreamEvent::Unknown]);
     assert_eq!(warnings.len(), 1);
@@ -321,7 +374,9 @@ fn protocol_violations_are_parse_errors() {
 fn event_name_falls_back_to_payload_type() {
     // Some proxies drop the SSE `event:` field; the payload type is used.
     let mut parser = AnthropicMessages.stream_parser();
-    let (events, _) = parser.parse(&SseEvent::new(None, r#"{"type": "message_stop"}"#)).unwrap();
+    let (events, _) = parser
+        .parse(&SseEvent::new(None, r#"{"type": "message_stop"}"#))
+        .unwrap();
     assert_eq!(events, vec![StreamEvent::MessageStop]);
     assert!(parser.finish().is_ok());
 }

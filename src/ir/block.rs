@@ -29,7 +29,9 @@ impl CacheHint {
     /// A cache hint with the given TTL (passed through verbatim).
     #[must_use]
     pub fn with_ttl(ttl: impl Into<String>) -> Self {
-        Self { ttl: Some(ttl.into()) }
+        Self {
+            ttl: Some(ttl.into()),
+        }
     }
 }
 
@@ -63,7 +65,10 @@ impl ImageSource {
     /// An inline base64 image.
     #[must_use]
     pub fn base64(media_type: impl Into<String>, data: impl Into<String>) -> Self {
-        Self::Base64 { media_type: media_type.into(), data: data.into() }
+        Self::Base64 {
+            media_type: media_type.into(),
+            data: data.into(),
+        }
     }
 
     /// A provider file id.
@@ -85,7 +90,9 @@ impl Serialize for ImageSource {
                 map.serialize_entry("type", "url")?;
                 map.serialize_entry("url", url)?;
             }
-            Self::Base64 { media_type, data, .. } => {
+            Self::Base64 {
+                media_type, data, ..
+            } => {
                 map.serialize_entry("type", "base64")?;
                 map.serialize_entry("media_type", media_type)?;
                 map.serialize_entry("data", data)?;
@@ -107,12 +114,10 @@ impl<'de> Deserialize<'de> for ImageSource {
             .and_then(Value::as_str)
             .ok_or_else(|| D::Error::missing_field("type"))?
             .to_owned();
-        let take_str = |map: &mut Map<String, Value>, key: &'static str| {
-            match map.remove(key) {
-                Some(Value::String(s)) => Ok(s),
-                Some(_) => Err(D::Error::custom(format!("`{key}` must be a string"))),
-                None => Err(D::Error::missing_field(key)),
-            }
+        let take_str = |map: &mut Map<String, Value>, key: &'static str| match map.remove(key) {
+            Some(Value::String(s)) => Ok(s),
+            Some(_) => Err(D::Error::custom(format!("`{key}` must be a string"))),
+            None => Err(D::Error::missing_field(key)),
         };
         match ty.as_str() {
             "url" => Ok(Self::Url(take_str(&mut map, "url")?)),
@@ -121,7 +126,9 @@ impl<'de> Deserialize<'de> for ImageSource {
                 data: take_str(&mut map, "data")?,
             }),
             "file_id" => Ok(Self::FileId(take_str(&mut map, "file_id")?)),
-            other => Err(D::Error::custom(format!("unknown image source type `{other}`"))),
+            other => Err(D::Error::custom(format!(
+                "unknown image source type `{other}`"
+            ))),
         }
     }
 }
@@ -232,13 +239,21 @@ impl ContentBlock {
     /// A text block.
     #[must_use]
     pub fn text(text: impl Into<String>) -> Self {
-        Self::Text { text: text.into(), cache: None, extra: Extra::new() }
+        Self::Text {
+            text: text.into(),
+            cache: None,
+            extra: Extra::new(),
+        }
     }
 
     /// An image block.
     #[must_use]
     pub fn image(source: ImageSource) -> Self {
-        Self::Image { source, cache: None, extra: Extra::new() }
+        Self::Image {
+            source,
+            cache: None,
+            extra: Extra::new(),
+        }
     }
 
     /// An image block referencing a URL.
@@ -309,7 +324,11 @@ impl ContentBlock {
     /// A thinking block with plaintext only.
     #[must_use]
     pub fn thinking(text: impl Into<String>) -> Self {
-        Self::Thinking { text: Some(text.into()), signature: None, extra: Extra::new() }
+        Self::Thinking {
+            text: Some(text.into()),
+            signature: None,
+            extra: Extra::new(),
+        }
     }
 
     /// A thinking block with text and a replay signature.
@@ -326,7 +345,10 @@ impl ContentBlock {
     /// id the node belongs to.
     #[must_use]
     pub fn opaque(format: impl Into<String>, value: Value) -> Self {
-        Self::Opaque { format: format.into(), value }
+        Self::Opaque {
+            format: format.into(),
+            value,
+        }
     }
 
     /// Sets the cache hint. Ignored on `Thinking` and `Opaque`, which have
@@ -390,7 +412,12 @@ impl ContentBlock {
     /// Sets a top-level field in the block's `extra` namespace for `format`.
     /// Ignored on `Opaque`.
     #[must_use]
-    pub fn with_extra(mut self, format: &str, key: impl Into<String>, value: impl Into<Value>) -> Self {
+    pub fn with_extra(
+        mut self,
+        format: &str,
+        key: impl Into<String>,
+        value: impl Into<Value>,
+    ) -> Self {
         if let Some(extra) = self.extra_mut() {
             extra.set(format, key, value);
         }
@@ -479,19 +506,30 @@ impl ToolOutputBlock {
     /// A text block.
     #[must_use]
     pub fn text(text: impl Into<String>) -> Self {
-        Self::Text { text: text.into(), cache: None, extra: Extra::new() }
+        Self::Text {
+            text: text.into(),
+            cache: None,
+            extra: Extra::new(),
+        }
     }
 
     /// An image block.
     #[must_use]
     pub fn image(source: ImageSource) -> Self {
-        Self::Image { source, cache: None, extra: Extra::new() }
+        Self::Image {
+            source,
+            cache: None,
+            extra: Extra::new(),
+        }
     }
 
     /// An unmodeled provider node.
     #[must_use]
     pub fn opaque(format: impl Into<String>, value: Value) -> Self {
-        Self::Opaque { format: format.into(), value }
+        Self::Opaque {
+            format: format.into(),
+            value,
+        }
     }
 
     /// Sets the cache hint. Ignored on `Opaque`, which has no cache
@@ -548,7 +586,10 @@ mod tests {
     #[test]
     fn content_block_tagged_serde() {
         let block = ContentBlock::text("hi");
-        assert_eq!(serde_json::to_value(&block).unwrap(), json!({"type": "text", "text": "hi"}));
+        assert_eq!(
+            serde_json::to_value(&block).unwrap(),
+            json!({"type": "text", "text": "hi"})
+        );
 
         let call = ContentBlock::tool_call_with_id("c1", "get", "{}");
         assert_eq!(

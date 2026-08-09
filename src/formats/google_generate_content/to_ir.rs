@@ -9,14 +9,17 @@ use crate::error::{Error, Result};
 use crate::format::ResponseMeta;
 use crate::format::ids::GOOGLE_GENERATE_CONTENT as ID;
 use crate::ir::{
-    ContentBlock, Effort, Extra, ImageSource, Message, OutputFormat, Reasoning, Request,
-    Response, StopReason, Tool, ToolChoice, ToolOutputBlock, Usage, normalize_stop_reason,
+    ContentBlock, Effort, Extra, ImageSource, Message, OutputFormat, Reasoning, Request, Response,
+    StopReason, Tool, ToolChoice, ToolOutputBlock, Usage, normalize_stop_reason,
 };
 
 use super::types;
 
 fn parse_error(message: impl Into<String>, raw: &[u8]) -> Error {
-    Error::Parse { message: message.into(), raw: bytes::Bytes::copy_from_slice(raw) }
+    Error::Parse {
+        message: message.into(),
+        raw: bytes::Bytes::copy_from_slice(raw),
+    }
 }
 
 fn warn(
@@ -181,12 +184,20 @@ pub(crate) fn text_like_block(
 ) -> ContentBlock {
     if thought {
         ns.insert("thought".to_owned(), json!(true));
-        ContentBlock::Thinking { text: Some(text), signature, extra: Extra::from_unknown(ID, ns) }
+        ContentBlock::Thinking {
+            text: Some(text),
+            signature,
+            extra: Extra::from_unknown(ID, ns),
+        }
     } else {
         if let Some(sig) = signature {
             ns.insert("thoughtSignature".to_owned(), json!(sig));
         }
-        ContentBlock::Text { text, cache: None, extra: Extra::from_unknown(ID, ns) }
+        ContentBlock::Text {
+            text,
+            cache: None,
+            extra: Extra::from_unknown(ID, ns),
+        }
     }
 }
 
@@ -228,7 +239,12 @@ fn user_block_from_part(part: &types::Part) -> ContentBlock {
             // Thinking is not valid user content (§ 7.4); keep verbatim.
             return opaque_part(part);
         }
-        return text_like_block(false, text.clone(), part.thought_signature.clone(), part.extra.clone());
+        return text_like_block(
+            false,
+            text.clone(),
+            part.thought_signature.clone(),
+            part.extra.clone(),
+        );
     }
     if let Some(blob) = &part.inline_data {
         return image_block(part, blob);
@@ -252,7 +268,10 @@ fn tool_result_from_part(
     location: &str,
     warnings: &mut Vec<ConversionWarning>,
 ) -> ContentBlock {
-    let fr = part.function_response.as_ref().expect("caller checked functionResponse");
+    let fr = part
+        .function_response
+        .as_ref()
+        .expect("caller checked functionResponse");
     let mut ns = part_ns(part);
     let mut fr_ns = fr.extra.clone();
     let mut content: Vec<ToolOutputBlock> = Vec::new();
@@ -359,7 +378,11 @@ fn split_user_content(
     };
     let mut messages = Vec::new();
     for (ri, (is_tool, blocks)) in runs.into_iter().enumerate() {
-        let mut msg = if is_tool { Message::tool(blocks) } else { Message::user(blocks) };
+        let mut msg = if is_tool {
+            Message::tool(blocks)
+        } else {
+            Message::user(blocks)
+        };
         if split {
             msg = msg.with_turn_group(g);
         }
@@ -381,7 +404,12 @@ fn assistant_message(
     for (pi, part) in content.parts.iter().enumerate() {
         let location = format!("/contents/{content_index}/parts/{pi}");
         match classify_assistant_part(part, &location, warnings) {
-            AssistantPart::TextLike { thought, text, signature, ns } => {
+            AssistantPart::TextLike {
+                thought,
+                text,
+                signature,
+                ns,
+            } => {
                 blocks.push(text_like_block(thought, text, signature, ns));
             }
             AssistantPart::Complete(block) => blocks.push(block),
@@ -396,8 +424,8 @@ fn assistant_message(
 
 /// Parses a Google request body into the IR (round-trip direction).
 pub fn request_to_ir(body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)> {
-    let wire: types::GenerateContentRequest =
-        serde_json::from_slice(body).map_err(|e| parse_error(format!("invalid Google request: {e}"), body))?;
+    let wire: types::GenerateContentRequest = serde_json::from_slice(body)
+        .map_err(|e| parse_error(format!("invalid Google request: {e}"), body))?;
     let mut warnings = Vec::new();
     let mut req = Request::new();
     let mut extra_ns = wire.extra;
@@ -440,9 +468,11 @@ pub fn request_to_ir(body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)> {
     let mut group = 0u64;
     for (ci, content) in wire.contents.iter().enumerate() {
         if content.role.as_deref() == Some("model") {
-            req.messages.push(assistant_message(content, ci, &mut warnings));
+            req.messages
+                .push(assistant_message(content, ci, &mut warnings));
         } else {
-            req.messages.extend(split_user_content(content, ci, &mut group, &mut warnings));
+            req.messages
+                .extend(split_user_content(content, ci, &mut group, &mut warnings));
         }
     }
 
@@ -484,8 +514,7 @@ pub fn request_to_ir(body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)> {
                     }
                     Some(names) => {
                         req.tool_choice = Some(ToolChoice::Required);
-                        fcc_mirror
-                            .insert("allowedFunctionNames".to_owned(), json!(names));
+                        fcc_mirror.insert("allowedFunctionNames".to_owned(), json!(names));
                     }
                     None => req.tool_choice = Some(ToolChoice::Required),
                 },
@@ -496,14 +525,15 @@ pub fn request_to_ir(body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)> {
                         fcc_mirror.insert("mode".to_owned(), json!(mode));
                     }
                     if let Some(names) = allowed {
-                        fcc_mirror
-                            .insert("allowedFunctionNames".to_owned(), json!(names));
+                        fcc_mirror.insert("allowedFunctionNames".to_owned(), json!(names));
                     }
                 }
             }
             if !fcc_mirror.is_empty() {
-                tc_mirror
-                    .insert("functionCallingConfig".to_owned(), Value::Object(fcc_mirror));
+                tc_mirror.insert(
+                    "functionCallingConfig".to_owned(),
+                    Value::Object(fcc_mirror),
+                );
             }
         }
         if !tc_mirror.is_empty() {
@@ -605,7 +635,12 @@ pub fn response_to_ir(body: &[u8], meta: &ResponseMeta) -> Result<Response> {
             for (pi, part) in content.parts.iter().enumerate() {
                 let location = format!("/candidates/0/content/parts/{pi}");
                 match classify_assistant_part(part, &location, &mut warnings) {
-                    AssistantPart::TextLike { thought, text, signature, ns } => {
+                    AssistantPart::TextLike {
+                        thought,
+                        text,
+                        signature,
+                        ns,
+                    } => {
                         blocks.push(text_like_block(thought, text, signature, ns));
                     }
                     AssistantPart::Complete(block) => blocks.push(block),

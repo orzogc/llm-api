@@ -46,8 +46,8 @@ use serde_json::{Value, json};
 use crate::convert::ConversionWarning;
 use crate::error::{ApiErrorKind, Error, Result};
 use crate::format::{
-    ApiFormat, AuthScheme, BuildCtx, BuiltRequest, CallMode, ResponseMeta, StreamParser,
-    build_url, finalize_request, generic_api_error, ids,
+    ApiFormat, AuthScheme, BuildCtx, BuiltRequest, CallMode, ResponseMeta, StreamParser, build_url,
+    finalize_request, generic_api_error, ids,
 };
 use crate::ir::{Request, Response};
 use crate::models::Model;
@@ -67,9 +67,7 @@ fn auth_scheme() -> AuthScheme {
 /// codes fall back to HTTP-status classification.
 fn api_error_kind(grpc_status: &str, http_status: u16) -> ApiErrorKind {
     match grpc_status {
-        "INVALID_ARGUMENT" | "FAILED_PRECONDITION" | "OUT_OF_RANGE" => {
-            ApiErrorKind::InvalidRequest
-        }
+        "INVALID_ARGUMENT" | "FAILED_PRECONDITION" | "OUT_OF_RANGE" => ApiErrorKind::InvalidRequest,
         "UNAUTHENTICATED" => ApiErrorKind::Auth,
         "PERMISSION_DENIED" => ApiErrorKind::PermissionDenied,
         "NOT_FOUND" => ApiErrorKind::NotFound,
@@ -86,8 +84,12 @@ impl ApiFormat for GoogleGenerateContent {
     }
 
     fn build_request(&self, req: &Request, ctx: &BuildCtx) -> Result<BuiltRequest> {
-        let from_ir::BuiltBody { mut body, mut warnings, merge_log, message_pointers } =
-            from_ir::build_body(req, &ctx.convert)?;
+        let from_ir::BuiltBody {
+            mut body,
+            mut warnings,
+            merge_log,
+            message_pointers,
+        } = from_ir::build_body(req, &ctx.convert)?;
         finalize_request(
             &mut body,
             &mut warnings,
@@ -120,7 +122,11 @@ impl ApiFormat for GoogleGenerateContent {
 
     fn parse_error(&self, status: u16, headers: &http::HeaderMap, body: &[u8]) -> Error {
         let mut error = generic_api_error(status, headers, body);
-        if let Error::Api { kind, parsed: Some(parsed), .. } = &mut error
+        if let Error::Api {
+            kind,
+            parsed: Some(parsed),
+            ..
+        } = &mut error
             && let Some(grpc) = parsed
                 .get("error")
                 .and_then(|e| e.get("status"))
@@ -146,19 +152,25 @@ impl ApiFormat for GoogleGenerateContent {
         if let Some(cursor) = cursor {
             protected.push(("pageToken", cursor));
         }
-        let url = build_url(&ctx.url, "models", &ctx.model, None, &protected, &ctx.extra_query)?;
+        let url = build_url(
+            &ctx.url,
+            "models",
+            &ctx.model,
+            None,
+            &protected,
+            &ctx.extra_query,
+        )?;
         let mut built = BuiltRequest::get(url);
         built.auth = Some(auth_scheme());
         Ok(built)
     }
 
     fn parse_models_response(&self, body: &[u8]) -> Result<(Vec<Model>, Option<String>)> {
-        let wire: types::ListModelsResponse = serde_json::from_slice(body).map_err(|e| {
-            Error::Parse {
+        let wire: types::ListModelsResponse =
+            serde_json::from_slice(body).map_err(|e| Error::Parse {
                 message: format!("invalid Google models response: {e}"),
                 raw: Bytes::copy_from_slice(body),
-            }
-        })?;
+            })?;
         let mut models = Vec::new();
         for entry in wire.models {
             let Some(name) = entry.get("name").and_then(Value::as_str) else {
@@ -167,8 +179,10 @@ impl ApiFormat for GoogleGenerateContent {
                 continue;
             };
             let id = name.strip_prefix("models/").unwrap_or(name).to_owned();
-            let display_name =
-                entry.get("displayName").and_then(Value::as_str).map(str::to_owned);
+            let display_name = entry
+                .get("displayName")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             let mut model = Model::new(id, entry.clone());
             model.display_name = display_name;
             models.push(model);
@@ -183,8 +197,12 @@ impl ApiFormat for GoogleGenerateContent {
         // then wrapped. The count endpoint accepts the entire
         // `GenerateContentRequest`, so nothing is dropped and the count is
         // exact for whatever the chat call would have sent.
-        let from_ir::BuiltBody { mut body, mut warnings, merge_log, message_pointers } =
-            from_ir::build_body(req, &ctx.convert)?;
+        let from_ir::BuiltBody {
+            mut body,
+            mut warnings,
+            merge_log,
+            message_pointers,
+        } = from_ir::build_body(req, &ctx.convert)?;
         finalize_request(
             &mut body,
             &mut warnings,
@@ -224,8 +242,11 @@ impl ApiFormat for GoogleGenerateContent {
                 message: format!("invalid Google countTokens response: {e}"),
                 raw: Bytes::copy_from_slice(body),
             })?;
-        let mut count =
-            TokenCount::new(wire.total_tokens.and_then(|t| u64::try_from(t).ok()).unwrap_or(0));
+        let mut count = TokenCount::new(
+            wire.total_tokens
+                .and_then(|t| u64::try_from(t).ok())
+                .unwrap_or(0),
+        );
         count.raw = Some(raw);
         Ok(count)
     }

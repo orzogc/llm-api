@@ -92,7 +92,10 @@ impl Request {
     /// A request with the given messages.
     #[must_use]
     pub fn with_messages(messages: Vec<Message>) -> Self {
-        Self { messages, ..Self::default() }
+        Self {
+            messages,
+            ..Self::default()
+        }
     }
 
     /// Sets `system` to a single text block.

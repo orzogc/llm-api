@@ -34,7 +34,10 @@ impl Tool {
     /// An unmodeled provider tool.
     #[must_use]
     pub fn opaque(format: impl Into<String>, value: Value) -> Self {
-        Self::Opaque { format: format.into(), value }
+        Self::Opaque {
+            format: format.into(),
+            value,
+        }
     }
 }
 
@@ -67,7 +70,10 @@ impl FunctionTool {
     /// A function tool with just a name.
     #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into(), ..Self::default() }
+        Self {
+            name: name.into(),
+            ..Self::default()
+        }
     }
 
     /// Sets the description.
@@ -153,7 +159,10 @@ mod tests {
 
     #[test]
     fn tool_choice_serde() {
-        assert_eq!(serde_json::to_value(ToolChoice::Auto).unwrap(), json!({"type": "auto"}));
+        assert_eq!(
+            serde_json::to_value(ToolChoice::Auto).unwrap(),
+            json!({"type": "auto"})
+        );
         let t = ToolChoice::tool("f");
         let v = serde_json::to_value(&t).unwrap();
         assert_eq!(v, json!({"type": "tool", "name": "f"}));

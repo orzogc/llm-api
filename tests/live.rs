@@ -195,11 +195,19 @@ fn cfg_google_no_thinking(req: &mut Request) {
 /// object, sent via `Request.extra`; it is on by default upstream, so both
 /// modes set it explicitly.
 fn cfg_deepseek_cc_thinking(req: &mut Request) {
-    req.extra.set(ids::OPENAI_CHAT_COMPLETIONS, "thinking", json!({"type": "enabled"}));
+    req.extra.set(
+        ids::OPENAI_CHAT_COMPLETIONS,
+        "thinking",
+        json!({"type": "enabled"}),
+    );
 }
 
 fn cfg_deepseek_cc_no_thinking(req: &mut Request) {
-    req.extra.set(ids::OPENAI_CHAT_COMPLETIONS, "thinking", json!({"type": "disabled"}));
+    req.extra.set(
+        ids::OPENAI_CHAT_COMPLETIONS,
+        "thinking",
+        json!({"type": "disabled"}),
+    );
 }
 
 /// DeepSeek Messages dialect: DeepSeek accepts `{"type": "enabled"}`
@@ -207,7 +215,11 @@ fn cfg_deepseek_cc_no_thinking(req: &mut Request) {
 /// through `extra`; the disable side is the IR-native
 /// `Reasoning::enabled(false)` → `{"type": "disabled"}`.
 fn cfg_deepseek_messages_thinking(req: &mut Request) {
-    req.extra.set(ids::ANTHROPIC_MESSAGES, "thinking", json!({"type": "enabled"}));
+    req.extra.set(
+        ids::ANTHROPIC_MESSAGES,
+        "thinking",
+        json!({"type": "enabled"}),
+    );
 }
 
 fn cfg_deepseek_messages_no_thinking(req: &mut Request) {
@@ -235,7 +247,11 @@ fn has_thinking(response: &Response) -> bool {
 }
 
 fn reasoning_tokens(response: &Response) -> u64 {
-    response.usage.as_ref().and_then(|u| u.reasoning_tokens).unwrap_or(0)
+    response
+        .usage
+        .as_ref()
+        .and_then(|u| u.reasoning_tokens)
+        .unwrap_or(0)
 }
 
 async fn chat(provider: &ProviderConfig, request: &Request, streaming: bool) -> Response {
@@ -263,7 +279,10 @@ fn assert_thinking_mode(response: &Response, thinking: bool) {
             "expected thinking content or reasoning tokens: {response:?}"
         );
     } else {
-        assert!(!has_thinking(response), "unexpected thinking content: {response:?}");
+        assert!(
+            !has_thinking(response),
+            "unexpected thinking content: {response:?}"
+        );
     }
 }
 
@@ -344,15 +363,19 @@ fn tool_results_for(response: &Response) -> Message {
         .content
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::ToolCall { id, name, arguments, .. } => {
+            ContentBlock::ToolCall {
+                id,
+                name,
+                arguments,
+                ..
+            } => {
                 let report = if arguments.to_lowercase().contains("tokyo") {
                     "Sunny, 25 degrees Celsius."
                 } else {
                     "Cloudy, 12 degrees Celsius."
                 };
                 Some(
-                    ContentBlock::tool_result_text(id.clone(), report)
-                        .with_tool_name(name.clone()),
+                    ContentBlock::tool_result_text(id.clone(), report).with_tool_name(name.clone()),
                 )
             }
             _ => None,
@@ -401,10 +424,16 @@ async fn assert_tool_loop(
     for _ in 0..5 {
         saw_thinking = saw_thinking || has_thinking(&last) || reasoning_tokens(&last) > 0;
         if thinking == Thinking::Off {
-            assert!(!has_thinking(&last), "unexpected thinking content: {last:?}");
+            assert!(
+                !has_thinking(&last),
+                "unexpected thinking content: {last:?}"
+            );
         }
-        let has_calls =
-            last.message.content.iter().any(|b| matches!(b, ContentBlock::ToolCall { .. }));
+        let has_calls = last
+            .message
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolCall { .. }));
         if !has_calls {
             break;
         }
@@ -451,11 +480,18 @@ async fn assert_structured_output(provider: ProviderConfig, streaming: bool) {
         .parse_json()
         .unwrap_or_else(|e| panic!("reply is not valid JSON ({e}): {response:?}"));
     assert_eq!(
-        value.get("city").and_then(Value::as_str).map(str::to_lowercase).as_deref(),
+        value
+            .get("city")
+            .and_then(Value::as_str)
+            .map(str::to_lowercase)
+            .as_deref(),
         Some("paris"),
         "unexpected structured reply: {value}"
     );
-    assert!(value.get("country").and_then(Value::as_str).is_some(), "{value}");
+    assert!(
+        value.get("country").and_then(Value::as_str).is_some(),
+        "{value}"
+    );
 }
 
 /// A 64×64 solid-red PNG (base64), small enough to embed.
@@ -476,7 +512,10 @@ async fn assert_image_input(provider: ProviderConfig) {
 
 async fn assert_models_work(provider: ProviderConfig) {
     let client = Client::new(reqwest::Client::new());
-    let models = client.list_models(&provider).await.expect("live model list failed");
+    let models = client
+        .list_models(&provider)
+        .await
+        .expect("live model list failed");
     assert!(!models.is_empty());
     assert!(models.iter().all(|m| !m.id.is_empty()));
 }
@@ -530,10 +569,34 @@ macro_rules! structured_matrix {
 
 // ---- OpenAI: Chat Completions ----
 
-chat_matrix!(openai_chat_completions_multi_turn_thinking_live, openai(OpenAiChatCompletions), cfg_openai_thinking, thinking = true, stream = false);
-chat_matrix!(openai_chat_completions_multi_turn_thinking_stream_live, openai(OpenAiChatCompletions), cfg_openai_thinking, thinking = true, stream = true);
-chat_matrix!(openai_chat_completions_multi_turn_no_thinking_live, openai(OpenAiChatCompletions), cfg_openai_no_thinking, thinking = false, stream = false);
-chat_matrix!(openai_chat_completions_multi_turn_no_thinking_stream_live, openai(OpenAiChatCompletions), cfg_openai_no_thinking, thinking = false, stream = true);
+chat_matrix!(
+    openai_chat_completions_multi_turn_thinking_live,
+    openai(OpenAiChatCompletions),
+    cfg_openai_thinking,
+    thinking = true,
+    stream = false
+);
+chat_matrix!(
+    openai_chat_completions_multi_turn_thinking_stream_live,
+    openai(OpenAiChatCompletions),
+    cfg_openai_thinking,
+    thinking = true,
+    stream = true
+);
+chat_matrix!(
+    openai_chat_completions_multi_turn_no_thinking_live,
+    openai(OpenAiChatCompletions),
+    cfg_openai_no_thinking,
+    thinking = false,
+    stream = false
+);
+chat_matrix!(
+    openai_chat_completions_multi_turn_no_thinking_stream_live,
+    openai(OpenAiChatCompletions),
+    cfg_openai_no_thinking,
+    thinking = false,
+    stream = true
+);
 
 // OpenAI rejects function tools on `/v1/chat/completions` unless
 // `reasoning_effort` is `"none"` for this model class ("use /v1/responses
@@ -541,76 +604,218 @@ chat_matrix!(openai_chat_completions_multi_turn_no_thinking_stream_live, openai(
 // against the DeepSeek dialect below — where thinking tool loops are not
 // only supported but REQUIRE the `reasoning_content` history passback our
 // replay performs (a 400 otherwise, per the DeepSeek docs).
-tool_matrix!(openai_chat_completions_tools_no_thinking_live, openai(OpenAiChatCompletions), cfg_openai_no_thinking, thinking = Thinking::Off, stream = false);
-tool_matrix!(openai_chat_completions_tools_no_thinking_stream_live, openai(OpenAiChatCompletions), cfg_openai_no_thinking, thinking = Thinking::Off, stream = true);
+tool_matrix!(
+    openai_chat_completions_tools_no_thinking_live,
+    openai(OpenAiChatCompletions),
+    cfg_openai_no_thinking,
+    thinking = Thinking::Off,
+    stream = false
+);
+tool_matrix!(
+    openai_chat_completions_tools_no_thinking_stream_live,
+    openai(OpenAiChatCompletions),
+    cfg_openai_no_thinking,
+    thinking = Thinking::Off,
+    stream = true
+);
 
-structured_matrix!(openai_chat_completions_structured_output_live, openai(OpenAiChatCompletions), stream = false);
-structured_matrix!(openai_chat_completions_structured_output_stream_live, openai(OpenAiChatCompletions), stream = true);
+structured_matrix!(
+    openai_chat_completions_structured_output_live,
+    openai(OpenAiChatCompletions),
+    stream = false
+);
+structured_matrix!(
+    openai_chat_completions_structured_output_stream_live,
+    openai(OpenAiChatCompletions),
+    stream = true
+);
 
 #[tokio::test]
 #[ignore = "live API call; needs LLM_API_OPENAI_API_KEY (env or .env)"]
 async fn openai_chat_completions_image_input_live() {
-    let Some(p) = openai(OpenAiChatCompletions) else { return };
+    let Some(p) = openai(OpenAiChatCompletions) else {
+        return;
+    };
     assert_image_input(p).await;
 }
 
 #[tokio::test]
 #[ignore = "live API call; needs LLM_API_OPENAI_API_KEY (env or .env)"]
 async fn openai_chat_completions_models_live() {
-    let Some(p) = openai(OpenAiChatCompletions) else { return };
+    let Some(p) = openai(OpenAiChatCompletions) else {
+        return;
+    };
     assert_models_work(p).await;
 }
 
 // ---- OpenAI: Responses ----
 
-chat_matrix!(openai_responses_multi_turn_thinking_live, openai(OpenAiResponses), cfg_openai_thinking, thinking = true, stream = false);
-chat_matrix!(openai_responses_multi_turn_thinking_stream_live, openai(OpenAiResponses), cfg_openai_thinking, thinking = true, stream = true);
-chat_matrix!(openai_responses_multi_turn_no_thinking_live, openai(OpenAiResponses), cfg_openai_no_thinking, thinking = false, stream = false);
-chat_matrix!(openai_responses_multi_turn_no_thinking_stream_live, openai(OpenAiResponses), cfg_openai_no_thinking, thinking = false, stream = true);
+chat_matrix!(
+    openai_responses_multi_turn_thinking_live,
+    openai(OpenAiResponses),
+    cfg_openai_thinking,
+    thinking = true,
+    stream = false
+);
+chat_matrix!(
+    openai_responses_multi_turn_thinking_stream_live,
+    openai(OpenAiResponses),
+    cfg_openai_thinking,
+    thinking = true,
+    stream = true
+);
+chat_matrix!(
+    openai_responses_multi_turn_no_thinking_live,
+    openai(OpenAiResponses),
+    cfg_openai_no_thinking,
+    thinking = false,
+    stream = false
+);
+chat_matrix!(
+    openai_responses_multi_turn_no_thinking_stream_live,
+    openai(OpenAiResponses),
+    cfg_openai_no_thinking,
+    thinking = false,
+    stream = true
+);
 
-tool_matrix!(openai_responses_tools_thinking_live, openai(OpenAiResponses), cfg_openai_thinking, thinking = Thinking::Enabled, stream = false);
-tool_matrix!(openai_responses_tools_thinking_stream_live, openai(OpenAiResponses), cfg_openai_thinking, thinking = Thinking::Enabled, stream = true);
-tool_matrix!(openai_responses_tools_no_thinking_live, openai(OpenAiResponses), cfg_openai_no_thinking, thinking = Thinking::Off, stream = false);
-tool_matrix!(openai_responses_tools_no_thinking_stream_live, openai(OpenAiResponses), cfg_openai_no_thinking, thinking = Thinking::Off, stream = true);
+tool_matrix!(
+    openai_responses_tools_thinking_live,
+    openai(OpenAiResponses),
+    cfg_openai_thinking,
+    thinking = Thinking::Enabled,
+    stream = false
+);
+tool_matrix!(
+    openai_responses_tools_thinking_stream_live,
+    openai(OpenAiResponses),
+    cfg_openai_thinking,
+    thinking = Thinking::Enabled,
+    stream = true
+);
+tool_matrix!(
+    openai_responses_tools_no_thinking_live,
+    openai(OpenAiResponses),
+    cfg_openai_no_thinking,
+    thinking = Thinking::Off,
+    stream = false
+);
+tool_matrix!(
+    openai_responses_tools_no_thinking_stream_live,
+    openai(OpenAiResponses),
+    cfg_openai_no_thinking,
+    thinking = Thinking::Off,
+    stream = true
+);
 
-structured_matrix!(openai_responses_structured_output_live, openai(OpenAiResponses), stream = false);
-structured_matrix!(openai_responses_structured_output_stream_live, openai(OpenAiResponses), stream = true);
+structured_matrix!(
+    openai_responses_structured_output_live,
+    openai(OpenAiResponses),
+    stream = false
+);
+structured_matrix!(
+    openai_responses_structured_output_stream_live,
+    openai(OpenAiResponses),
+    stream = true
+);
 
 #[tokio::test]
 #[ignore = "live API call; needs LLM_API_OPENAI_API_KEY (env or .env)"]
 async fn openai_responses_image_input_live() {
-    let Some(p) = openai(OpenAiResponses) else { return };
+    let Some(p) = openai(OpenAiResponses) else {
+        return;
+    };
     assert_image_input(p).await;
 }
 
 #[tokio::test]
 #[ignore = "live API call; needs LLM_API_OPENAI_API_KEY (env or .env)"]
 async fn openai_responses_models_live() {
-    let Some(p) = openai(OpenAiResponses) else { return };
+    let Some(p) = openai(OpenAiResponses) else {
+        return;
+    };
     assert_models_work(p).await;
 }
 
 #[tokio::test]
 #[ignore = "live API call; needs LLM_API_OPENAI_API_KEY (env or .env)"]
 async fn openai_responses_count_tokens_live() {
-    let Some(p) = openai(OpenAiResponses) else { return };
+    let Some(p) = openai(OpenAiResponses) else {
+        return;
+    };
     assert_count_works(p).await;
 }
 
 // ---- Anthropic ----
 
-chat_matrix!(anthropic_messages_multi_turn_thinking_live, anthropic(), cfg_anthropic_thinking, thinking = true, stream = false);
-chat_matrix!(anthropic_messages_multi_turn_thinking_stream_live, anthropic(), cfg_anthropic_thinking, thinking = true, stream = true);
-chat_matrix!(anthropic_messages_multi_turn_no_thinking_live, anthropic(), cfg_anthropic_no_thinking, thinking = false, stream = false);
-chat_matrix!(anthropic_messages_multi_turn_no_thinking_stream_live, anthropic(), cfg_anthropic_no_thinking, thinking = false, stream = true);
+chat_matrix!(
+    anthropic_messages_multi_turn_thinking_live,
+    anthropic(),
+    cfg_anthropic_thinking,
+    thinking = true,
+    stream = false
+);
+chat_matrix!(
+    anthropic_messages_multi_turn_thinking_stream_live,
+    anthropic(),
+    cfg_anthropic_thinking,
+    thinking = true,
+    stream = true
+);
+chat_matrix!(
+    anthropic_messages_multi_turn_no_thinking_live,
+    anthropic(),
+    cfg_anthropic_no_thinking,
+    thinking = false,
+    stream = false
+);
+chat_matrix!(
+    anthropic_messages_multi_turn_no_thinking_stream_live,
+    anthropic(),
+    cfg_anthropic_no_thinking,
+    thinking = false,
+    stream = true
+);
 
-tool_matrix!(anthropic_messages_tools_thinking_live, anthropic(), cfg_anthropic_thinking, thinking = Thinking::Enabled, stream = false);
-tool_matrix!(anthropic_messages_tools_thinking_stream_live, anthropic(), cfg_anthropic_thinking, thinking = Thinking::Enabled, stream = true);
-tool_matrix!(anthropic_messages_tools_no_thinking_live, anthropic(), cfg_anthropic_no_thinking, thinking = Thinking::Off, stream = false);
-tool_matrix!(anthropic_messages_tools_no_thinking_stream_live, anthropic(), cfg_anthropic_no_thinking, thinking = Thinking::Off, stream = true);
+tool_matrix!(
+    anthropic_messages_tools_thinking_live,
+    anthropic(),
+    cfg_anthropic_thinking,
+    thinking = Thinking::Enabled,
+    stream = false
+);
+tool_matrix!(
+    anthropic_messages_tools_thinking_stream_live,
+    anthropic(),
+    cfg_anthropic_thinking,
+    thinking = Thinking::Enabled,
+    stream = true
+);
+tool_matrix!(
+    anthropic_messages_tools_no_thinking_live,
+    anthropic(),
+    cfg_anthropic_no_thinking,
+    thinking = Thinking::Off,
+    stream = false
+);
+tool_matrix!(
+    anthropic_messages_tools_no_thinking_stream_live,
+    anthropic(),
+    cfg_anthropic_no_thinking,
+    thinking = Thinking::Off,
+    stream = true
+);
 
-structured_matrix!(anthropic_messages_structured_output_live, anthropic(), stream = false);
-structured_matrix!(anthropic_messages_structured_output_stream_live, anthropic(), stream = true);
+structured_matrix!(
+    anthropic_messages_structured_output_live,
+    anthropic(),
+    stream = false
+);
+structured_matrix!(
+    anthropic_messages_structured_output_stream_live,
+    anthropic(),
+    stream = true
+);
 
 #[tokio::test]
 #[ignore = "live API call; needs LLM_API_ANTHROPIC_API_KEY (env or .env)"]
@@ -629,18 +834,74 @@ async fn anthropic_models_and_count_live() {
 
 // ---- Google ----
 
-chat_matrix!(google_generate_content_multi_turn_thinking_live, google(), cfg_google_thinking, thinking = true, stream = false);
-chat_matrix!(google_generate_content_multi_turn_thinking_stream_live, google(), cfg_google_thinking, thinking = true, stream = true);
-chat_matrix!(google_generate_content_multi_turn_no_thinking_live, google(), cfg_google_no_thinking, thinking = false, stream = false);
-chat_matrix!(google_generate_content_multi_turn_no_thinking_stream_live, google(), cfg_google_no_thinking, thinking = false, stream = true);
+chat_matrix!(
+    google_generate_content_multi_turn_thinking_live,
+    google(),
+    cfg_google_thinking,
+    thinking = true,
+    stream = false
+);
+chat_matrix!(
+    google_generate_content_multi_turn_thinking_stream_live,
+    google(),
+    cfg_google_thinking,
+    thinking = true,
+    stream = true
+);
+chat_matrix!(
+    google_generate_content_multi_turn_no_thinking_live,
+    google(),
+    cfg_google_no_thinking,
+    thinking = false,
+    stream = false
+);
+chat_matrix!(
+    google_generate_content_multi_turn_no_thinking_stream_live,
+    google(),
+    cfg_google_no_thinking,
+    thinking = false,
+    stream = true
+);
 
-tool_matrix!(google_generate_content_tools_thinking_live, google(), cfg_google_thinking, thinking = Thinking::Required, stream = false);
-tool_matrix!(google_generate_content_tools_thinking_stream_live, google(), cfg_google_thinking, thinking = Thinking::Required, stream = true);
-tool_matrix!(google_generate_content_tools_no_thinking_live, google(), cfg_google_no_thinking, thinking = Thinking::Off, stream = false);
-tool_matrix!(google_generate_content_tools_no_thinking_stream_live, google(), cfg_google_no_thinking, thinking = Thinking::Off, stream = true);
+tool_matrix!(
+    google_generate_content_tools_thinking_live,
+    google(),
+    cfg_google_thinking,
+    thinking = Thinking::Required,
+    stream = false
+);
+tool_matrix!(
+    google_generate_content_tools_thinking_stream_live,
+    google(),
+    cfg_google_thinking,
+    thinking = Thinking::Required,
+    stream = true
+);
+tool_matrix!(
+    google_generate_content_tools_no_thinking_live,
+    google(),
+    cfg_google_no_thinking,
+    thinking = Thinking::Off,
+    stream = false
+);
+tool_matrix!(
+    google_generate_content_tools_no_thinking_stream_live,
+    google(),
+    cfg_google_no_thinking,
+    thinking = Thinking::Off,
+    stream = true
+);
 
-structured_matrix!(google_generate_content_structured_output_live, google(), stream = false);
-structured_matrix!(google_generate_content_structured_output_stream_live, google(), stream = true);
+structured_matrix!(
+    google_generate_content_structured_output_live,
+    google(),
+    stream = false
+);
+structured_matrix!(
+    google_generate_content_structured_output_stream_live,
+    google(),
+    stream = true
+);
 
 #[tokio::test]
 #[ignore = "live API call; needs LLM_API_GOOGLE_API_KEY (env or .env)"]
@@ -665,20 +926,104 @@ async fn google_count_tokens_live() {
 
 // ---- DeepSeek dialects (text-only models: no image tests) ----
 
-tool_matrix!(deepseek_chat_completions_tools_thinking_live, deepseek(OpenAiChatCompletions, "https://api.deepseek.com"), cfg_deepseek_cc_thinking, thinking = Thinking::Required, stream = false);
-tool_matrix!(deepseek_chat_completions_tools_thinking_stream_live, deepseek(OpenAiChatCompletions, "https://api.deepseek.com"), cfg_deepseek_cc_thinking, thinking = Thinking::Required, stream = true);
+tool_matrix!(
+    deepseek_chat_completions_tools_thinking_live,
+    deepseek(OpenAiChatCompletions, "https://api.deepseek.com"),
+    cfg_deepseek_cc_thinking,
+    thinking = Thinking::Required,
+    stream = false
+);
+tool_matrix!(
+    deepseek_chat_completions_tools_thinking_stream_live,
+    deepseek(OpenAiChatCompletions, "https://api.deepseek.com"),
+    cfg_deepseek_cc_thinking,
+    thinking = Thinking::Required,
+    stream = true
+);
 
-chat_matrix!(deepseek_chat_completions_multi_turn_thinking_live, deepseek(OpenAiChatCompletions, "https://api.deepseek.com"), cfg_deepseek_cc_thinking, thinking = true, stream = false);
-chat_matrix!(deepseek_chat_completions_multi_turn_thinking_stream_live, deepseek(OpenAiChatCompletions, "https://api.deepseek.com"), cfg_deepseek_cc_thinking, thinking = true, stream = true);
-chat_matrix!(deepseek_chat_completions_multi_turn_no_thinking_live, deepseek(OpenAiChatCompletions, "https://api.deepseek.com"), cfg_deepseek_cc_no_thinking, thinking = false, stream = false);
-chat_matrix!(deepseek_chat_completions_multi_turn_no_thinking_stream_live, deepseek(OpenAiChatCompletions, "https://api.deepseek.com"), cfg_deepseek_cc_no_thinking, thinking = false, stream = true);
+chat_matrix!(
+    deepseek_chat_completions_multi_turn_thinking_live,
+    deepseek(OpenAiChatCompletions, "https://api.deepseek.com"),
+    cfg_deepseek_cc_thinking,
+    thinking = true,
+    stream = false
+);
+chat_matrix!(
+    deepseek_chat_completions_multi_turn_thinking_stream_live,
+    deepseek(OpenAiChatCompletions, "https://api.deepseek.com"),
+    cfg_deepseek_cc_thinking,
+    thinking = true,
+    stream = true
+);
+chat_matrix!(
+    deepseek_chat_completions_multi_turn_no_thinking_live,
+    deepseek(OpenAiChatCompletions, "https://api.deepseek.com"),
+    cfg_deepseek_cc_no_thinking,
+    thinking = false,
+    stream = false
+);
+chat_matrix!(
+    deepseek_chat_completions_multi_turn_no_thinking_stream_live,
+    deepseek(OpenAiChatCompletions, "https://api.deepseek.com"),
+    cfg_deepseek_cc_no_thinking,
+    thinking = false,
+    stream = true
+);
 
-chat_matrix!(deepseek_messages_multi_turn_thinking_live, deepseek(AnthropicMessages, "https://api.deepseek.com/anthropic"), cfg_deepseek_messages_thinking, thinking = true, stream = false);
-chat_matrix!(deepseek_messages_multi_turn_thinking_stream_live, deepseek(AnthropicMessages, "https://api.deepseek.com/anthropic"), cfg_deepseek_messages_thinking, thinking = true, stream = true);
-chat_matrix!(deepseek_messages_multi_turn_no_thinking_live, deepseek(AnthropicMessages, "https://api.deepseek.com/anthropic"), cfg_deepseek_messages_no_thinking, thinking = false, stream = false);
-chat_matrix!(deepseek_messages_multi_turn_no_thinking_stream_live, deepseek(AnthropicMessages, "https://api.deepseek.com/anthropic"), cfg_deepseek_messages_no_thinking, thinking = false, stream = true);
+chat_matrix!(
+    deepseek_messages_multi_turn_thinking_live,
+    deepseek(AnthropicMessages, "https://api.deepseek.com/anthropic"),
+    cfg_deepseek_messages_thinking,
+    thinking = true,
+    stream = false
+);
+chat_matrix!(
+    deepseek_messages_multi_turn_thinking_stream_live,
+    deepseek(AnthropicMessages, "https://api.deepseek.com/anthropic"),
+    cfg_deepseek_messages_thinking,
+    thinking = true,
+    stream = true
+);
+chat_matrix!(
+    deepseek_messages_multi_turn_no_thinking_live,
+    deepseek(AnthropicMessages, "https://api.deepseek.com/anthropic"),
+    cfg_deepseek_messages_no_thinking,
+    thinking = false,
+    stream = false
+);
+chat_matrix!(
+    deepseek_messages_multi_turn_no_thinking_stream_live,
+    deepseek(AnthropicMessages, "https://api.deepseek.com/anthropic"),
+    cfg_deepseek_messages_no_thinking,
+    thinking = false,
+    stream = true
+);
 
-chat_matrix!(deepseek_responses_multi_turn_thinking_live, deepseek(OpenAiResponses, "https://api.deepseek.com"), cfg_deepseek_responses_thinking, thinking = true, stream = false);
-chat_matrix!(deepseek_responses_multi_turn_thinking_stream_live, deepseek(OpenAiResponses, "https://api.deepseek.com"), cfg_deepseek_responses_thinking, thinking = true, stream = true);
-chat_matrix!(deepseek_responses_multi_turn_no_thinking_live, deepseek(OpenAiResponses, "https://api.deepseek.com"), cfg_deepseek_responses_no_thinking, thinking = false, stream = false);
-chat_matrix!(deepseek_responses_multi_turn_no_thinking_stream_live, deepseek(OpenAiResponses, "https://api.deepseek.com"), cfg_deepseek_responses_no_thinking, thinking = false, stream = true);
+chat_matrix!(
+    deepseek_responses_multi_turn_thinking_live,
+    deepseek(OpenAiResponses, "https://api.deepseek.com"),
+    cfg_deepseek_responses_thinking,
+    thinking = true,
+    stream = false
+);
+chat_matrix!(
+    deepseek_responses_multi_turn_thinking_stream_live,
+    deepseek(OpenAiResponses, "https://api.deepseek.com"),
+    cfg_deepseek_responses_thinking,
+    thinking = true,
+    stream = true
+);
+chat_matrix!(
+    deepseek_responses_multi_turn_no_thinking_live,
+    deepseek(OpenAiResponses, "https://api.deepseek.com"),
+    cfg_deepseek_responses_no_thinking,
+    thinking = false,
+    stream = false
+);
+chat_matrix!(
+    deepseek_responses_multi_turn_no_thinking_stream_live,
+    deepseek(OpenAiResponses, "https://api.deepseek.com"),
+    cfg_deepseek_responses_no_thinking,
+    thinking = false,
+    stream = true
+);

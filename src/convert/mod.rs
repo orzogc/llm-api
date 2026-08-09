@@ -14,10 +14,7 @@ use crate::error::ConversionError;
 /// The § 6 strict gate: when `strict` is on, any non-overridden `Semantic`
 /// **build-side** warning fails the conversion. Parse-side warnings never
 /// fail a call.
-pub fn strict_gate(
-    strict: bool,
-    warnings: &[ConversionWarning],
-) -> Result<(), ConversionError> {
+pub fn strict_gate(strict: bool, warnings: &[ConversionWarning]) -> Result<(), ConversionError> {
     if !strict {
         return Ok(());
     }
@@ -30,7 +27,13 @@ pub fn strict_gate(
         })
         .cloned()
         .collect();
-    if escalated.is_empty() { Ok(()) } else { Err(ConversionError::Strict { warnings: escalated }) }
+    if escalated.is_empty() {
+        Ok(())
+    } else {
+        Err(ConversionError::Strict {
+            warnings: escalated,
+        })
+    }
 }
 
 #[cfg(test)]

@@ -117,7 +117,8 @@ impl Usage {
     /// provider data cannot underflow.
     #[must_use]
     pub fn visible_output_tokens(&self) -> u64 {
-        self.output_tokens.saturating_sub(self.reasoning_tokens.unwrap_or(0))
+        self.output_tokens
+            .saturating_sub(self.reasoning_tokens.unwrap_or(0))
     }
 }
 
@@ -226,7 +227,10 @@ pub fn normalize_stop_reason(
 ) -> Option<StopReason> {
     let mut sr = stop_reason;
     if sr == Some(StopReason::EndTurn)
-        && message.content.iter().any(|b| matches!(b, ContentBlock::ToolCall { .. }))
+        && message
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolCall { .. }))
     {
         sr = Some(StopReason::ToolUse);
     }
@@ -251,7 +255,10 @@ mod header_map_serde {
         let pairs: Vec<(String, String)> = headers
             .iter()
             .map(|(name, value)| {
-                (name.as_str().to_owned(), String::from_utf8_lossy(value.as_bytes()).into_owned())
+                (
+                    name.as_str().to_owned(),
+                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                )
             })
             .collect();
         pairs.serialize(serializer)
@@ -284,7 +291,10 @@ mod tests {
 
     #[test]
     fn stop_reason_serde() {
-        assert_eq!(serde_json::to_string(&StopReason::EndTurn).unwrap(), "\"end_turn\"");
+        assert_eq!(
+            serde_json::to_string(&StopReason::EndTurn).unwrap(),
+            "\"end_turn\""
+        );
         let other: StopReason = serde_json::from_str("\"compaction\"").unwrap();
         assert_eq!(other, StopReason::Other("compaction".into()));
         assert_eq!(serde_json::to_string(&other).unwrap(), "\"compaction\"");
@@ -292,9 +302,17 @@ mod tests {
 
     #[test]
     fn usage_visible_output_saturates() {
-        let u = Usage { output_tokens: 5, reasoning_tokens: Some(9), ..Usage::default() };
+        let u = Usage {
+            output_tokens: 5,
+            reasoning_tokens: Some(9),
+            ..Usage::default()
+        };
         assert_eq!(u.visible_output_tokens(), 0);
-        let u2 = Usage { output_tokens: 10, reasoning_tokens: Some(3), ..Usage::default() };
+        let u2 = Usage {
+            output_tokens: 10,
+            reasoning_tokens: Some(3),
+            ..Usage::default()
+        };
         assert_eq!(u2.visible_output_tokens(), 7);
     }
 
@@ -325,7 +343,10 @@ mod tests {
             normalize_stop_reason(&refusal_msg, Some(StopReason::EndTurn)),
             Some(StopReason::Refusal)
         );
-        assert_eq!(normalize_stop_reason(&refusal_msg, None), Some(StopReason::Refusal));
+        assert_eq!(
+            normalize_stop_reason(&refusal_msg, None),
+            Some(StopReason::Refusal)
+        );
         // A non-EndTurn reason is left alone.
         assert_eq!(
             normalize_stop_reason(&refusal_msg, Some(StopReason::MaxTokens)),
@@ -346,7 +367,8 @@ mod tests {
     #[test]
     fn response_serde_round_trip_with_headers() {
         let mut resp = Response::new(Message::assistant_text("hi"));
-        resp.headers.insert("x-request-id", http::HeaderValue::from_static("abc"));
+        resp.headers
+            .insert("x-request-id", http::HeaderValue::from_static("abc"));
         resp.status = 200;
         let s = serde_json::to_string(&resp).unwrap();
         let back: Response = serde_json::from_str(&s).unwrap();

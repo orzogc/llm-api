@@ -24,7 +24,10 @@ fn pwarn(code: WarningCode, location: &str, text: impl Into<String>) -> Conversi
 }
 
 fn perr(message: impl Into<String>, raw: &str) -> Error {
-    Error::Parse { message: message.into(), raw: bytes::Bytes::copy_from_slice(raw.as_bytes()) }
+    Error::Parse {
+        message: message.into(),
+        raw: bytes::Bytes::copy_from_slice(raw.as_bytes()),
+    }
 }
 
 /// Per-block accumulation state for finalization at `content_block_stop`.
@@ -107,7 +110,15 @@ impl AnthropicStreamParser {
                         cache: cache.clone(),
                         extra: Extra::from_unknown(FMT, rest.clone()),
                     };
-                    (OpenBlock::Text { text: t.text, extra: rest, cache, citations: Vec::new() }, start)
+                    (
+                        OpenBlock::Text {
+                            text: t.text,
+                            extra: rest,
+                            cache,
+                            citations: Vec::new(),
+                        },
+                        start,
+                    )
                 }
                 Err(_) => opaque_open(content_block, &loc, warnings),
             },
@@ -126,7 +137,14 @@ impl AnthropicStreamParser {
                             },
                             extra: Extra::from_unknown(FMT, t.extra.clone()),
                         };
-                        (OpenBlock::Thinking { text: t.thinking, signature, extra: t.extra }, start)
+                        (
+                            OpenBlock::Thinking {
+                                text: t.thinking,
+                                signature,
+                                extra: t.extra,
+                            },
+                            start,
+                        )
                     }
                     Err(_) => opaque_open(content_block, &loc, warnings),
                 }
@@ -141,7 +159,13 @@ impl AnthropicStreamParser {
                             signature: Some(t.data.clone()),
                             extra: Extra::from_unknown(FMT, extra),
                         };
-                        (OpenBlock::RedactedThinking { data: t.data, extra: t.extra }, start)
+                        (
+                            OpenBlock::RedactedThinking {
+                                data: t.data,
+                                extra: t.extra,
+                            },
+                            start,
+                        )
                     }
                     Err(_) => opaque_open(content_block, &loc, warnings),
                 }
@@ -175,7 +199,13 @@ impl AnthropicStreamParser {
             }
             _ => {
                 let start = ContentBlock::opaque(FMT, content_block.clone());
-                (OpenBlock::Opaque { value: content_block, json: String::new() }, start)
+                (
+                    OpenBlock::Opaque {
+                        value: content_block,
+                        json: String::new(),
+                    },
+                    start,
+                )
             }
         };
         self.blocks.insert(index, open);
@@ -190,13 +220,18 @@ impl AnthropicStreamParser {
         warnings: &mut Vec<ConversionWarning>,
     ) -> Result<BlockDelta> {
         let Some(open) = self.blocks.get_mut(&index) else {
-            return Err(perr(format!("content_block_delta for unknown block index {index}"), raw));
+            return Err(perr(
+                format!("content_block_delta for unknown block index {index}"),
+                raw,
+            ));
         };
         let kind = delta.get("type").and_then(Value::as_str).unwrap_or("");
-        let mismatch = |kind: &str| perr(
-            format!("delta `{kind}` does not match the open block at index {index}"),
-            raw,
-        );
+        let mismatch = |kind: &str| {
+            perr(
+                format!("delta `{kind}` does not match the open block at index {index}"),
+                raw,
+            )
+        };
         match (open, kind) {
             (OpenBlock::Text { text, .. }, "text_delta") => {
                 let fragment = delta.get("text").and_then(Value::as_str).unwrap_or("");
@@ -222,22 +257,27 @@ impl AnthropicStreamParser {
                 Ok(BlockDelta::Signature(fragment.to_owned()))
             }
             (OpenBlock::ToolUse { json, .. }, "input_json_delta") => {
-                let fragment = delta.get("partial_json").and_then(Value::as_str).unwrap_or("");
+                let fragment = delta
+                    .get("partial_json")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
                 json.push_str(fragment);
                 Ok(BlockDelta::ToolArguments(fragment.to_owned()))
             }
             (OpenBlock::Opaque { json, .. }, "input_json_delta") => {
                 // Server-side tool use streams input fragments into an
                 // unmodeled block; folded into its `input` at stop.
-                let fragment = delta.get("partial_json").and_then(Value::as_str).unwrap_or("");
+                let fragment = delta
+                    .get("partial_json")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
                 json.push_str(fragment);
                 Ok(BlockDelta::Other(delta.clone()))
             }
             (OpenBlock::Opaque { value, .. }, "compaction_delta") => {
                 if value.is_object() {
                     if let Some(fragment) = delta.get("content").and_then(Value::as_str) {
-                        let existing =
-                            value.get("content").and_then(Value::as_str).unwrap_or("");
+                        let existing = value.get("content").and_then(Value::as_str).unwrap_or("");
                         value["content"] = Value::from(format!("{existing}{fragment}"));
                     }
                     if let Some(enc) = delta.get("encrypted_content") {
@@ -246,8 +286,11 @@ impl AnthropicStreamParser {
                 }
                 Ok(BlockDelta::Other(delta.clone()))
             }
-            (_, "text_delta" | "thinking_delta" | "signature_delta" | "input_json_delta"
-                | "citations_delta" | "compaction_delta") => Err(mismatch(kind)),
+            (
+                _,
+                "text_delta" | "thinking_delta" | "signature_delta" | "input_json_delta"
+                | "citations_delta" | "compaction_delta",
+            ) => Err(mismatch(kind)),
             (_, other) => {
                 // Unknown delta kind addressed to a live block: surfaced as
                 // Other; nothing known to fold at stop.
@@ -268,18 +311,38 @@ impl AnthropicStreamParser {
         warnings: &mut Vec<ConversionWarning>,
     ) -> Result<ContentBlock> {
         let Some(open) = self.blocks.remove(&index) else {
-            return Err(perr(format!("content_block_stop for unknown block index {index}"), raw));
+            return Err(perr(
+                format!("content_block_stop for unknown block index {index}"),
+                raw,
+            ));
         };
         Ok(match open {
-            OpenBlock::Text { text, mut extra, cache, citations } => {
+            OpenBlock::Text {
+                text,
+                mut extra,
+                cache,
+                citations,
+            } => {
                 if !citations.is_empty() {
                     extra.insert("citations".to_owned(), Value::Array(citations));
                 }
-                ContentBlock::Text { text, cache, extra: Extra::from_unknown(FMT, extra) }
+                ContentBlock::Text {
+                    text,
+                    cache,
+                    extra: Extra::from_unknown(FMT, extra),
+                }
             }
-            OpenBlock::Thinking { text, signature, extra } => ContentBlock::Thinking {
+            OpenBlock::Thinking {
+                text,
+                signature,
+                extra,
+            } => ContentBlock::Thinking {
                 text: Some(text),
-                signature: if signature.is_empty() { None } else { Some(signature) },
+                signature: if signature.is_empty() {
+                    None
+                } else {
+                    Some(signature)
+                },
                 extra: Extra::from_unknown(FMT, extra),
             },
             OpenBlock::RedactedThinking { data, mut extra } => {
@@ -290,7 +353,14 @@ impl AnthropicStreamParser {
                     extra: Extra::from_unknown(FMT, extra),
                 }
             }
-            OpenBlock::ToolUse { id, name, json, start_input, extra, cache } => {
+            OpenBlock::ToolUse {
+                id,
+                name,
+                json,
+                start_input,
+                extra,
+                cache,
+            } => {
                 let arguments = if json.is_empty() {
                     serde_json::to_string(&start_input).unwrap_or_else(|_| "{}".to_owned())
                 } else {
@@ -333,13 +403,22 @@ fn opaque_open(
         "known block type failed to parse; kept as opaque",
     ));
     let start = ContentBlock::opaque(FMT, content_block.clone());
-    (OpenBlock::Opaque { value: content_block, json: String::new() }, start)
+    (
+        OpenBlock::Opaque {
+            value: content_block,
+            json: String::new(),
+        },
+        start,
+    )
 }
 
 impl StreamParser for AnthropicStreamParser {
     fn parse(&mut self, event: &SseEvent) -> Result<(Vec<StreamEvent>, Vec<ConversionWarning>)> {
         let data: Value = serde_json::from_str(&event.data).map_err(|e| {
-            perr(format!("SSE event data is not valid JSON: {e}"), &event.data)
+            perr(
+                format!("SSE event data is not valid JSON: {e}"),
+                &event.data,
+            )
         })?;
         // The protocol names events both in the SSE `event:` field and in
         // the payload's `type`; either is accepted.
@@ -370,26 +449,38 @@ impl StreamParser for AnthropicStreamParser {
                 let ev: ContentBlockStartEvent = serde_json::from_value(data)
                     .map_err(|e| perr(format!("invalid content_block_start: {e}"), &event.data))?;
                 let block = self.start_block(ev.index, ev.content_block, &mut warnings);
-                vec![StreamEvent::BlockStart { index: ev.index, block }]
+                vec![StreamEvent::BlockStart {
+                    index: ev.index,
+                    block,
+                }]
             }
             "content_block_delta" => {
                 let ev: ContentBlockDeltaEvent = serde_json::from_value(data)
                     .map_err(|e| perr(format!("invalid content_block_delta: {e}"), &event.data))?;
                 let delta = self.apply_delta(ev.index, &ev.delta, &event.data, &mut warnings)?;
-                vec![StreamEvent::BlockDelta { index: ev.index, delta }]
+                vec![StreamEvent::BlockDelta {
+                    index: ev.index,
+                    delta,
+                }]
             }
             "content_block_stop" => {
                 let ev: ContentBlockStopEvent = serde_json::from_value(data)
                     .map_err(|e| perr(format!("invalid content_block_stop: {e}"), &event.data))?;
                 let block = self.finalize_block(ev.index, &event.data, &mut warnings)?;
-                vec![StreamEvent::BlockStop { index: ev.index, block: Some(block) }]
+                vec![StreamEvent::BlockStop {
+                    index: ev.index,
+                    block: Some(block),
+                }]
             }
             "message_delta" => {
                 let ev: MessageDeltaEvent = serde_json::from_value(data)
                     .map_err(|e| perr(format!("invalid message_delta: {e}"), &event.data))?;
                 let usage = self.merge_usage(ev.usage.as_ref());
-                let stop_reason =
-                    ev.delta.stop_reason.as_deref().map(StopReason::from_str_lossy);
+                let stop_reason = ev
+                    .delta
+                    .stop_reason
+                    .as_deref()
+                    .map(StopReason::from_str_lossy);
                 vec![StreamEvent::MessageDelta { stop_reason, usage }]
             }
             "message_stop" => {
@@ -410,7 +501,10 @@ impl StreamParser for AnthropicStreamParser {
                 return Err(Error::Api {
                     status: 200,
                     kind,
-                    message: envelope.error.message.unwrap_or_else(|| "stream error".to_owned()),
+                    message: envelope
+                        .error
+                        .message
+                        .unwrap_or_else(|| "stream error".to_owned()),
                     raw: bytes::Bytes::copy_from_slice(event.data.as_bytes()),
                     truncated: false,
                     parsed: serde_json::from_str(&event.data).ok(),

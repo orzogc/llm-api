@@ -186,7 +186,12 @@ mod tests {
     fn merge_replaces_scalars_and_arrays() {
         let mut target = json!({"a": 1, "b": [1, 2], "keep": "x"});
         let mut log = MergeLog::new();
-        merge_patch(&mut target, &patch_of(json!({"a": 2, "b": [3]})), "", &mut log);
+        merge_patch(
+            &mut target,
+            &patch_of(json!({"a": 2, "b": [3]})),
+            "",
+            &mut log,
+        );
         assert_eq!(target, json!({"a": 2, "b": [3], "keep": "x"}));
         assert!(log.overrides("/a"));
         assert!(log.overrides("/b"));
@@ -205,7 +210,10 @@ mod tests {
             "",
             &mut log,
         );
-        assert_eq!(target, json!({"gen": {"temp": 0.5, "top_p": 0.9, "new": true}}));
+        assert_eq!(
+            target,
+            json!({"gen": {"temp": 0.5, "top_p": 0.9, "new": true}})
+        );
         assert!(log.overrides("/gen/temp"));
         // The object merge at /gen does NOT override its untouched children.
         assert!(!log.overrides("/gen/top_p"));
@@ -217,7 +225,12 @@ mod tests {
     fn null_deletes_at_any_depth() {
         let mut target = json!({"a": {"b": 1, "c": 2}, "d": 3});
         let mut log = MergeLog::new();
-        merge_patch(&mut target, &patch_of(json!({"a": {"b": null}, "d": null})), "", &mut log);
+        merge_patch(
+            &mut target,
+            &patch_of(json!({"a": {"b": null}, "d": null})),
+            "",
+            &mut log,
+        );
         assert_eq!(target, json!({"a": {"c": 2}}));
         assert!(log.overrides("/a/b"));
         assert!(log.overrides("/d"));
@@ -243,7 +256,12 @@ mod tests {
     fn pointer_escaping() {
         let mut target = json!({});
         let mut log = MergeLog::new();
-        merge_patch(&mut target, &patch_of(json!({"a/b": 1, "c~d": 2})), "", &mut log);
+        merge_patch(
+            &mut target,
+            &patch_of(json!({"a/b": 1, "c~d": 2})),
+            "",
+            &mut log,
+        );
         assert!(log.overrides("/a~1b"));
         assert!(log.overrides("/c~0d"));
     }
@@ -275,9 +293,16 @@ mod tests {
     #[test]
     fn extra_serde_round_trip() {
         let mut extra = Extra::new();
-        extra.set("google_generate_content", "cachedContent", "cachedContents/abc");
+        extra.set(
+            "google_generate_content",
+            "cachedContent",
+            "cachedContents/abc",
+        );
         let s = serde_json::to_string(&extra).unwrap();
-        assert_eq!(s, r#"{"google_generate_content":{"cachedContent":"cachedContents/abc"}}"#);
+        assert_eq!(
+            s,
+            r#"{"google_generate_content":{"cachedContent":"cachedContents/abc"}}"#
+        );
         let back: Extra = serde_json::from_str(&s).unwrap();
         assert_eq!(back, extra);
     }

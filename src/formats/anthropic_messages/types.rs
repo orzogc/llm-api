@@ -113,7 +113,11 @@ impl CacheControl {
     /// An `ephemeral` cache control with an optional TTL.
     #[must_use]
     pub fn ephemeral(ttl: Option<String>) -> Self {
-        Self { kind: "ephemeral".to_owned(), ttl, extra: Map::new() }
+        Self {
+            kind: "ephemeral".to_owned(),
+            ttl,
+            extra: Map::new(),
+        }
     }
 }
 

@@ -21,7 +21,12 @@ impl SseEvent {
     /// An event with the given type and data (test/construction helper).
     #[must_use]
     pub fn new(event: Option<&str>, data: impl Into<String>) -> Self {
-        Self { event: event.map(str::to_owned), data: data.into(), id: None, retry: None }
+        Self {
+            event: event.map(str::to_owned),
+            data: data.into(),
+            id: None,
+            retry: None,
+        }
     }
 }
 
@@ -296,14 +301,24 @@ mod tests {
         let mut p = SseParser::new(usize::MAX);
         p.push(b"data: complete\n\ndata: partial").unwrap();
         let events = p.finish().unwrap();
-        assert!(events.is_empty(), "partial event must be discarded per spec");
+        assert!(
+            events.is_empty(),
+            "partial event must be discarded per spec"
+        );
     }
 
     #[test]
     fn size_cap_enforced() {
         let mut p = SseParser::new(8);
         let err = p.push(b"data: 123456789012345\n\n").unwrap_err();
-        assert!(matches!(err, Error::BodyTooLarge { kind: BodyKind::SseEvent, limit: 8, .. }));
+        assert!(matches!(
+            err,
+            Error::BodyTooLarge {
+                kind: BodyKind::SseEvent,
+                limit: 8,
+                ..
+            }
+        ));
 
         // A no-newline flood also trips the cap.
         let mut p2 = SseParser::new(8);

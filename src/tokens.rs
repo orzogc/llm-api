@@ -25,6 +25,10 @@ impl TokenCount {
     /// A count with the given token number.
     #[must_use]
     pub fn new(input_tokens: u64) -> Self {
-        Self { input_tokens, raw: None, warnings: Vec::new() }
+        Self {
+            input_tokens,
+            raw: None,
+            warnings: Vec::new(),
+        }
     }
 }

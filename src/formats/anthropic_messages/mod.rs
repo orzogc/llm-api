@@ -85,7 +85,14 @@ impl ApiFormat for AnthropicMessages {
             &ctx.hooks,
             &chat.message_pointers,
         )?;
-        let url = build_url(&ctx.url, "messages", &ctx.model, None, &[], &ctx.extra_query)?;
+        let url = build_url(
+            &ctx.url,
+            "messages",
+            &ctx.model,
+            None,
+            &[],
+            &ctx.extra_query,
+        )?;
         let mut built = BuiltRequest::post_json(url, &chat.body);
         apply_default_headers(&ctx.format_options.anthropic, &mut built.headers)?;
         built.auth = Some(auth_scheme(&ctx.format_options.anthropic));
@@ -163,7 +170,11 @@ impl ApiFormat for AnthropicMessages {
                 .and_then(system_time_from_rfc3339);
             models.push(model);
         }
-        let next = if page.has_more == Some(true) { page.last_id } else { None };
+        let next = if page.has_more == Some(true) {
+            page.last_id
+        } else {
+            None
+        };
         Ok((models, next))
     }
 
@@ -205,8 +216,14 @@ impl ApiFormat for AnthropicMessages {
             }
         }
         strict_gate(ctx.convert.strict, &adapter_warnings)?;
-        let url =
-            build_url(&ctx.url, "messages/count_tokens", &ctx.model, None, &[], &ctx.extra_query)?;
+        let url = build_url(
+            &ctx.url,
+            "messages/count_tokens",
+            &ctx.model,
+            None,
+            &[],
+            &ctx.extra_query,
+        )?;
         let mut built = BuiltRequest::post_json(url, &chat.body);
         apply_default_headers(&ctx.format_options.anthropic, &mut built.headers)?;
         built.auth = Some(auth_scheme(&ctx.format_options.anthropic));

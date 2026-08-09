@@ -14,8 +14,8 @@ use crate::convert::{ConversionWarning, ConvertOptions, OrphanToolCalls, Warning
 use crate::error::{ConversionError, Result};
 use crate::format::ids::GOOGLE_GENERATE_CONTENT as ID;
 use crate::ir::{
-    ContentBlock, Effort, Extra, ImageSource, MergeLog, Message, OutputFormat, Request, Role,
-    Tool, ToolChoice, ToolOutputBlock,
+    ContentBlock, Effort, Extra, ImageSource, MergeLog, Message, OutputFormat, Request, Role, Tool,
+    ToolChoice, ToolOutputBlock,
 };
 
 /// Output of the build pipeline before the strict gate and hooks
@@ -38,8 +38,12 @@ pub fn request_from_ir(
     req: &Request,
     options: &ConvertOptions,
 ) -> Result<(Value, Vec<ConversionWarning>)> {
-    let BuiltBody { mut body, mut warnings, merge_log, message_pointers } =
-        build_body(req, options)?;
+    let BuiltBody {
+        mut body,
+        mut warnings,
+        merge_log,
+        message_pointers,
+    } = build_body(req, options)?;
     crate::format::finalize_request(
         &mut body,
         &mut warnings,
@@ -97,7 +101,9 @@ pub(crate) fn build_body(req: &Request, options: &ConvertOptions) -> Result<Buil
     if let Some(system) = &req.system {
         for (bi, block) in system.iter().enumerate() {
             match block {
-                ContentBlock::Text { text, cache, extra, .. } => {
+                ContentBlock::Text {
+                    text, cache, extra, ..
+                } => {
                     let ptr = format!("/systemInstruction/parts/{}", sys_parts.len());
                     if cache.is_some() {
                         warn(
@@ -126,24 +132,21 @@ pub(crate) fn build_body(req: &Request, options: &ConvertOptions) -> Result<Buil
     while hoisted < messages.len() && messages[hoisted].role == Role::System {
         let msg = &messages[hoisted];
         for (bi, block) in msg.content.iter().enumerate() {
-            serialize_system_block(
-                block,
-                hoisted,
-                bi,
-                &mut sys_parts,
-                &mut warnings,
-                &mut log,
-            )?;
+            serialize_system_block(block, hoisted, bi, &mut sys_parts, &mut warnings, &mut log)?;
         }
         hoisted += 1;
     }
     let mut system_instruction = json!({ "parts": sys_parts });
     for msg in &messages[..hoisted] {
-        msg.extra.merge_into(ID, &mut system_instruction, "/systemInstruction", &mut log);
+        msg.extra
+            .merge_into(ID, &mut system_instruction, "/systemInstruction", &mut log);
     }
     // Emit systemInstruction unless it is exactly the empty default form.
     let keep_system = system_instruction.as_object().is_some_and(|o| {
-        !(o.len() == 1 && o.get("parts").and_then(Value::as_array).is_some_and(Vec::is_empty))
+        !(o.len() == 1
+            && o.get("parts")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty))
     });
 
     // ---- contents: group adjacent user-side / model-side messages into
@@ -184,7 +187,10 @@ pub(crate) fn build_body(req: &Request, options: &ConvertOptions) -> Result<Buil
                 &mut warnings,
                 WarningCode::RoleDowngraded,
                 format!("/contents/{ci}"),
-                format!("Google has no {} role; the message was downgraded to user", msg.role),
+                format!(
+                    "Google has no {} role; the message was downgraded to user",
+                    msg.role
+                ),
             );
         }
         serialize_message_blocks(
@@ -270,7 +276,10 @@ pub(crate) fn build_body(req: &Request, options: &ConvertOptions) -> Result<Buil
             &mut warnings,
             WarningCode::MetadataDropped,
             "/metadata",
-            format!("Google has no request metadata channel; dropped keys: {}", keys.join(", ")),
+            format!(
+                "Google has no request metadata channel; dropped keys: {}",
+                keys.join(", ")
+            ),
         );
     }
     if req.cache_key.is_some() {
@@ -295,7 +304,12 @@ pub(crate) fn build_body(req: &Request, options: &ConvertOptions) -> Result<Buil
         warnings.push(ConversionWarning::to_format(p.code, ID, location, p.text));
     }
 
-    Ok(BuiltBody { body, warnings, merge_log: log, message_pointers: pointers })
+    Ok(BuiltBody {
+        body,
+        warnings,
+        merge_log: log,
+        message_pointers: pointers,
+    })
 }
 
 /// Serializes one block of a system message into `systemInstruction.parts`.
@@ -309,7 +323,9 @@ fn serialize_system_block(
 ) -> Result<()> {
     let ptr = format!("/systemInstruction/parts/{}", sys_parts.len());
     match block {
-        ContentBlock::Text { text, cache, extra, .. } => {
+        ContentBlock::Text {
+            text, cache, extra, ..
+        } => {
             if cache.is_some() {
                 warn(
                     warnings,
@@ -355,7 +371,10 @@ fn block_allowed(role: Role, block: &ContentBlock) -> bool {
                 ContentBlock::Text { .. },
             )
             | (Role::User | Role::Assistant, ContentBlock::Image { .. })
-            | (Role::Assistant, ContentBlock::ToolCall { .. } | ContentBlock::Thinking { .. })
+            | (
+                Role::Assistant,
+                ContentBlock::ToolCall { .. } | ContentBlock::Thinking { .. }
+            )
             | (Role::Tool, ContentBlock::ToolResult { .. })
     )
 }
@@ -381,8 +400,10 @@ fn serialize_message_blocks(
             }
             .into());
         }
-        let part_index =
-            content["parts"].as_array().expect("content.parts is an array").len();
+        let part_index = content["parts"]
+            .as_array()
+            .expect("content.parts is an array")
+            .len();
         let ptr = format!("/contents/{content_index}/parts/{part_index}");
         if block.cache().is_some() {
             warn(
@@ -403,7 +424,13 @@ fn serialize_message_blocks(
                 extra.merge_into(ID, &mut part, &ptr, log);
                 content["parts"].as_array_mut().expect("parts").push(part);
             }
-            ContentBlock::ToolCall { id, name, arguments, extra, .. } => {
+            ContentBlock::ToolCall {
+                id,
+                name,
+                arguments,
+                extra,
+                ..
+            } => {
                 let args: Value = serde_json::from_str(arguments).map_err(|e| {
                     ConversionError::InvalidToolArguments {
                         name: name.clone(),
@@ -434,7 +461,12 @@ fn serialize_message_blocks(
                 extra.merge_into(ID, &mut part, &ptr, log);
                 content["parts"].as_array_mut().expect("parts").push(part);
             }
-            ContentBlock::Thinking { text, signature, extra, .. } => {
+            ContentBlock::Thinking {
+                text,
+                signature,
+                extra,
+                ..
+            } => {
                 if let Some(mut part) =
                     serialize_thinking(text, signature, extra, options, &ptr, warnings)
                 {
@@ -443,7 +475,12 @@ fn serialize_message_blocks(
                 }
             }
             ContentBlock::ToolResult {
-                tool_call_id, name, content: result, is_error, extra, ..
+                tool_call_id,
+                name,
+                content: result,
+                is_error,
+                extra,
+                ..
             } => {
                 let mut part = serialize_tool_result(
                     tool_call_id.as_deref(),
@@ -460,7 +497,10 @@ fn serialize_message_blocks(
             }
             ContentBlock::Opaque { format, value, .. } => {
                 if format == ID {
-                    content["parts"].as_array_mut().expect("parts").push(value.clone());
+                    content["parts"]
+                        .as_array_mut()
+                        .expect("parts")
+                        .push(value.clone());
                 } else {
                     warn(
                         warnings,
@@ -491,7 +531,9 @@ fn serialize_image(
             );
             json!({"fileData": {"fileUri": url}})
         }
-        ImageSource::Base64 { media_type, data, .. } => {
+        ImageSource::Base64 {
+            media_type, data, ..
+        } => {
             json!({"inlineData": {"mimeType": media_type, "data": data}})
         }
         ImageSource::FileId(id) => json!({"fileData": {"fileUri": id}}),
@@ -574,7 +616,9 @@ fn serialize_tool_result(
     let mut seen_media = false;
     for block in result {
         match block {
-            ToolOutputBlock::Text { text, cache, extra, .. } => {
+            ToolOutputBlock::Text {
+                text, cache, extra, ..
+            } => {
                 if cache.is_some() {
                     warn(
                         warnings,
@@ -596,7 +640,12 @@ fn serialize_tool_result(
                 }
                 texts.push(text);
             }
-            ToolOutputBlock::Image { source, cache, extra, .. } => {
+            ToolOutputBlock::Image {
+                source,
+                cache,
+                extra,
+                ..
+            } => {
                 if cache.is_some() {
                     warn(
                         warnings,
@@ -607,9 +656,10 @@ fn serialize_tool_result(
                 }
                 let media_ptr = format!("{ptr}/functionResponse/parts/{}", media.len());
                 match source {
-                    ImageSource::Base64 { media_type, data, .. } => {
-                        let mut frp =
-                            json!({"inlineData": {"mimeType": media_type, "data": data}});
+                    ImageSource::Base64 {
+                        media_type, data, ..
+                    } => {
+                        let mut frp = json!({"inlineData": {"mimeType": media_type, "data": data}});
                         extra.merge_into(ID, &mut frp, &media_ptr, log);
                         media.push(frp);
                         seen_media = true;
@@ -634,7 +684,9 @@ fn serialize_tool_result(
                         warnings,
                         WarningCode::OpaqueDropped,
                         media_ptr,
-                        format!("opaque tool-output block belongs to format `{format}` and was dropped"),
+                        format!(
+                            "opaque tool-output block belongs to format `{format}` and was dropped"
+                        ),
                     );
                 }
             }
@@ -793,7 +845,13 @@ fn build_generation_config(
     }
 
     match &req.output_format {
-        Some(OutputFormat::JsonSchema { name, description, schema, strict, .. }) => {
+        Some(OutputFormat::JsonSchema {
+            name,
+            description,
+            schema,
+            strict,
+            ..
+        }) => {
             config.insert("responseMimeType".to_owned(), json!("application/json"));
             config.insert("responseJsonSchema".to_owned(), schema.clone());
             let mut dropped = Vec::new();
@@ -857,7 +915,9 @@ fn build_generation_config(
                     warnings,
                     WarningCode::EffortUnsupported,
                     "/generationConfig/thinkingConfig",
-                    format!("Google thinkingLevel accepts minimal/low/medium/high; `{effort}` was dropped"),
+                    format!(
+                        "Google thinkingLevel accepts minimal/low/medium/high; `{effort}` was dropped"
+                    ),
                 );
             }
             Some(Effort::Other(s)) => {
@@ -879,7 +939,9 @@ fn build_generation_config(
             tc.insert("includeThoughts".to_owned(), json!(include));
         }
         let mut tc = Value::Object(tc);
-        reasoning.extra.merge_into(ID, &mut tc, "/generationConfig/thinkingConfig", log);
+        reasoning
+            .extra
+            .merge_into(ID, &mut tc, "/generationConfig/thinkingConfig", log);
         if tc.as_object().is_some_and(|o| !o.is_empty()) {
             config.insert("thinkingConfig".to_owned(), tc);
         }
@@ -902,10 +964,16 @@ fn apply_orphan_policy(
     let mut orphans: Vec<(usize, usize)> = Vec::new();
     for mi in 0..messages.len() {
         for (bi, block) in messages[mi].content.iter().enumerate() {
-            let ContentBlock::ToolCall { id, name, .. } = block else { continue };
+            let ContentBlock::ToolCall { id, name, .. } = block else {
+                continue;
+            };
             let matched = messages[mi + 1..].iter().any(|m| {
                 m.content.iter().any(|b| match b {
-                    ContentBlock::ToolResult { tool_call_id, name: rname, .. } => match id {
+                    ContentBlock::ToolResult {
+                        tool_call_id,
+                        name: rname,
+                        ..
+                    } => match id {
                         Some(id) => tool_call_id.as_deref() == Some(id),
                         None => rname.as_deref() == Some(name),
                     },
@@ -937,8 +1005,11 @@ fn apply_orphan_policy(
             text: "assistant message contains tool calls without matching results; mid-conversation orphans are never repaired".to_owned(),
         });
     }
-    let trailing: Vec<usize> =
-        orphans.iter().filter(|(mi, _)| *mi == last).map(|(_, bi)| *bi).collect();
+    let trailing: Vec<usize> = orphans
+        .iter()
+        .filter(|(mi, _)| *mi == last)
+        .map(|(_, bi)| *bi)
+        .collect();
     if trailing.is_empty() {
         return;
     }
@@ -954,8 +1025,14 @@ fn apply_orphan_policy(
             });
             let removed_message = msg.content.is_empty();
             let thinking_orphaned = !removed_message
-                && msg.content.iter().any(|b| matches!(b, ContentBlock::Thinking { .. }))
-                && !msg.content.iter().any(|b| matches!(b, ContentBlock::ToolCall { .. }));
+                && msg
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Thinking { .. }))
+                && !msg
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolCall { .. }));
             if removed_message {
                 messages.pop();
             }
@@ -975,8 +1052,7 @@ fn apply_orphan_policy(
         OrphanToolCalls::SynthesizeError => {
             let mut results = Vec::new();
             for bi in &trailing {
-                let ContentBlock::ToolCall { id, name, .. } = &messages[last].content[*bi]
-                else {
+                let ContentBlock::ToolCall { id, name, .. } = &messages[last].content[*bi] else {
                     continue;
                 };
                 results.push(
@@ -1006,8 +1082,7 @@ fn apply_missing_thinking(
 ) {
     let enables = req.reasoning.as_ref().is_some_and(|r| {
         r.enabled == Some(true)
-            || (r.enabled.is_none()
-                && r.effort.as_ref().is_some_and(|e| *e != Effort::None))
+            || (r.enabled.is_none() && r.effort.as_ref().is_some_and(|e| *e != Effort::None))
     });
     if !enables {
         return;
@@ -1016,9 +1091,14 @@ fn apply_missing_thinking(
         if msg.role != Role::Assistant {
             continue;
         }
-        let has_call = msg.content.iter().any(|b| matches!(b, ContentBlock::ToolCall { .. }));
-        let has_thinking =
-            msg.content.iter().any(|b| matches!(b, ContentBlock::Thinking { .. }));
+        let has_call = msg
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolCall { .. }));
+        let has_thinking = msg
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Thinking { .. }));
         if !has_call || has_thinking {
             continue;
         }

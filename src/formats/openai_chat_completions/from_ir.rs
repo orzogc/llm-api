@@ -29,7 +29,11 @@ pub(crate) struct BuiltBody {
 }
 
 /// Build-side warning shorthand.
-fn warn(code: WarningCode, location: impl Into<String>, message: impl Into<String>) -> ConversionWarning {
+fn warn(
+    code: WarningCode,
+    location: impl Into<String>,
+    message: impl Into<String>,
+) -> ConversionWarning {
     ConversionWarning::to_format(code, FORMAT, location, message)
 }
 
@@ -60,7 +64,15 @@ pub(crate) fn build_body(
         pointers.push(("/messages/0".to_owned(), Role::System));
     }
     for (mi, msg) in messages.iter().enumerate() {
-        build_message(msg, mi, options, &mut wire_messages, &mut pointers, &mut warnings, &mut log)?;
+        build_message(
+            msg,
+            mi,
+            options,
+            &mut wire_messages,
+            &mut pointers,
+            &mut warnings,
+            &mut log,
+        )?;
     }
     body.insert("messages".to_owned(), Value::Array(wire_messages));
 
@@ -135,7 +147,12 @@ pub(crate) fn build_body(
     let mut body = Value::Object(body);
     req.extra.merge_into(FORMAT, &mut body, "", &mut log);
 
-    Ok(BuiltBody { body, warnings, merge_log: log, messages: pointers })
+    Ok(BuiltBody {
+        body,
+        warnings,
+        merge_log: log,
+        messages: pointers,
+    })
 }
 
 /// Applies the § 7.3 orphan-tool-call policy and missing-thinking handling,
@@ -232,8 +249,13 @@ fn preprocess_messages<'a>(
             .enumerate()
             .filter(|(_, m)| {
                 m.role == Role::Assistant
-                    && m.content.iter().any(|b| matches!(b, ContentBlock::ToolCall { .. }))
-                    && !m.content.iter().any(|b| matches!(b, ContentBlock::Thinking { .. }))
+                    && m.content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolCall { .. }))
+                    && !m
+                        .content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::Thinking { .. }))
             })
             .map(|(i, _)| i)
             .collect();
@@ -281,10 +303,17 @@ fn find_orphans(messages: &[Message]) -> Vec<(usize, Vec<usize>)> {
         }
         let mut orphans = Vec::new();
         for (bi, block) in msg.content.iter().enumerate() {
-            let ContentBlock::ToolCall { id, name, .. } = block else { continue };
+            let ContentBlock::ToolCall { id, name, .. } = block else {
+                continue;
+            };
             let matched = messages.iter().skip(i + 1).any(|later| {
                 later.content.iter().any(|b| {
-                    let ContentBlock::ToolResult { tool_call_id, name: result_name, .. } = b else {
+                    let ContentBlock::ToolResult {
+                        tool_call_id,
+                        name: result_name,
+                        ..
+                    } = b
+                    else {
                         return false;
                     };
                     match id {
@@ -331,7 +360,13 @@ fn build_system_from_request(
 /// the array form so the tool-message empty encoding `content: ""` stays
 /// unambiguous.)
 fn string_shorthand(blocks: &[ContentBlock]) -> Option<&str> {
-    if let [ContentBlock::Text { text, cache: None, extra }] = blocks
+    if let [
+        ContentBlock::Text {
+            text,
+            cache: None,
+            extra,
+        },
+    ] = blocks
         && !text.is_empty()
         && extra.get(FORMAT).is_none_or(Map::is_empty)
     {
@@ -363,7 +398,11 @@ fn encode_input_content(
                 extra.merge_into(FORMAT, &mut part, &part_ptr, log);
                 parts.push(part);
             }
-            ContentBlock::Image { source, cache, extra } if !system_channel => {
+            ContentBlock::Image {
+                source,
+                cache,
+                extra,
+            } if !system_channel => {
                 if let Some(part) =
                     build_image_part(source, cache.as_ref(), extra, &part_ptr, warnings, log)
                 {
@@ -382,7 +421,11 @@ fn encode_input_content(
                 }
             }
             other => {
-                let role = if system_channel { Role::System } else { Role::User };
+                let role = if system_channel {
+                    Role::System
+                } else {
+                    Role::User
+                };
                 return Err(ConversionError::InvalidBlockForRole {
                     role,
                     block: other.kind_name(),
@@ -407,7 +450,9 @@ fn build_image_part(
 ) -> Option<Value> {
     let url = match source {
         ImageSource::Url(url) => url.clone(),
-        ImageSource::Base64 { media_type, data, .. } => to_data_url(media_type, data),
+        ImageSource::Base64 {
+            media_type, data, ..
+        } => to_data_url(media_type, data),
         ImageSource::FileId(_) => {
             warnings.push(warn(
                 WarningCode::ImageSourceUnsupported,
@@ -549,7 +594,11 @@ fn build_assistant_message(
     for (bi, block) in msg.content.iter().enumerate() {
         match block {
             ContentBlock::Text { .. } | ContentBlock::Opaque { .. } => text_blocks.push(block),
-            ContentBlock::Thinking { text, signature, extra } => {
+            ContentBlock::Thinking {
+                text,
+                signature,
+                extra,
+            } => {
                 let ptr = format!("{msg_ptr}/reasoning_content");
                 if is_native_thinking(extra) {
                     if let Some(text) = text {
@@ -585,7 +634,13 @@ fn build_assistant_message(
                     ));
                 }
             }
-            ContentBlock::ToolCall { id, name, arguments, cache, extra } => {
+            ContentBlock::ToolCall {
+                id,
+                name,
+                arguments,
+                cache,
+                extra,
+            } => {
                 let ptr = format!("{msg_ptr}/tool_calls/{}", calls.len());
                 if cache.is_some() {
                     warnings.push(warn(
@@ -675,10 +730,7 @@ fn encode_assistant_content(
                     ));
                 }
                 let ns = extra.get(FORMAT).cloned().unwrap_or_default();
-                let refusal = ns
-                    .get("refusal")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
+                let refusal = ns.get("refusal").and_then(Value::as_bool).unwrap_or(false);
                 let mut part = if refusal {
                     json!({"type": "refusal", "refusal": text})
                 } else {
@@ -716,7 +768,9 @@ fn is_native_thinking(extra: &Extra) -> bool {
     if has_own {
         return true;
     }
-    !extra.formats().any(|f| extra.get(f).is_some_and(|ns| !ns.is_empty()))
+    !extra
+        .formats()
+        .any(|f| extra.get(f).is_some_and(|ns| !ns.is_empty()))
 }
 
 /// Builds one `tool_calls[]` entry. The reserved `type` key of the block's
@@ -788,7 +842,14 @@ fn build_tool_messages(
     for (bi, block) in msg.content.iter().enumerate() {
         let ptr = format!("/messages/{}", wire.len());
         match block {
-            ContentBlock::ToolResult { tool_call_id, name, content, is_error, cache, extra } => {
+            ContentBlock::ToolResult {
+                tool_call_id,
+                name,
+                content,
+                is_error,
+                cache,
+                extra,
+            } => {
                 let call_id = tool_call_id.clone().ok_or_else(|| {
                     ConversionError::missing(
                         "tool result requires `tool_call_id` on the Chat Completions API",
@@ -969,7 +1030,13 @@ fn build_reasoning(
 /// synthesizes `"response"` — the field is required upstream.
 fn build_response_format(format: &OutputFormat) -> Value {
     match format {
-        OutputFormat::JsonSchema { name, description, schema, strict, .. } => {
+        OutputFormat::JsonSchema {
+            name,
+            description,
+            schema,
+            strict,
+            ..
+        } => {
             let mut inner = json!({
                 "name": name.clone().unwrap_or_else(|| "response".to_owned()),
                 "schema": schema.clone(),
@@ -1017,8 +1084,7 @@ fn build_tools(
                         "tool-definition cache hints are Anthropic-only and were dropped",
                     ));
                 }
-                let mut value =
-                    json!({"type": "function", "function": Value::Object(function)});
+                let mut value = json!({"type": "function", "function": Value::Object(function)});
                 f.extra.merge_into(FORMAT, &mut value, &ptr, log);
                 out.push(value);
             }

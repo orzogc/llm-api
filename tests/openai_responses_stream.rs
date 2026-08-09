@@ -18,7 +18,10 @@ use llm_api::{
 const F: &str = "openai_responses";
 
 fn fixture(name: &str) -> Vec<u8> {
-    let path = format!("{}/tests/fixtures/openai_responses/{name}", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/tests/fixtures/openai_responses/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
     std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
 
@@ -33,7 +36,11 @@ fn sse_events(bytes: &[u8]) -> Vec<SseEvent> {
 /// succeed. Returns the unified events, warnings and the `finish` result.
 fn run_stream(
     name: &str,
-) -> (Vec<StreamEvent>, Vec<ConversionWarning>, llm_api::Result<Vec<StreamEvent>>) {
+) -> (
+    Vec<StreamEvent>,
+    Vec<ConversionWarning>,
+    llm_api::Result<Vec<StreamEvent>>,
+) {
     let mut parser = OpenAiResponses.stream_parser();
     let mut events = Vec::new();
     let mut warnings = Vec::new();
@@ -57,7 +64,8 @@ fn ev(event: &StreamEvent) -> Value {
 fn accumulate(events: &[StreamEvent]) -> llm_api::Response {
     let mut acc = Accumulator::new();
     for event in events {
-        acc.push(&StreamItem::new(event.clone())).expect("accumulates");
+        acc.push(&StreamItem::new(event.clone()))
+            .expect("accumulates");
     }
     acc.finish().expect("accumulation finishes")
 }
@@ -94,7 +102,11 @@ fn text_stream_with_annotation() {
         json!({"type": "block_delta", "index": 0, "delta": {"type": "text", "value": " world"}})
     );
     // The annotation surfaces as an unmodeled delta …
-    let StreamEvent::BlockDelta { index: 0, delta: BlockDelta::Other(payload), .. } = &events[4]
+    let StreamEvent::BlockDelta {
+        index: 0,
+        delta: BlockDelta::Other(payload),
+        ..
+    } = &events[4]
     else {
         panic!("expected Other delta, got {:?}", events[4]);
     };
@@ -110,7 +122,10 @@ fn text_stream_with_annotation() {
             },
         })
     );
-    let StreamEvent::MessageDelta { stop_reason, usage, .. } = &events[6] else {
+    let StreamEvent::MessageDelta {
+        stop_reason, usage, ..
+    } = &events[6]
+    else {
         panic!("expected MessageDelta, got {:?}", events[6]);
     };
     assert_eq!(*stop_reason, Some(StopReason::EndTurn));
@@ -143,7 +158,11 @@ fn reasoning_and_tool_call_stream() {
             "block": {"type": "thinking", "extra": {F: {"id": "rs_s2"}}},
         })
     );
-    for (i, text) in [(2, "Need the weather."), (3, "\n\n"), (4, "Calling the tool.")] {
+    for (i, text) in [
+        (2, "Need the weather."),
+        (3, "\n\n"),
+        (4, "Calling the tool."),
+    ] {
         assert_eq!(
             ev(&events[i]),
             json!({"type": "block_delta", "index": 0, "delta": {"type": "thinking", "value": text}}),
@@ -196,7 +215,10 @@ fn reasoning_and_tool_call_stream() {
             },
         })
     );
-    let StreamEvent::MessageDelta { stop_reason, usage, .. } = &events[10] else {
+    let StreamEvent::MessageDelta {
+        stop_reason, usage, ..
+    } = &events[10]
+    else {
         panic!("expected MessageDelta, got {:?}", events[10]);
     };
     assert_eq!(*stop_reason, Some(StopReason::ToolUse));
@@ -206,10 +228,16 @@ fn reasoning_and_tool_call_stream() {
 
     let resp = accumulate(&events);
     assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
-    let ContentBlock::Thinking { text, signature, .. } = &resp.message.content[0] else {
+    let ContentBlock::Thinking {
+        text, signature, ..
+    } = &resp.message.content[0]
+    else {
         panic!("expected thinking block");
     };
-    assert_eq!(text.as_deref(), Some("Need the weather.\n\nCalling the tool."));
+    assert_eq!(
+        text.as_deref(),
+        Some("Need the weather.\n\nCalling the tool.")
+    );
     assert_eq!(signature.as_deref(), Some("enc_s2"));
     let ContentBlock::ToolCall { arguments, .. } = &resp.message.content[1] else {
         panic!("expected tool call block");
@@ -229,7 +257,10 @@ fn refusal_stream_accumulates_to_refusal_stop() {
         panic!("expected BlockStart, got {:?}", events[1]);
     };
     assert!(matches!(block, ContentBlock::Text { .. }));
-    assert_eq!(block.extra().unwrap().get(F).unwrap().get("refusal"), Some(&json!(true)));
+    assert_eq!(
+        block.extra().unwrap().get(F).unwrap().get("refusal"),
+        Some(&json!(true))
+    );
     assert_eq!(
         ev(&events[2]),
         json!({"type": "block_delta", "index": 0, "delta": {"type": "text", "value": "I cannot"}})
@@ -250,7 +281,10 @@ fn incomplete_stream_closes_open_blocks_and_maps_reason() {
     // No output_item.done was seen: the terminal event closes the block
     // with `block: None` (the accumulated content stands).
     assert_eq!(ev(&events[3]), json!({"type": "block_stop", "index": 0}));
-    let StreamEvent::MessageDelta { stop_reason, usage, .. } = &events[4] else {
+    let StreamEvent::MessageDelta {
+        stop_reason, usage, ..
+    } = &events[4]
+    else {
         panic!("expected MessageDelta, got {:?}", events[4]);
     };
     assert_eq!(*stop_reason, Some(StopReason::MaxTokens));
@@ -276,7 +310,12 @@ fn failed_stream_surfaces_api_error() {
         }
     }
     match failed.expect("response.failed must error") {
-        Error::Api { status, kind, message, .. } => {
+        Error::Api {
+            status,
+            kind,
+            message,
+            ..
+        } => {
             assert_eq!(status, 200);
             assert_eq!(kind, llm_api::ApiErrorKind::ServerError);
             assert_eq!(message, "The model had a bad day.");
@@ -325,28 +364,43 @@ fn unknown_events_dedupe_and_opaque_items_take_other_deltas() {
 
     // Two occurrences of the same unknown event: two Unknown events, one
     // warning.
-    let unknown_count = events.iter().filter(|e| matches!(e, StreamEvent::Unknown)).count();
+    let unknown_count = events
+        .iter()
+        .filter(|e| matches!(e, StreamEvent::Unknown))
+        .count();
     assert_eq!(unknown_count, 2);
-    let unknown_warnings: Vec<_> =
-        warnings.iter().filter(|w| w.code == WarningCode::UnknownStreamEvent).collect();
+    let unknown_warnings: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.code == WarningCode::UnknownStreamEvent)
+        .collect();
     assert_eq!(unknown_warnings.len(), 1, "{warnings:?}");
 
     // The web_search_call item is an Opaque block; its status event is an
     // attributed Other delta, not Unknown.
-    let StreamEvent::BlockStart { index: 0, block: ContentBlock::Opaque { format, value, .. }, .. } =
-        &events[3]
+    let StreamEvent::BlockStart {
+        index: 0,
+        block: ContentBlock::Opaque { format, value, .. },
+        ..
+    } = &events[3]
     else {
         panic!("expected opaque BlockStart, got {:?}", events[3]);
     };
     assert_eq!(format, F);
     assert_eq!(value["type"], json!("web_search_call"));
-    let StreamEvent::BlockDelta { index: 0, delta: BlockDelta::Other(payload), .. } = &events[4]
+    let StreamEvent::BlockDelta {
+        index: 0,
+        delta: BlockDelta::Other(payload),
+        ..
+    } = &events[4]
     else {
         panic!("expected Other delta, got {:?}", events[4]);
     };
     assert_eq!(payload["type"], json!("response.web_search_call.searching"));
-    let StreamEvent::BlockStop { index: 0, block: Some(ContentBlock::Opaque { value, .. }), .. } =
-        &events[5]
+    let StreamEvent::BlockStop {
+        index: 0,
+        block: Some(ContentBlock::Opaque { value, .. }),
+        ..
+    } = &events[5]
     else {
         panic!("expected opaque BlockStop, got {:?}", events[5]);
     };
@@ -354,7 +408,10 @@ fn unknown_events_dedupe_and_opaque_items_take_other_deltas() {
 
     let resp = accumulate(&events);
     assert_eq!(resp.message.content.len(), 2);
-    assert!(matches!(&resp.message.content[0], ContentBlock::Opaque { .. }));
+    assert!(matches!(
+        &resp.message.content[0],
+        ContentBlock::Opaque { .. }
+    ));
     assert_eq!(resp.text(), "Cats are cats.");
     assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
 }
@@ -363,7 +420,10 @@ fn unknown_events_dedupe_and_opaque_items_take_other_deltas() {
 fn malformed_event_data_is_unknown_with_warning() {
     let mut parser = OpenAiResponses.stream_parser();
     let (events, warnings) = parser
-        .parse(&SseEvent::new(Some("response.output_text.delta"), "{not json"))
+        .parse(&SseEvent::new(
+            Some("response.output_text.delta"),
+            "{not json",
+        ))
         .unwrap();
     assert_eq!(events, vec![StreamEvent::Unknown]);
     assert_eq!(warnings.len(), 1);
@@ -377,8 +437,9 @@ fn payload_type_wins_over_event_name() {
         "type": "response.created",
         "response": {"id": "resp_x", "model": "gpt-5.1", "output": [], "usage": null},
     });
-    let (events, warnings) =
-        parser.parse(&SseEvent::new(Some("mislabeled"), data.to_string())).unwrap();
+    let (events, warnings) = parser
+        .parse(&SseEvent::new(Some("mislabeled"), data.to_string()))
+        .unwrap();
     assert!(warnings.is_empty());
     assert_eq!(events.len(), 1);
     assert_eq!(
@@ -400,16 +461,28 @@ fn synthesized_blocks_for_item_done_without_added() {
             "content": [{"type": "output_text", "text": "surprise", "annotations": []}],
         },
     });
-    let (events, _) = parser.parse(&SseEvent::new(None, done.to_string())).unwrap();
+    let (events, _) = parser
+        .parse(&SseEvent::new(None, done.to_string()))
+        .unwrap();
     // A defensive MessageStart precedes the block events.
     assert!(matches!(events[0], StreamEvent::MessageStart { .. }));
     assert!(matches!(
         &events[1],
         StreamEvent::BlockStart { index: 0, block: ContentBlock::Text { text, .. }, .. } if text == "surprise"
     ));
-    assert!(matches!(&events[2], StreamEvent::BlockStop { index: 0, block: Some(_), .. }));
-    let value: Value = json!({"type": "response.completed", "response": {"output": [], "usage": null}});
-    let (events, _) = parser.parse(&SseEvent::new(None, value.to_string())).unwrap();
+    assert!(matches!(
+        &events[2],
+        StreamEvent::BlockStop {
+            index: 0,
+            block: Some(_),
+            ..
+        }
+    ));
+    let value: Value =
+        json!({"type": "response.completed", "response": {"output": [], "usage": null}});
+    let (events, _) = parser
+        .parse(&SseEvent::new(None, value.to_string()))
+        .unwrap();
     assert!(events.contains(&StreamEvent::MessageStop));
     assert!(parser.finish().is_ok());
 }
@@ -427,13 +500,21 @@ fn reasoning_text_streams_as_thinking_deltas() {
     let thinking: Vec<&str> = events
         .iter()
         .filter_map(|e| match e {
-            StreamEvent::BlockDelta { delta: BlockDelta::Thinking(t), .. } => Some(t.as_str()),
+            StreamEvent::BlockDelta {
+                delta: BlockDelta::Thinking(t),
+                ..
+            } => Some(t.as_str()),
             _ => None,
         })
         .collect();
     assert_eq!(
         thinking,
-        vec!["9.11 vs 9.8: compare ", "the tenths digit.", "\n\n", "8 > 1, so 9.8 wins."]
+        vec![
+            "9.11 vs 9.8: compare ",
+            "the tenths digit.",
+            "\n\n",
+            "8 > 1, so 9.8 wins."
+        ]
     );
 
     let resp = accumulate(&events);
@@ -447,7 +528,10 @@ fn reasoning_text_streams_as_thinking_deltas() {
     );
     // The finalized block keeps the `content` array for reconstruction.
     let ns = extra.get(F).expect("namespace stored");
-    assert_eq!(ns.get("content").and_then(Value::as_array).map(Vec::len), Some(2));
+    assert_eq!(
+        ns.get("content").and_then(Value::as_array).map(Vec::len),
+        Some(2)
+    );
 
     assert_eq!(resp.text(), "9.8 is greater.");
     assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));

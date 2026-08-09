@@ -34,7 +34,10 @@ fn build(r: &Request) -> (Value, Vec<ConversionWarning>) {
     build_with(r, &ctx())
 }
 
-fn find<'w>(warnings: &'w [ConversionWarning], code: &WarningCode) -> Option<&'w ConversionWarning> {
+fn find<'w>(
+    warnings: &'w [ConversionWarning],
+    code: &WarningCode,
+) -> Option<&'w ConversionWarning> {
     warnings.iter().find(|w| w.code == *code)
 }
 
@@ -43,9 +46,18 @@ fn minimal_request_shape_url_and_headers() {
     let r = req(vec![Message::user_text("hi")]);
     let built = AnthropicMessages.build_request(&r, &ctx()).unwrap();
     assert_eq!(built.method.as_str(), "POST");
-    assert_eq!(built.url.to_string(), "https://api.anthropic.com/v1/messages");
-    assert_eq!(built.headers.get("content-type").unwrap(), "application/json");
-    assert_eq!(built.headers.get("anthropic-version").unwrap(), "2023-06-01");
+    assert_eq!(
+        built.url.to_string(),
+        "https://api.anthropic.com/v1/messages"
+    );
+    assert_eq!(
+        built.headers.get("content-type").unwrap(),
+        "application/json"
+    );
+    assert_eq!(
+        built.headers.get("anthropic-version").unwrap(),
+        "2023-06-01"
+    );
     assert!(built.headers.get("anthropic-beta").is_none());
     let auth = built.auth.unwrap();
     assert_eq!(auth.header.as_str(), "x-api-key");
@@ -68,8 +80,10 @@ fn anthropic_options_control_headers_and_auth() {
     let mut c = ctx();
     c.format_options.anthropic.auth_style = AnthropicAuthStyle::Bearer;
     c.format_options.anthropic.version = None;
-    c.format_options.anthropic.betas =
-        vec!["interleaved-thinking-2025-05-14".into(), "context-1m-2025-08-07".into()];
+    c.format_options.anthropic.betas = vec![
+        "interleaved-thinking-2025-05-14".into(),
+        "context-1m-2025-08-07".into(),
+    ];
     let built = AnthropicMessages.build_request(&r, &c).unwrap();
     assert!(built.headers.get("anthropic-version").is_none());
     assert_eq!(
@@ -83,7 +97,10 @@ fn anthropic_options_control_headers_and_auth() {
 fn max_tokens_is_required() {
     let r = Request::with_messages(vec![Message::user_text("hi")]);
     let err = AnthropicMessages.build_request(&r, &ctx()).unwrap_err();
-    assert!(matches!(err, Error::Conversion(ConversionError::MissingRequired { .. })));
+    assert!(matches!(
+        err,
+        Error::Conversion(ConversionError::MissingRequired { .. })
+    ));
     // Strict off makes no difference: required data is an error in both modes.
     let mut c = ctx();
     c.convert.strict = true;
@@ -131,8 +148,15 @@ fn sampling_parameters_map_or_warn() {
         .filter(|w| w.code == WarningCode::SamplingParameterDropped)
         .map(|w| w.location.as_str())
         .collect();
-    assert_eq!(dropped, vec!["/seed", "/frequency_penalty", "/presence_penalty"]);
-    assert!(warnings.iter().all(|w| w.severity == WarningSeverity::Cosmetic));
+    assert_eq!(
+        dropped,
+        vec!["/seed", "/frequency_penalty", "/presence_penalty"]
+    );
+    assert!(
+        warnings
+            .iter()
+            .all(|w| w.severity == WarningSeverity::Cosmetic)
+    );
 }
 
 #[test]
@@ -167,7 +191,9 @@ fn system_string_form_and_array_form() {
 
     // A cache hint forces the array form and becomes cache_control.
     let mut r2 = req(vec![Message::user_text("hi")]);
-    r2.system = Some(vec![ContentBlock::text("Long.").with_cache(CacheHint::with_ttl("1h"))]);
+    r2.system = Some(vec![
+        ContentBlock::text("Long.").with_cache(CacheHint::with_ttl("1h")),
+    ]);
     let (body2, _) = build(&r2);
     assert_eq!(
         body2["system"],
@@ -176,9 +202,16 @@ fn system_string_form_and_array_form() {
 
     // Block-level extra also forces the array form and is merged.
     let mut r3 = req(vec![Message::user_text("hi")]);
-    r3.system = Some(vec![ContentBlock::text("T").with_extra(FMT, "citations", json!([]))]);
+    r3.system = Some(vec![ContentBlock::text("T").with_extra(
+        FMT,
+        "citations",
+        json!([]),
+    )]);
     let (body3, _) = build(&r3);
-    assert_eq!(body3["system"], json!([{"type": "text", "text": "T", "citations": []}]));
+    assert_eq!(
+        body3["system"],
+        json!([{"type": "text", "text": "T", "citations": []}])
+    );
 }
 
 #[test]
@@ -203,7 +236,10 @@ fn leading_system_messages_hoist_and_mid_stays_in_array() {
     );
     assert_eq!(body["messages"][0]["role"], json!("user"));
     assert_eq!(body["messages"][1]["role"], json!("system"));
-    assert_eq!(body["messages"][1]["content"], json!([{"type": "text", "text": "mid"}]));
+    assert_eq!(
+        body["messages"][1]["content"],
+        json!([{"type": "text", "text": "mid"}])
+    );
     assert!(warnings.is_empty());
 }
 
@@ -231,7 +267,10 @@ fn downgrade_mid_system_and_developer() {
     assert_eq!(body2["messages"][1]["role"], json!("system"));
     assert_eq!(body2["messages"][2]["role"], json!("user"));
     assert_eq!(
-        warnings2.iter().filter(|w| w.code == WarningCode::RoleDowngraded).count(),
+        warnings2
+            .iter()
+            .filter(|w| w.code == WarningCode::RoleDowngraded)
+            .count(),
         1
     );
 }
@@ -243,32 +282,45 @@ fn request_system_rejects_non_text() {
     let err = AnthropicMessages.build_request(&r, &ctx()).unwrap_err();
     assert!(matches!(
         err,
-        Error::Conversion(ConversionError::InvalidBlockForRole { role: Role::System, .. })
+        Error::Conversion(ConversionError::InvalidBlockForRole {
+            role: Role::System,
+            ..
+        })
     ));
 }
 
 #[test]
 fn role_block_validity_is_structural() {
     // User + ToolCall.
-    let r = req(vec![Message::user(vec![ContentBlock::tool_call("f", "{}")])]);
-    assert!(matches!(
-        AnthropicMessages.build_request(&r, &ctx()).unwrap_err(),
-        Error::Conversion(ConversionError::InvalidBlockForRole { role: Role::User, .. })
-    ));
-    // Assistant + ToolResult.
-    let r2 = req(vec![Message::assistant(vec![ContentBlock::tool_result_text(
-        Some("t".into()),
-        "x",
+    let r = req(vec![Message::user(vec![ContentBlock::tool_call(
+        "f", "{}",
     )])]);
     assert!(matches!(
+        AnthropicMessages.build_request(&r, &ctx()).unwrap_err(),
+        Error::Conversion(ConversionError::InvalidBlockForRole {
+            role: Role::User,
+            ..
+        })
+    ));
+    // Assistant + ToolResult.
+    let r2 = req(vec![Message::assistant(vec![
+        ContentBlock::tool_result_text(Some("t".into()), "x"),
+    ])]);
+    assert!(matches!(
         AnthropicMessages.build_request(&r2, &ctx()).unwrap_err(),
-        Error::Conversion(ConversionError::InvalidBlockForRole { role: Role::Assistant, .. })
+        Error::Conversion(ConversionError::InvalidBlockForRole {
+            role: Role::Assistant,
+            ..
+        })
     ));
     // Tool + Text.
     let r3 = req(vec![Message::tool(vec![ContentBlock::text("x")])]);
     assert!(matches!(
         AnthropicMessages.build_request(&r3, &ctx()).unwrap_err(),
-        Error::Conversion(ConversionError::InvalidBlockForRole { role: Role::Tool, .. })
+        Error::Conversion(ConversionError::InvalidBlockForRole {
+            role: Role::Tool,
+            ..
+        })
     ));
 }
 
@@ -296,7 +348,10 @@ fn image_sources_map_and_assistant_images_drop() {
         ContentBlock::image_url("https://x/y.png"),
     ])]);
     let (body2, warnings2) = build(&r2);
-    assert_eq!(body2["messages"][0]["content"], json!([{"type": "text", "text": "look"}]));
+    assert_eq!(
+        body2["messages"][0]["content"],
+        json!([{"type": "text", "text": "look"}])
+    );
     let w = find(&warnings2, &WarningCode::ImageSourceUnsupported).unwrap();
     assert_eq!(w.severity, WarningSeverity::Semantic);
     assert_eq!(w.location, "/messages/0/content/1");
@@ -305,15 +360,17 @@ fn image_sources_map_and_assistant_images_drop() {
 #[test]
 fn tool_call_requires_id_and_object_arguments() {
     // Missing id.
-    let r = req(vec![Message::assistant(vec![ContentBlock::tool_call("f", "{}")])]);
+    let r = req(vec![Message::assistant(vec![ContentBlock::tool_call(
+        "f", "{}",
+    )])]);
     assert!(matches!(
         AnthropicMessages.build_request(&r, &ctx()).unwrap_err(),
         Error::Conversion(ConversionError::MissingRequired { .. })
     ));
     // Invalid JSON, both modes.
-    let r2 = req(vec![Message::assistant(vec![ContentBlock::tool_call_with_id(
-        "c1", "f", "{broken",
-    )])]);
+    let r2 = req(vec![Message::assistant(vec![
+        ContentBlock::tool_call_with_id("c1", "f", "{broken"),
+    ])]);
     assert!(matches!(
         AnthropicMessages.build_request(&r2, &ctx()).unwrap_err(),
         Error::Conversion(ConversionError::InvalidToolArguments { .. })
@@ -322,18 +379,17 @@ fn tool_call_requires_id_and_object_arguments() {
     strict.convert.strict = true;
     assert!(AnthropicMessages.build_request(&r2, &strict).is_err());
     // Non-object JSON.
-    let r3 =
-        req(vec![Message::assistant(vec![ContentBlock::tool_call_with_id("c1", "f", "[1]")])]);
+    let r3 = req(vec![Message::assistant(vec![
+        ContentBlock::tool_call_with_id("c1", "f", "[1]"),
+    ])]);
     assert!(matches!(
         AnthropicMessages.build_request(&r3, &ctx()).unwrap_err(),
         Error::Conversion(ConversionError::InvalidToolArguments { .. })
     ));
     // Valid arguments become the input object.
-    let r4 = req(vec![Message::assistant(vec![ContentBlock::tool_call_with_id(
-        "c1",
-        "f",
-        r#"{"a": 1}"#,
-    )])]);
+    let r4 = req(vec![Message::assistant(vec![
+        ContentBlock::tool_call_with_id("c1", "f", r#"{"a": 1}"#),
+    ])]);
     let (body, _) = build(&r4);
     assert_eq!(
         body["messages"][0]["content"][0],
@@ -375,7 +431,9 @@ fn tool_result_encodings() {
     assert!(warnings.is_empty());
 
     // Missing tool_use_id is structural.
-    let r2 = req(vec![Message::tool(vec![ContentBlock::tool_result_text(None, "x")])]);
+    let r2 = req(vec![Message::tool(vec![ContentBlock::tool_result_text(
+        None, "x",
+    )])]);
     assert!(matches!(
         AnthropicMessages.build_request(&r2, &ctx()).unwrap_err(),
         Error::Conversion(ConversionError::MissingRequired { .. })
@@ -459,12 +517,18 @@ fn thinking_provenance_rules() {
         ContentBlock::text("a"),
     ])]);
     let (body4, warnings4) = build(&r4);
-    assert_eq!(body4["messages"][0]["content"], json!([{"type": "text", "text": "a"}]));
+    assert_eq!(
+        body4["messages"][0]["content"],
+        json!([{"type": "text", "text": "a"}])
+    );
     let w = find(&warnings4, &WarningCode::ThinkingDropped).unwrap();
     assert_eq!(w.severity, WarningSeverity::Semantic);
 
     // Plaintext-only thinking is foreign here too.
-    let r5 = req(vec![Message::assistant(vec![ContentBlock::thinking("t"), ContentBlock::text("a")])]);
+    let r5 = req(vec![Message::assistant(vec![
+        ContentBlock::thinking("t"),
+        ContentBlock::text("a"),
+    ])]);
     let (_, warnings5) = build(&r5);
     assert!(find(&warnings5, &WarningCode::ThinkingDropped).is_some());
 
@@ -483,13 +547,20 @@ fn thinking_provenance_rules() {
 fn tools_map_with_synthesized_empty_schema() {
     let mut r = req(vec![Message::user_text("hi")]);
     r.tools = Some(vec![
-        Tool::function(FunctionTool::new("no_params").with_description("d").with_strict(true)),
+        Tool::function(
+            FunctionTool::new("no_params")
+                .with_description("d")
+                .with_strict(true),
+        ),
         Tool::function(
             FunctionTool::new("with_schema")
                 .with_parameters(json!({"type": "object", "properties": {"q": {"type": "string"}}}))
                 .with_cache(CacheHint::with_ttl("5m")),
         ),
-        Tool::opaque(FMT, json!({"type": "web_search_20260209", "name": "web_search"})),
+        Tool::opaque(
+            FMT,
+            json!({"type": "web_search_20260209", "name": "web_search"}),
+        ),
         Tool::opaque("google_generate_content", json!({"foo": 1})),
     ]);
     let (body, warnings) = build(&r);
@@ -542,14 +613,20 @@ fn parallel_tool_calls_combinations() {
     r.tool_choice = Some(ToolChoice::Auto);
     r.parallel_tool_calls = Some(false);
     let (body, w) = build(&r);
-    assert_eq!(body["tool_choice"], json!({"type": "auto", "disable_parallel_tool_use": true}));
+    assert_eq!(
+        body["tool_choice"],
+        json!({"type": "auto", "disable_parallel_tool_use": true})
+    );
     assert!(w.is_empty());
 
     let mut r2 = base();
     r2.tool_choice = Some(ToolChoice::Required);
     r2.parallel_tool_calls = Some(true);
     let (body2, _) = build(&r2);
-    assert_eq!(body2["tool_choice"], json!({"type": "any", "disable_parallel_tool_use": false}));
+    assert_eq!(
+        body2["tool_choice"],
+        json!({"type": "any", "disable_parallel_tool_use": false})
+    );
 
     // ToolChoice::None takes no flag.
     let mut r3 = base();
@@ -563,7 +640,10 @@ fn parallel_tool_calls_combinations() {
     let mut r4 = base();
     r4.parallel_tool_calls = Some(false);
     let (body4, w4) = build(&r4);
-    assert_eq!(body4["tool_choice"], json!({"type": "auto", "disable_parallel_tool_use": true}));
+    assert_eq!(
+        body4["tool_choice"],
+        json!({"type": "auto", "disable_parallel_tool_use": true})
+    );
     assert!(w4.is_empty());
 
     // No choice + Some(true): canonicalized to nothing, silently.
@@ -630,12 +710,18 @@ fn include_thoughts_display_rules() {
     reasoning.include_thoughts = Some(true);
     r.reasoning = Some(reasoning.clone());
     let (body, _) = build(&r);
-    assert_eq!(body["thinking"], json!({"type": "adaptive", "display": "summarized"}));
+    assert_eq!(
+        body["thinking"],
+        json!({"type": "adaptive", "display": "summarized"})
+    );
 
     reasoning.include_thoughts = Some(false);
     r.reasoning = Some(reasoning);
     let (body2, _) = build(&r);
-    assert_eq!(body2["thinking"], json!({"type": "adaptive", "display": "omitted"}));
+    assert_eq!(
+        body2["thinking"],
+        json!({"type": "adaptive", "display": "omitted"})
+    );
 
     // Effort enables thinking; adaptive carries the display.
     let mut r2 = req(vec![Message::user_text("hi")]);
@@ -643,7 +729,10 @@ fn include_thoughts_display_rules() {
     reasoning2.include_thoughts = Some(true);
     r2.reasoning = Some(reasoning2);
     let (body3, w3) = build(&r2);
-    assert_eq!(body3["thinking"], json!({"type": "adaptive", "display": "summarized"}));
+    assert_eq!(
+        body3["thinking"],
+        json!({"type": "adaptive", "display": "summarized"})
+    );
     assert_eq!(body3["output_config"]["effort"], json!("high"));
     assert!(w3.is_empty());
 
@@ -694,9 +783,16 @@ fn extra_rewrites_generated_thinking_object() {
     // object (budget re-enable).
     let mut r = req(vec![Message::user_text("hi")]);
     r.reasoning = Some(Reasoning::enabled(true));
-    r.extra.set(FMT, "thinking", json!({"type": "enabled", "budget_tokens": 2048}));
+    r.extra.set(
+        FMT,
+        "thinking",
+        json!({"type": "enabled", "budget_tokens": 2048}),
+    );
     let (body, _) = build(&r);
-    assert_eq!(body["thinking"], json!({"type": "enabled", "budget_tokens": 2048}));
+    assert_eq!(
+        body["thinking"],
+        json!({"type": "enabled", "budget_tokens": 2048})
+    );
 
     // Same through the reasoning-node extra (merged into /thinking).
     let mut r2 = req(vec![Message::user_text("hi")]);
@@ -726,7 +822,9 @@ fn output_format_cells() {
     // name/strict have no channel: cosmetic warning.
     let mut r2 = req(vec![Message::user_text("hi")]);
     r2.output_format = Some(
-        OutputFormat::json_schema(json!({"type": "object"})).with_name("answer").with_strict(true),
+        OutputFormat::json_schema(json!({"type": "object"}))
+            .with_name("answer")
+            .with_strict(true),
     );
     let (body2, warnings2) = build(&r2);
     assert_eq!(
@@ -753,7 +851,10 @@ fn strict_mode_escalates_and_extra_overrides() {
     let mut c = ctx();
     c.convert.strict = true;
     let err = AnthropicMessages.build_request(&r, &c).unwrap_err();
-    assert!(matches!(err, Error::Conversion(ConversionError::Strict { .. })));
+    assert!(matches!(
+        err,
+        Error::Conversion(ConversionError::Strict { .. })
+    ));
 
     // Deleting the warned pointer through extra marks it overridden and
     // clears the strict gate.
@@ -840,12 +941,18 @@ fn merge_consecutive_roles_and_signature_barrier() {
     assert_eq!(w.severity, WarningSeverity::Semantic);
 
     // A Google thoughtSignature on a tool call is a barrier too.
-    let signed_call = ContentBlock::tool_call_with_id("c1", "f", "{}")
-        .with_extra("google_generate_content", "thoughtSignature", "gsig");
+    let signed_call = ContentBlock::tool_call_with_id("c1", "f", "{}").with_extra(
+        "google_generate_content",
+        "thoughtSignature",
+        "gsig",
+    );
     let r3 = req(vec![
         Message::assistant(vec![signed_call]),
         Message::assistant_text("more"),
-        Message::tool(vec![ContentBlock::tool_result_text(Some("c1".into()), "ok")]),
+        Message::tool(vec![ContentBlock::tool_result_text(
+            Some("c1".into()),
+            "ok",
+        )]),
     ]);
     let (body4, w4) = build_with(&r3, &c);
     assert_eq!(body4["messages"].as_array().unwrap().len(), 3);
@@ -858,8 +965,11 @@ fn turn_group_meta_re_merges_tool_and_user_messages() {
     let r = req(vec![
         Message::user_text("q"),
         Message::assistant(vec![call]),
-        Message::tool(vec![ContentBlock::tool_result_text(Some("t1".into()), "ok")])
-            .with_turn_group(3),
+        Message::tool(vec![ContentBlock::tool_result_text(
+            Some("t1".into()),
+            "ok",
+        )])
+        .with_turn_group(3),
         Message::user_text("continue").with_turn_group(3),
     ]);
     let (body, _) = build(&r);
@@ -877,7 +987,10 @@ fn turn_group_meta_re_merges_tool_and_user_messages() {
     let r2 = req(vec![
         Message::user_text("q"),
         Message::assistant(vec![ContentBlock::tool_call_with_id("t1", "f", "{}")]),
-        Message::tool(vec![ContentBlock::tool_result_text(Some("t1".into()), "ok")]),
+        Message::tool(vec![ContentBlock::tool_result_text(
+            Some("t1".into()),
+            "ok",
+        )]),
         Message::user_text("continue"),
     ]);
     let (body2, _) = build(&r2);
@@ -887,8 +1000,11 @@ fn turn_group_meta_re_merges_tool_and_user_messages() {
     let r3 = req(vec![
         Message::user_text("q"),
         Message::assistant(vec![ContentBlock::tool_call_with_id("t1", "f", "{}")]),
-        Message::tool(vec![ContentBlock::tool_result_text(Some("t1".into()), "ok")])
-            .with_turn_group(1),
+        Message::tool(vec![ContentBlock::tool_result_text(
+            Some("t1".into()),
+            "ok",
+        )])
+        .with_turn_group(1),
         Message::user_text("continue").with_turn_group(2),
     ]);
     let (body3, _) = build(&r3);
@@ -956,7 +1072,10 @@ fn missing_thinking_with_tool_calls() {
     let mut r = req(vec![
         Message::user_text("q"),
         Message::assistant(vec![ContentBlock::tool_call_with_id("t1", "f", "{}")]),
-        Message::tool(vec![ContentBlock::tool_result_text(Some("t1".into()), "ok")]),
+        Message::tool(vec![ContentBlock::tool_result_text(
+            Some("t1".into()),
+            "ok",
+        )]),
     ]);
     r.reasoning = Some(Reasoning::enabled(true));
     let (_, warnings) = build(&r);
@@ -979,7 +1098,9 @@ fn missing_thinking_with_tool_calls() {
 
     // An existing thinking block suppresses both.
     let mut r2 = r.clone();
-    r2.messages[1].content.insert(0, ContentBlock::thinking_signed("t", "s"));
+    r2.messages[1]
+        .content
+        .insert(0, ContentBlock::thinking_signed("t", "s"));
     let (_, w3) = build(&r2);
     assert!(find(&w3, &WarningCode::MissingThinkingWithToolCalls).is_none());
 }
@@ -1011,7 +1132,10 @@ fn opaque_blocks_and_message_extra() {
         ContentBlock::text("t"),
     ])]);
     let (body2, warnings2) = build(&r2);
-    assert_eq!(body2["messages"][0]["content"], json!([{"type": "text", "text": "t"}]));
+    assert_eq!(
+        body2["messages"][0]["content"],
+        json!([{"type": "text", "text": "t"}])
+    );
     assert!(find(&warnings2, &WarningCode::OpaqueDropped).is_some());
 }
 
@@ -1023,7 +1147,10 @@ fn hoisted_system_message_carries_extra_and_own_opaque() {
     sys_msg.extra.set(FMT, "meta_key", 1);
     let sys2 = Message::new(
         Role::System,
-        vec![ContentBlock::opaque(FMT, json!({"type": "text", "text": "op", "citations": []}))],
+        vec![ContentBlock::opaque(
+            FMT,
+            json!({"type": "text", "text": "op", "citations": []}),
+        )],
     );
     let r = req(vec![sys_msg, sys2, Message::user_text("hi")]);
     let (body, warnings) = build(&r);

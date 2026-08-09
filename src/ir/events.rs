@@ -29,7 +29,11 @@ impl StreamItem {
     /// Wraps an event with no raw payload or warnings.
     #[must_use]
     pub fn new(event: StreamEvent) -> Self {
-        Self { event, raw: None, warnings: Vec::new() }
+        Self {
+            event,
+            raw: None,
+            warnings: Vec::new(),
+        }
     }
 }
 
@@ -175,7 +179,10 @@ impl Accumulator {
     /// [`Accumulator::set_status`] is called).
     #[must_use]
     pub fn new() -> Self {
-        Self { status: 200, ..Self::default() }
+        Self {
+            status: 200,
+            ..Self::default()
+        }
     }
 
     /// Records the HTTP status of the streaming response.
@@ -209,7 +216,9 @@ impl Accumulator {
     pub fn push(&mut self, item: &StreamItem) -> Result<(), Error> {
         self.warnings.extend(item.warnings.iter().cloned());
         match &item.event {
-            StreamEvent::MessageStart { id, model, usage, .. } => {
+            StreamEvent::MessageStart {
+                id, model, usage, ..
+            } => {
                 self.started = true;
                 if id.is_some() {
                     self.id.clone_from(id);
@@ -245,7 +254,9 @@ impl Accumulator {
                     self.block_mut(*index)?;
                 }
             }
-            StreamEvent::MessageDelta { stop_reason, usage, .. } => {
+            StreamEvent::MessageDelta {
+                stop_reason, usage, ..
+            } => {
                 if stop_reason.is_some() {
                     self.stop_reason.clone_from(stop_reason);
                 }
@@ -340,17 +351,46 @@ mod tests {
     fn accumulates_interleaved_blocks_in_arrival_order() {
         let mut acc = Accumulator::new();
         let events = [
-            StreamEvent::MessageStart { id: Some("m1".into()), model: Some("x".into()), usage: None },
-            StreamEvent::BlockStart { index: 0, block: ContentBlock::thinking("") },
-            StreamEvent::BlockDelta { index: 0, delta: BlockDelta::Thinking("think ".into()) },
-            StreamEvent::BlockStart { index: 1, block: ContentBlock::text("") },
-            StreamEvent::BlockDelta { index: 1, delta: BlockDelta::Text("hello".into()) },
-            StreamEvent::BlockDelta { index: 0, delta: BlockDelta::Thinking("more".into()) },
-            StreamEvent::BlockStart { index: 2, block: ContentBlock::text("") },
-            StreamEvent::BlockDelta { index: 2, delta: BlockDelta::Text("!".into()) },
+            StreamEvent::MessageStart {
+                id: Some("m1".into()),
+                model: Some("x".into()),
+                usage: None,
+            },
+            StreamEvent::BlockStart {
+                index: 0,
+                block: ContentBlock::thinking(""),
+            },
+            StreamEvent::BlockDelta {
+                index: 0,
+                delta: BlockDelta::Thinking("think ".into()),
+            },
+            StreamEvent::BlockStart {
+                index: 1,
+                block: ContentBlock::text(""),
+            },
+            StreamEvent::BlockDelta {
+                index: 1,
+                delta: BlockDelta::Text("hello".into()),
+            },
+            StreamEvent::BlockDelta {
+                index: 0,
+                delta: BlockDelta::Thinking("more".into()),
+            },
+            StreamEvent::BlockStart {
+                index: 2,
+                block: ContentBlock::text(""),
+            },
+            StreamEvent::BlockDelta {
+                index: 2,
+                delta: BlockDelta::Text("!".into()),
+            },
             StreamEvent::MessageDelta {
                 stop_reason: Some(StopReason::EndTurn),
-                usage: Some(Usage { input_tokens: 1, output_tokens: 2, ..Usage::default() }),
+                usage: Some(Usage {
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    ..Usage::default()
+                }),
             },
             StreamEvent::MessageStop,
         ];
@@ -374,12 +414,31 @@ mod tests {
     fn tool_call_arguments_accumulate_and_stop_reason_normalizes() {
         let mut acc = Accumulator::new();
         for e in [
-            StreamEvent::MessageStart { id: None, model: None, usage: None },
-            StreamEvent::BlockStart { index: 0, block: ContentBlock::tool_call_with_id("c", "f", "") },
-            StreamEvent::BlockDelta { index: 0, delta: BlockDelta::ToolArguments("{\"a\":".into()) },
-            StreamEvent::BlockDelta { index: 0, delta: BlockDelta::ToolArguments("1}".into()) },
-            StreamEvent::BlockStop { index: 0, block: None },
-            StreamEvent::MessageDelta { stop_reason: Some(StopReason::EndTurn), usage: None },
+            StreamEvent::MessageStart {
+                id: None,
+                model: None,
+                usage: None,
+            },
+            StreamEvent::BlockStart {
+                index: 0,
+                block: ContentBlock::tool_call_with_id("c", "f", ""),
+            },
+            StreamEvent::BlockDelta {
+                index: 0,
+                delta: BlockDelta::ToolArguments("{\"a\":".into()),
+            },
+            StreamEvent::BlockDelta {
+                index: 0,
+                delta: BlockDelta::ToolArguments("1}".into()),
+            },
+            StreamEvent::BlockStop {
+                index: 0,
+                block: None,
+            },
+            StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::EndTurn),
+                usage: None,
+            },
             StreamEvent::MessageStop,
         ] {
             acc.push(&item(e)).unwrap();
@@ -398,9 +457,18 @@ mod tests {
         let mut acc = Accumulator::new();
         let finalized = ContentBlock::thinking_signed("full text", "sig");
         for e in [
-            StreamEvent::BlockStart { index: 0, block: ContentBlock::thinking("") },
-            StreamEvent::BlockDelta { index: 0, delta: BlockDelta::Thinking("partial".into()) },
-            StreamEvent::BlockStop { index: 0, block: Some(finalized.clone()) },
+            StreamEvent::BlockStart {
+                index: 0,
+                block: ContentBlock::thinking(""),
+            },
+            StreamEvent::BlockDelta {
+                index: 0,
+                delta: BlockDelta::Thinking("partial".into()),
+            },
+            StreamEvent::BlockStop {
+                index: 0,
+                block: Some(finalized.clone()),
+            },
             StreamEvent::MessageStop,
         ] {
             acc.push(&item(e)).unwrap();
@@ -412,15 +480,23 @@ mod tests {
     #[test]
     fn missing_message_stop_fails() {
         let mut acc = Accumulator::new();
-        acc.push(&item(StreamEvent::MessageStart { id: None, model: None, usage: None })).unwrap();
+        acc.push(&item(StreamEvent::MessageStart {
+            id: None,
+            model: None,
+            usage: None,
+        }))
+        .unwrap();
         assert!(matches!(acc.finish(), Err(Error::Parse { .. })));
     }
 
     #[test]
     fn delta_kind_mismatch_fails() {
         let mut acc = Accumulator::new();
-        acc.push(&item(StreamEvent::BlockStart { index: 0, block: ContentBlock::text("") }))
-            .unwrap();
+        acc.push(&item(StreamEvent::BlockStart {
+            index: 0,
+            block: ContentBlock::text(""),
+        }))
+        .unwrap();
         let err = acc.push(&item(StreamEvent::BlockDelta {
             index: 0,
             delta: BlockDelta::Thinking("x".into()),
@@ -431,8 +507,10 @@ mod tests {
     #[test]
     fn unknown_index_fails() {
         let mut acc = Accumulator::new();
-        let err = acc
-            .push(&item(StreamEvent::BlockDelta { index: 7, delta: BlockDelta::Text("x".into()) }));
+        let err = acc.push(&item(StreamEvent::BlockDelta {
+            index: 7,
+            delta: BlockDelta::Text("x".into()),
+        }));
         assert!(matches!(err, Err(Error::Parse { .. })));
     }
 
@@ -443,11 +521,19 @@ mod tests {
             StreamEvent::MessageStart {
                 id: None,
                 model: None,
-                usage: Some(Usage { input_tokens: 10, output_tokens: 0, ..Usage::default() }),
+                usage: Some(Usage {
+                    input_tokens: 10,
+                    output_tokens: 0,
+                    ..Usage::default()
+                }),
             },
             StreamEvent::MessageDelta {
                 stop_reason: None,
-                usage: Some(Usage { input_tokens: 10, output_tokens: 7, ..Usage::default() }),
+                usage: Some(Usage {
+                    input_tokens: 10,
+                    output_tokens: 7,
+                    ..Usage::default()
+                }),
             },
             StreamEvent::MessageStop,
         ] {
@@ -459,7 +545,10 @@ mod tests {
 
     #[test]
     fn stream_event_serde() {
-        let e = StreamEvent::BlockDelta { index: 1, delta: BlockDelta::Text("hi".into()) };
+        let e = StreamEvent::BlockDelta {
+            index: 1,
+            delta: BlockDelta::Text("hi".into()),
+        };
         let v = serde_json::to_value(&e).unwrap();
         assert_eq!(
             v,

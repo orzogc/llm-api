@@ -32,7 +32,9 @@ async fn quick_start() -> Result<(), Box<dyn std::error::Error>> {
     request.max_output_tokens = Some(1024);
 
     let client = Client::new(reqwest::Client::new());
-    let response = client.send(&provider, &request, &CallOptions::default()).await?;
+    let response = client
+        .send(&provider, &request, &CallOptions::default())
+        .await?;
 
     let _text = response.text();
     for _warning in &response.warnings {
@@ -47,9 +49,15 @@ async fn streaming(
     provider: &ProviderConfig,
     request: &Request,
 ) -> llm_api::Result<()> {
-    let mut stream = client.stream(provider, request, &CallOptions::default()).await?;
+    let mut stream = client
+        .stream(provider, request, &CallOptions::default())
+        .await?;
     while let Some(item) = stream.next().await {
-        if let StreamEvent::BlockDelta { delta: BlockDelta::Text(_fragment), .. } = item?.event {
+        if let StreamEvent::BlockDelta {
+            delta: BlockDelta::Text(_fragment),
+            ..
+        } = item?.event
+        {
             // print!("{_fragment}");
         }
     }
@@ -62,7 +70,9 @@ async fn streaming_accumulated(
     provider: &ProviderConfig,
     request: &Request,
 ) -> llm_api::Result<()> {
-    let stream = client.stream(provider, request, &CallOptions::default()).await?;
+    let stream = client
+        .stream(provider, request, &CallOptions::default())
+        .await?;
     let _response = stream.collect().await?;
     Ok(())
 }
@@ -129,7 +139,9 @@ async fn models_and_tokens(
     request: &Request,
 ) -> llm_api::Result<()> {
     let _models = client.list_models(provider).await?;
-    let _count = client.count_tokens(provider, request, &CallOptions::default()).await?;
+    let _count = client
+        .count_tokens(provider, request, &CallOptions::default())
+        .await?;
     Ok(())
 }
 

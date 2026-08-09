@@ -8,8 +8,8 @@ use llm_api::formats::google_generate_content::{
     GoogleGenerateContent, request_from_ir, request_to_ir, response_to_ir,
 };
 use llm_api::{
-    ApiErrorKind, ApiFormat, ContentBlock, ConvertOptions, Error, ImageSource, ResponseMeta,
-    Role, StopReason, Tool, ToolChoice, ToolOutputBlock, WarningCode,
+    ApiErrorKind, ApiFormat, ContentBlock, ConvertOptions, Error, ImageSource, ResponseMeta, Role,
+    StopReason, Tool, ToolChoice, ToolOutputBlock, WarningCode,
 };
 use serde_json::{Value, json};
 
@@ -26,21 +26,27 @@ fn assert_fixed_point(body: &Value) {
     let (serialized, _) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
     assert_eq!(&serialized, body, "canonical body must be a fixed point");
     let (ir2, _) = request_to_ir(&serde_json::to_vec(&serialized).unwrap()).unwrap();
-    assert_eq!(ir2, ir, "re-parsing the canonical form must reproduce the IR");
+    assert_eq!(
+        ir2, ir,
+        "re-parsing the canonical form must reproduce the IR"
+    );
 }
 
 // ---------------------------------------------------------------- round trip
 
 #[test]
 fn canonical_request_fixture_round_trips_losslessly() {
-    let fixture: Value =
-        serde_json::from_str(include_str!("fixtures/google_generate_content/request_canonical.json"))
-            .unwrap();
-    let (ir, parse_warnings) =
-        request_to_ir(&serde_json::to_vec(&fixture).unwrap()).unwrap();
+    let fixture: Value = serde_json::from_str(include_str!(
+        "fixtures/google_generate_content/request_canonical.json"
+    ))
+    .unwrap();
+    let (ir, parse_warnings) = request_to_ir(&serde_json::to_vec(&fixture).unwrap()).unwrap();
     assert!(parse_warnings.is_empty(), "{parse_warnings:?}");
     let (serialized, warnings) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
-    assert!(warnings.is_empty(), "round trip must be warning-free: {warnings:?}");
+    assert!(
+        warnings.is_empty(),
+        "round trip must be warning-free: {warnings:?}"
+    );
     assert_eq!(serialized, fixture);
 
     // Structural expectations on the parsed IR.
@@ -48,7 +54,14 @@ fn canonical_request_fixture_round_trips_losslessly() {
     let roles: Vec<Role> = ir.messages.iter().map(|m| m.role).collect();
     assert_eq!(
         roles,
-        vec![Role::User, Role::Assistant, Role::Tool, Role::User, Role::Assistant, Role::User]
+        vec![
+            Role::User,
+            Role::Assistant,
+            Role::Tool,
+            Role::User,
+            Role::Assistant,
+            Role::User
+        ]
     );
     // The mixed wire turn split into Tool + User sharing one turn group.
     let g2 = ir.messages[2].turn_group_id();
@@ -57,7 +70,12 @@ fn canonical_request_fixture_round_trips_losslessly() {
     assert_eq!(ir.messages[0].turn_group_id(), None);
     // Content-level unknown fields ride the first message of the turn.
     assert_eq!(
-        ir.messages[0].extra.get(FMT).unwrap().get("contentTag").unwrap(),
+        ir.messages[0]
+            .extra
+            .get(FMT)
+            .unwrap()
+            .get("contentTag")
+            .unwrap(),
         &json!("first")
     );
     // Thinking parsed natively (signature + wire marker).
@@ -67,14 +85,23 @@ fn canonical_request_fixture_round_trips_losslessly() {
             if t == "Let me look that up." && s == "dGhvdWdodC1zaWc="
     ));
     // Tool-call thought signature rides the block's extra.
-    let ContentBlock::ToolCall { id, name, arguments, extra, .. } = &ir.messages[1].content[1]
+    let ContentBlock::ToolCall {
+        id,
+        name,
+        arguments,
+        extra,
+        ..
+    } = &ir.messages[1].content[1]
     else {
         panic!("expected tool call");
     };
     assert_eq!(id.as_deref(), Some("call-1"));
     assert_eq!(name, "get_weather");
     assert_eq!(arguments, r#"{"city":"Paris"}"#);
-    assert_eq!(extra.get(FMT).unwrap().get("thoughtSignature").unwrap(), &json!("Y2FsbC1zaWc="));
+    assert_eq!(
+        extra.get(FMT).unwrap().get("thoughtSignature").unwrap(),
+        &json!("Y2FsbC1zaWc=")
+    );
     // The executable-code part survives as an in-place opaque block.
     assert!(matches!(
         &ir.messages[5].content[2],
@@ -142,7 +169,14 @@ fn tool_result_decoding_details() {
     let blocks = &ir.messages[0].content;
 
     // "error" key → is_error + text; other keys mirror into extra.
-    let ContentBlock::ToolResult { tool_call_id, name, content, is_error, extra, .. } = &blocks[0]
+    let ContentBlock::ToolResult {
+        tool_call_id,
+        name,
+        content,
+        is_error,
+        extra,
+        ..
+    } = &blocks[0]
     else {
         panic!("expected tool result");
     };
@@ -156,14 +190,23 @@ fn tool_result_decoding_details() {
     );
 
     // {"output": ""} → one empty text block; {} → empty content.
-    let ContentBlock::ToolResult { content, is_error, .. } = &blocks[1] else { panic!() };
+    let ContentBlock::ToolResult {
+        content, is_error, ..
+    } = &blocks[1]
+    else {
+        panic!()
+    };
     assert!(matches!(&content[0], ToolOutputBlock::Text { text, .. } if text.is_empty()));
     assert_eq!(*is_error, None);
-    let ContentBlock::ToolResult { content, .. } = &blocks[2] else { panic!() };
+    let ContentBlock::ToolResult { content, .. } = &blocks[2] else {
+        panic!()
+    };
     assert!(content.is_empty());
 
     // parts[] media parse after the response text (canonical order).
-    let ContentBlock::ToolResult { content, .. } = &blocks[3] else { panic!() };
+    let ContentBlock::ToolResult { content, .. } = &blocks[3] else {
+        panic!()
+    };
     assert!(matches!(&content[0], ToolOutputBlock::Text { text, .. } if text == "text"));
     assert!(matches!(
         &content[1],
@@ -258,9 +301,18 @@ fn user_parts_that_are_invalid_for_the_role_stay_opaque() {
     });
     let (ir, warnings) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
     assert!(warnings.is_empty());
-    assert!(matches!(&ir.messages[0].content[0], ContentBlock::Opaque { .. }));
-    assert!(matches!(&ir.messages[0].content[1], ContentBlock::Opaque { .. }));
-    assert!(matches!(&ir.messages[0].content[2], ContentBlock::Text { .. }));
+    assert!(matches!(
+        &ir.messages[0].content[0],
+        ContentBlock::Opaque { .. }
+    ));
+    assert!(matches!(
+        &ir.messages[0].content[1],
+        ContentBlock::Opaque { .. }
+    ));
+    assert!(matches!(
+        &ir.messages[0].content[2],
+        ContentBlock::Text { .. }
+    ));
     assert_fixed_point(&body);
 }
 
@@ -326,7 +378,10 @@ fn unknown_null_fields_canonicalize_to_absent() {
     });
     let (ir, _) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
     let (serialized, _) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
-    assert_eq!(serialized, json!({"contents": [{"role": "user", "parts": [{"text": "hi"}]}]}));
+    assert_eq!(
+        serialized,
+        json!({"contents": [{"role": "user", "parts": [{"text": "hi"}]}]})
+    );
 }
 
 #[test]
@@ -350,7 +405,10 @@ fn non_json_output_configs_mirror_into_extra() {
         "generationConfig": {"responseMimeType": "application/json"}
     });
     let (ir, _) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
-    assert!(matches!(ir.output_format, Some(llm_api::OutputFormat::JsonObject)));
+    assert!(matches!(
+        ir.output_format,
+        Some(llm_api::OutputFormat::JsonObject)
+    ));
     assert_fixed_point(&body);
 }
 
@@ -374,7 +432,10 @@ fn text_response_parses() {
     assert!(resp.warnings.is_empty(), "{:?}", resp.warnings);
     assert_eq!(resp.id.as_deref(), Some("resp-123"));
     assert_eq!(resp.model.as_deref(), Some("gemini-2.5-flash"));
-    assert_eq!(resp.text(), "AI learns patterns from data to make predictions.");
+    assert_eq!(
+        resp.text(),
+        "AI learns patterns from data to make predictions."
+    );
     assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
     let usage = resp.usage.as_ref().unwrap();
     assert_eq!(usage.input_tokens, 8);
@@ -391,14 +452,23 @@ fn function_call_response_normalizes_to_tool_use() {
     let body = include_str!("fixtures/google_generate_content/response_function_call.json");
     let resp = response_to_ir(body.as_bytes(), &meta()).unwrap();
     assert!(resp.warnings.is_empty());
-    let ContentBlock::ToolCall { id, name, arguments, extra, .. } = &resp.message.content[0]
+    let ContentBlock::ToolCall {
+        id,
+        name,
+        arguments,
+        extra,
+        ..
+    } = &resp.message.content[0]
     else {
         panic!("expected tool call");
     };
     assert_eq!(id.as_deref(), Some("call-9"));
     assert_eq!(name, "set_light_color");
     assert_eq!(arguments, r#"{"rgb_hex":"ff0000"}"#);
-    assert_eq!(extra.get(FMT).unwrap().get("thoughtSignature").unwrap(), &json!("c2lnLTk="));
+    assert_eq!(
+        extra.get(FMT).unwrap().get("thoughtSignature").unwrap(),
+        &json!("c2lnLTk=")
+    );
     // Google reports STOP for function calls; § 8 normalizes to ToolUse.
     assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
     let usage = resp.usage.as_ref().unwrap();
@@ -412,13 +482,25 @@ fn function_call_response_normalizes_to_tool_use() {
 fn thinking_response_parses_thought_parts() {
     let body = include_str!("fixtures/google_generate_content/response_thinking.json");
     let resp = response_to_ir(body.as_bytes(), &meta()).unwrap();
-    let ContentBlock::Thinking { text, signature, extra, .. } = &resp.message.content[0] else {
+    let ContentBlock::Thinking {
+        text,
+        signature,
+        extra,
+        ..
+    } = &resp.message.content[0]
+    else {
         panic!("expected thinking");
     };
     assert!(text.as_ref().unwrap().starts_with("**Considering"));
     assert_eq!(signature.as_deref(), Some("dGhpbmstc2ln"));
-    assert_eq!(extra.get(FMT).unwrap().get("thought").unwrap(), &json!(true));
-    assert!(matches!(&resp.message.content[1], ContentBlock::Text { .. }));
+    assert_eq!(
+        extra.get(FMT).unwrap().get("thought").unwrap(),
+        &json!(true)
+    );
+    assert!(matches!(
+        &resp.message.content[1],
+        ContentBlock::Text { .. }
+    ));
     assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
     assert_eq!(resp.usage.as_ref().unwrap().output_tokens, 52);
 
@@ -428,12 +510,18 @@ fn thinking_response_parses_thought_parts() {
         resp.message.clone(),
     ]);
     let (serialized, warnings) = request_from_ir(&req, &ConvertOptions::default()).unwrap();
-    assert!(warnings.is_empty(), "replay must be warning-free: {warnings:?}");
+    assert!(
+        warnings.is_empty(),
+        "replay must be warning-free: {warnings:?}"
+    );
     assert_eq!(
         serialized["contents"][1]["parts"][0]["thoughtSignature"],
         json!("dGhpbmstc2ln")
     );
-    assert_eq!(serialized["contents"][1]["parts"][0]["thought"], json!(true));
+    assert_eq!(
+        serialized["contents"][1]["parts"][0]["thought"],
+        json!(true)
+    );
 }
 
 #[test]
@@ -458,7 +546,10 @@ fn multi_candidate_response_reads_first_and_warns() {
     assert_eq!(resp.warnings.len(), 1);
     assert_eq!(resp.warnings[0].code, WarningCode::MultipleCandidates);
     // The second candidate stays reachable through raw.
-    assert_eq!(resp.raw.as_ref().unwrap()["candidates"][1]["content"]["parts"][0]["text"], "Second answer.");
+    assert_eq!(
+        resp.raw.as_ref().unwrap()["candidates"][1]["content"]["parts"][0]["text"],
+        "Second answer."
+    );
 }
 
 #[test]
@@ -473,8 +564,14 @@ fn finish_reason_mapping_covers_the_families() {
         ("IMAGE_SAFETY", StopReason::ContentFilter),
         ("IMAGE_OTHER", StopReason::ContentFilter),
         ("RECITATION", StopReason::Other("RECITATION".to_owned())),
-        ("MALFORMED_FUNCTION_CALL", StopReason::Other("MALFORMED_FUNCTION_CALL".to_owned())),
-        ("MISSING_THOUGHT_SIGNATURE", StopReason::Other("MISSING_THOUGHT_SIGNATURE".to_owned())),
+        (
+            "MALFORMED_FUNCTION_CALL",
+            StopReason::Other("MALFORMED_FUNCTION_CALL".to_owned()),
+        ),
+        (
+            "MISSING_THOUGHT_SIGNATURE",
+            StopReason::Other("MISSING_THOUGHT_SIGNATURE".to_owned()),
+        ),
         ("NO_IMAGE", StopReason::Other("NO_IMAGE".to_owned())),
     ] {
         let body = json!({
@@ -515,7 +612,10 @@ fn malformed_responses_degrade_gracefully() {
     let resp = response_to_ir(&serde_json::to_vec(&body).unwrap(), &meta()).unwrap();
     assert!(matches!(
         &resp.message.content[0],
-        ContentBlock::Image { source: ImageSource::Base64 { .. }, .. }
+        ContentBlock::Image {
+            source: ImageSource::Base64 { .. },
+            ..
+        }
     ));
 }
 
@@ -553,7 +653,10 @@ fn count_tokens_response_parses() {
     let body = include_str!("fixtures/google_generate_content/count_tokens_response.json");
     let count = format.parse_count_tokens_response(body.as_bytes()).unwrap();
     assert_eq!(count.input_tokens, 268);
-    assert_eq!(count.raw.as_ref().unwrap()["promptTokensDetails"][1]["modality"], "IMAGE");
+    assert_eq!(
+        count.raw.as_ref().unwrap()["promptTokensDetails"][1]["modality"],
+        "IMAGE"
+    );
     assert!(count.warnings.is_empty());
 
     // proto3 omits zero counts: an empty body means zero tokens.
@@ -568,10 +671,21 @@ fn error_status_maps_grpc_codes() {
     let format = GoogleGenerateContent;
     let body = include_str!("fixtures/google_generate_content/error_rate_limit.json");
     let mut headers = http::HeaderMap::new();
-    headers.insert(http::header::RETRY_AFTER, http::HeaderValue::from_static("7"));
+    headers.insert(
+        http::header::RETRY_AFTER,
+        http::HeaderValue::from_static("7"),
+    );
     let err = format.parse_error(429, &headers, body.as_bytes());
     match err {
-        Error::Api { status, kind, message, parsed, retry_after, truncated, .. } => {
+        Error::Api {
+            status,
+            kind,
+            message,
+            parsed,
+            retry_after,
+            truncated,
+            ..
+        } => {
             assert_eq!(status, 429);
             assert_eq!(kind, ApiErrorKind::RateLimit);
             assert!(message.contains("exhausted"));
@@ -594,8 +708,7 @@ fn error_status_maps_grpc_codes() {
         // Unknown codes fall back to HTTP-status classification.
         (402, "SOMETHING_NEW", ApiErrorKind::InvalidRequest),
     ] {
-        let body =
-            json!({"error": {"code": status, "message": "m", "status": grpc}}).to_string();
+        let body = json!({"error": {"code": status, "message": "m", "status": grpc}}).to_string();
         let err = format.parse_error(status, &http::HeaderMap::new(), body.as_bytes());
         match err {
             Error::Api { kind, .. } => assert_eq!(kind, expected, "for {grpc}"),
@@ -606,7 +719,13 @@ fn error_status_maps_grpc_codes() {
     // Non-JSON bodies degrade to generic classification with the raw kept.
     let err = format.parse_error(502, &http::HeaderMap::new(), b"<html>Bad Gateway</html>");
     match err {
-        Error::Api { kind, message, parsed, raw, .. } => {
+        Error::Api {
+            kind,
+            message,
+            parsed,
+            raw,
+            ..
+        } => {
             assert_eq!(kind, ApiErrorKind::ServerError);
             assert!(message.contains("Bad Gateway"));
             assert!(parsed.is_none());
@@ -624,7 +743,9 @@ fn api_format_id_and_dispatch() {
     assert_eq!(format.id(), FMT);
     // parse_request goes through the same typed-layer entry point.
     let body = json!({"contents": [{"role": "user", "parts": [{"text": "hi"}]}]});
-    let (ir, _) = format.parse_request(&serde_json::to_vec(&body).unwrap()).unwrap();
+    let (ir, _) = format
+        .parse_request(&serde_json::to_vec(&body).unwrap())
+        .unwrap();
     assert_eq!(ir.messages[0].text(), "hi");
     assert!(matches!(
         format.parse_request(b"[1, 2]"),

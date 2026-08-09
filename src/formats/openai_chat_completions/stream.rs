@@ -41,7 +41,11 @@ use crate::ir::{BlockDelta, ContentBlock, Extra, StreamEvent};
 use super::{FORMAT, to_ir, tool_call_reserved_key};
 
 /// Parse-side warning shorthand.
-fn warn(code: WarningCode, location: impl Into<String>, message: impl Into<String>) -> ConversionWarning {
+fn warn(
+    code: WarningCode,
+    location: impl Into<String>,
+    message: impl Into<String>,
+) -> ConversionWarning {
     ConversionWarning::from_format(code, FORMAT, location, message)
 }
 
@@ -153,9 +157,11 @@ impl ChatCompletionsStreamParser {
                 let index = self.alloc_index();
                 let block = match kind {
                     Channel::Content => ContentBlock::text(""),
-                    Channel::Reasoning => {
-                        ContentBlock::Thinking { text: None, signature: None, extra: Extra::new() }
-                    }
+                    Channel::Reasoning => ContentBlock::Thinking {
+                        text: None,
+                        signature: None,
+                        extra: Extra::new(),
+                    },
                     Channel::Refusal => {
                         let mut ns = Map::new();
                         ns.insert("refusal".to_owned(), Value::from(true));
@@ -200,17 +206,21 @@ impl ChatCompletionsStreamParser {
             }
         };
         let function = fragment.get("function");
-        let name_fragment = function
-            .and_then(|f| f.get("name"))
-            .and_then(Value::as_str);
+        let name_fragment = function.and_then(|f| f.get("name")).and_then(Value::as_str);
         let args_fragment = function
             .and_then(|f| f.get("arguments"))
             .and_then(Value::as_str);
         let is_new = !self.tool_calls.contains_key(&index);
         if is_new {
             let block_index = self.alloc_index();
-            let mut state = ToolCallState { block_index, ..ToolCallState::default() };
-            state.id = fragment.get("id").and_then(Value::as_str).map(str::to_owned);
+            let mut state = ToolCallState {
+                block_index,
+                ..ToolCallState::default()
+            };
+            state.id = fragment
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             state.name = name_fragment.unwrap_or_default().to_owned();
             if state.id.is_none() && state.name.is_empty() {
                 warnings.push(warn(
@@ -329,7 +339,9 @@ impl ChatCompletionsStreamParser {
 /// unknowns at the top, `function` unknowns nested, non-`function` types
 /// under the reserved `type` key.
 fn collect_fragment_extras(fragment: &Value, state: &mut ToolCallState) {
-    let Some(obj) = fragment.as_object() else { return };
+    let Some(obj) = fragment.as_object() else {
+        return;
+    };
     for (key, value) in obj {
         match key.as_str() {
             "index" | "id" | "function" => {}

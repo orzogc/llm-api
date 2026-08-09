@@ -433,7 +433,10 @@ mod tests {
         });
         let req: GenerateContentRequest = serde_json::from_value(src.clone()).unwrap();
         assert_eq!(req.contents[0].parts[0].text.as_deref(), Some("hi"));
-        assert_eq!(req.contents[0].parts[0].extra["partMetadata"], json!({"k": 1}));
+        assert_eq!(
+            req.contents[0].parts[0].extra["partMetadata"],
+            json!({"k": 1})
+        );
         assert_eq!(req.contents[0].extra["customContentField"], json!(true));
         assert!(req.extra.contains_key("safetySettings"));
         assert_eq!(serde_json::to_value(&req).unwrap(), src);
@@ -460,7 +463,10 @@ mod tests {
         }))
         .unwrap();
         assert!(resp.candidates.is_empty());
-        assert_eq!(resp.prompt_feedback.unwrap().block_reason.as_deref(), Some("SAFETY"));
+        assert_eq!(
+            resp.prompt_feedback.unwrap().block_reason.as_deref(),
+            Some("SAFETY")
+        );
 
         // A final stream chunk may carry content without parts.
         let cand: Candidate = serde_json::from_value(json!({
