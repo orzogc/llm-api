@@ -1,7 +1,10 @@
 # llm-api Design
 
 Status: v1 design, agreed 2026-08-08 and revised through subsequent audit
-rounds (see git history). Implementation not started.
+rounds (see git history). Implemented 2026-08-09; sections updated where
+implementation against the official docs refined a decision (see the git
+history for the audit trail). `docs/impl_contract.md` records the binding
+cross-format implementation decisions layered on top of this document.
 
 `llm-api` is a Rust library providing a unified intermediate representation (IR)
 for LLM chat APIs, bidirectional conversion between the IR and multiple provider
@@ -252,6 +255,9 @@ absent.
 `Thinking { text, signature, extra }`:
 
 - `text`: plaintext chain of thought (CC dialects) or joined summary text.
+  Note: replaying `reasoning_content` in **input** messages is rejected by
+  some dialects (DeepSeek documents a 400); the library maps the channel
+  faithfully and returns the upstream error unchanged.
 - `signature`: the opaque payload required for replay — Anthropic `signature`
   (also covers `redacted_thinking.data`), OpenAI Responses `encrypted_content`,
   Google `thoughtSignature` (attached to the signed part; carried in the
@@ -317,7 +323,9 @@ pub enum ToolChoice { Auto, None, Required, Tool { name: String } }
   ¹ CC tool messages are text-only. Google's `FunctionResponsePart` union has
   a single member, `inlineData` (base64; `fileData` exists only on Vertex),
   so URL/FileId tool images have no zero-IO channel there. `name` is required
-  by Google's `functionResponse` and optional elsewhere. `is_error: true` is
+  by Google's `functionResponse` and optional elsewhere (on CC it maps to the
+  tool message's `name` field — absent from the current official schema but
+  accepted/required by common dialects). `is_error: true` is
   native to Anthropic (`is_error`) **and Google** (the documented
   `functionResponse.response` failure key: `{"error": …}` instead of
   `{"output": …}`); CC and Responses drop it with a **semantic** warning — an
