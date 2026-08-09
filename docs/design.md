@@ -71,8 +71,8 @@ code is written for these in v1.
   `serde_json`, `http`, `bytes`, `futures-core`, plus a small date-time crate
   for model timestamps (§ 13).
 - Feature `reqwest`: default `HttpClient` implementation.
-- MSRV: decided after implementation with `cargo-msrv`, then declared as
-  `rust-version`; policy is to follow a recent stable.
+- MSRV: 1.88 (measured with `cargo-msrv`, declared as `rust-version`);
+  policy is to follow a recent stable.
 - All public IR types are `#[non_exhaustive]`; enums additionally mark
   struct-like variants `#[non_exhaustive]` (enum-level `#[non_exhaustive]`
   alone does not cover variant fields, which would otherwise freeze a

@@ -2,6 +2,7 @@
 name = "llm-api"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT"
 description = "Unified intermediate representation and bidirectional conversion for LLM chat APIs, with a pluggable HTTP transport"
 
