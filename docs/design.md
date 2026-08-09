@@ -169,7 +169,11 @@ lack a role are defined in § 7.1. Messages are never dropped or reordered by
 conversion (outside the explicit opt-in policies of § 7.3); splits/merges
 required by a target format are deterministic and
 recorded in the message's `round_trip` metadata so the original shape is
-restored on the way back.
+restored on the way back. Round-trip metadata flows in one direction:
+format→IR parsers **attach** it (recording the original wire shape, e.g.
+which IR messages were split out of one wire turn), and IR→format
+serialization **consumes** it (wire JSON cannot carry markers). IR built by
+hand has no metadata and serializes to the canonical shape.
 
 `RoundTripMeta` is an opaque, versioned struct: serializable (so persisted IR
 keeps it) but with no public fields. It is validated defensively on use — a
@@ -259,6 +263,14 @@ absent.
   `ConvertOptions.thinking_as_text: bool` (default `false`) instead converts
   plaintext thinking into the target's thinking-text channel — useful when
   switching between open-weight models whose chains of thought are plaintext.
+- Provenance is namespace-based: a block is native to target `F` when its
+  `extra` carries the `F` namespace, or when it has a signature and **no**
+  format namespace at all (parsers leave no namespace when nothing beyond
+  `text`/`signature` needs preserving, so provenance can be unknowable; such
+  blocks are replayed optimistically — the upstream validates signatures
+  authoritatively). Plaintext-only thinking is native to CC (its channel is
+  plaintext); on signature-validated targets it follows the cross-provider
+  rule above.
 
 ### 4.5 Tools
 
@@ -607,8 +619,10 @@ message's `extra` in the IR or by the indexed `on_message` hook.
   `systemInstruction` (same ordering); mid-conversation system → `user` +
   warning.
 - **OpenAI CC**: `Request.system` is inserted at the front of `messages` as a
-  `system` message (a `round_trip` marker restores it on parse); in-array
-  system/developer messages pass through natively.
+  `system` message; in-array system/developer messages pass through natively.
+  The parser keeps leading system messages in-array (it never hoists them to
+  `Request.system`) — so IR→CC→IR canonicalizes `Request.system` into a
+  leading in-array message while the JSON round-trip stays the identity.
 - **Responses**: `Request.system` → top-level `instructions` (text blocks
   joined with `\n\n`;
   cache hints warn — put system in the message array if breakpoints are
@@ -661,7 +675,9 @@ blocks.
 ### 7.3 Orphan tool calls and missing thinking
 
 - `ConvertOptions.orphan_tool_calls` (applies to trailing assistant tool calls
-  without matching results — e.g. an interrupted agent):
+  without matching results — e.g. an interrupted agent; *trailing* means in
+  the final message of the array, and a call is *matched* by a later
+  `ToolResult` with the same id — same name when the call has no id):
   - `Passthrough` (default): send as-is; the upstream error is returned.
   - `DropTrailing`: remove the unmatched trailing `ToolCall` blocks (and the
     whole message if it becomes empty), with a warning.
