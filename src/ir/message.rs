@@ -29,14 +29,18 @@ pub struct RoundTripMeta {
 impl RoundTripMeta {
     const VERSION: u64 = 1;
 
-    fn v1(fields: Map<String, Value>) -> Self {
+    /// Builds a v1 payload from format-specific fields (crate-internal:
+    /// format parsers record their markers through this).
+    pub(crate) fn v1(fields: Map<String, Value>) -> Self {
         let mut map = Map::new();
         map.insert("v".to_owned(), Value::from(Self::VERSION));
         map.extend(fields);
         Self { raw: Value::Object(map) }
     }
 
-    fn v1_field(&self, key: &str) -> Option<&Value> {
+    /// Reads a field of a valid v1 payload; `None` for malformed or
+    /// future-version payloads (defensive degradation, § 4.2).
+    pub(crate) fn v1_field(&self, key: &str) -> Option<&Value> {
         let obj = self.raw.as_object()?;
         if obj.get("v").and_then(Value::as_u64) != Some(Self::VERSION) {
             return None;

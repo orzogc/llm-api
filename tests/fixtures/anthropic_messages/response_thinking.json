@@ -1,0 +1,18 @@
+{
+  "id": "msg_think",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-5",
+  "content": [
+    {"type": "thinking", "thinking": "GCD(1071, 462) = 21.", "signature": "EqQBCgIYAhIM"},
+    {"type": "redacted_thinking", "data": "EmwKAhgBEgy3"},
+    {"type": "text", "text": "The answer is 21."}
+  ],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 50,
+    "output_tokens": 200,
+    "output_tokens_details": {"thinking_tokens": 150}
+  }
+}

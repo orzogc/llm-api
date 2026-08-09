@@ -1,0 +1,41 @@
+{
+  "model": "claude-sonnet-5",
+  "max_tokens": 256,
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "doc body"}, "title": "Doc"},
+        {"type": "image", "source": {"type": "url", "url": "https://x/y.png"}},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}, "cache_control": {"type": "ephemeral"}},
+        {"type": "image", "source": {"type": "file", "file_id": "file_abc"}},
+        {"type": "text", "text": "describe", "citations": [{"type": "char_location", "cited_text": "doc body", "document_index": 0, "document_title": "Doc", "start_char_index": 0, "end_char_index": 8}]}
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {"type": "thinking", "thinking": "reasoning...", "signature": "sig-1"},
+        {"type": "redacted_thinking", "data": "opaque-blob"},
+        {"type": "tool_use", "id": "toolu_9", "name": "lookup", "input": {"q": "x"}, "caller": {"type": "direct"}}
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_9",
+          "content": [
+            {"type": "text", "text": "found", "cache_control": {"type": "ephemeral"}},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "BBBB"}},
+            {"type": "search_result", "content": [{"type": "text", "text": "row"}], "source": "db", "title": "hit"}
+          ],
+          "is_error": false,
+          "cache_control": {"type": "ephemeral", "ttl": "5m"}
+        },
+        {"type": "tool_result", "tool_use_id": "toolu_10"}
+      ]
+    }
+  ]
+}

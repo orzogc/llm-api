@@ -1,0 +1,10 @@
+{
+  "model": "claude-sonnet-5",
+  "max_tokens": 64,
+  "messages": [
+    {"role": "system", "content": [{"type": "text", "text": "leading in-array system"}]},
+    {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+    {"role": "system", "content": [{"type": "text", "text": "mid-conversation update"}]},
+    {"role": "user", "content": [{"type": "text", "text": "go on"}]}
+  ]
+}

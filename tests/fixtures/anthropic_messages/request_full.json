@@ -1,0 +1,33 @@
+{
+  "model": "claude-sonnet-5",
+  "max_tokens": 1024,
+  "system": "Be helpful.",
+  "messages": [
+    {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+    {"role": "assistant", "content": [{"type": "text", "text": "hello"}]},
+    {"role": "user", "content": [{"type": "text", "text": "again"}], "name": "bob"}
+  ],
+  "metadata": {"user_id": "u-1", "session": "s-9"},
+  "stop_sequences": ["END"],
+  "temperature": 0.5,
+  "top_p": 0.9,
+  "top_k": 40,
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Get the weather.",
+      "input_schema": {"type": "object", "properties": {"location": {"type": "string"}}},
+      "strict": true,
+      "cache_control": {"type": "ephemeral"}
+    },
+    {"type": "web_search_20260209", "name": "web_search", "max_uses": 3}
+  ],
+  "tool_choice": {"type": "auto", "disable_parallel_tool_use": true},
+  "thinking": {"type": "enabled", "budget_tokens": 2048, "display": "omitted"},
+  "output_config": {
+    "effort": "high",
+    "format": {"type": "json_schema", "schema": {"type": "object"}},
+    "task_budget": {"type": "tokens", "total": 100}
+  },
+  "service_tier": "auto"
+}
