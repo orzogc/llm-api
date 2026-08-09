@@ -57,7 +57,8 @@ and pick the upstream API format at call time.
 OpenAI Responses WebSocket transport (a transport for the same format, not a new
 format), Google Interactions API (a fifth HTTP format; note its streaming is
 SSE, not WebSocket), format-to-format conversion, audio/video/document input,
-image generation. The IR reserves room via `#[non_exhaustive]` enums/structs; no
+image generation, and Google tuned models (`tunedModels/…` resource names —
+tuning survives only on the retiring Vertex Gemini 2.5 line). The IR reserves room via `#[non_exhaustive]` enums/structs; no
 code is written for these in v1.
 
 ## 3. Crate layout
@@ -286,9 +287,10 @@ pub enum ToolChoice { Auto, None, Required, Tool { name: String } }
   delivers string fragments; invalid JSON from a model is preserved). Helper
   `arguments_json() -> Result<Value>` parses on demand. Serializing to formats
   whose native representation is an object (Anthropic `input`, Google `args`)
-  parses the string; invalid JSON is a `ConversionError` in **both** modes —
-  the library never fabricates arguments the model did not produce (the error
-  carries the raw string for diagnosis).
+  parses the string; invalid JSON **or a non-object value** is a
+  `ConversionError` in **both** modes (Anthropic `input` and Google `args`
+  require JSON objects) — the library never fabricates arguments the model
+  did not produce (the error carries the raw string for diagnosis).
 - `ToolResult.content` is a `Vec<ToolOutputBlock>` (§ 4.3) — text, images and
   opaque nodes only. Tool-result image mapping per source:
 
@@ -337,10 +339,17 @@ pub enum ToolChoice { Auto, None, Required, Tool { name: String } }
 Allowed-tool lists (`allowed_tools`, `allowedFunctionNames` beyond one name)
 and hosted/built-in tools are not modeled; use `extra`.
 
-`parallel_tool_calls`: OpenAI CC/Responses `parallel_tool_calls`; Anthropic
-`tool_choice.disable_parallel_tool_use` (inverted); Google has no equivalent —
-dropping `Some(false)` (a serial-execution constraint) is a **semantic**
-warning, dropping `Some(true)` is cosmetic.
+`parallel_tool_calls`: OpenAI CC/Responses `parallel_tool_calls`. Anthropic
+nests the inverted flag inside the tool-choice object, so the combinations
+are pinned: `tool_choice: Some(x)` → attach `disable_parallel_tool_use` to
+`x` (meaningless on `ToolChoice::None` — cosmetic warning, not emitted);
+`tool_choice: None` + `Some(false)` → synthesize
+`{"type":"auto","disable_parallel_tool_use":true}`; `tool_choice: None` +
+`Some(true)` → emit nothing (parallel is Anthropic's default —
+canonicalization); a request without `tools` makes the setting meaningless on
+any format — cosmetic warning. Google has no equivalent — dropping
+`Some(false)` (a serial-execution constraint) is a **semantic** warning,
+dropping `Some(true)` is cosmetic.
 
 ### 4.6 Sampling parameters
 
@@ -421,7 +430,12 @@ First-class block-level cache hints plus a top-level cache key:
   equivalent — warning); Google: warning. Anthropic accepts `cache_control`
   on every request block except thinking, so `ToolCall`/`ToolResult` hints map
   natively there; CC/Responses breakpoints exist only on content parts, so
-  hints on `ToolCall` blocks warn (cosmetic).
+  hints on `ToolCall` blocks warn (cosmetic). Cache hints on **nested**
+  `ToolOutputBlock`s (inside a tool result) are dropped with a cosmetic
+  warning on every target in v1 — the supported breakpoint channels are the
+  `ToolResult` block itself (Anthropic) and regular content parts (OpenAI);
+  if implementation verifies nested support somewhere, relaxing this is
+  non-breaking (fewer warnings).
 - `Request.cache_key` → OpenAI `prompt_cache_key` (both APIs); Anthropic and
   Google: warning.
 - OpenAI top-level `prompt_cache_options` and Google `cachedContent` (a
@@ -520,7 +534,8 @@ message's `extra` in the IR or by the indexed `on_message` hook.
       pub location: String,          // JSON Pointer: build-side warnings point into
                                      // the final target JSON, parse-side warnings
                                      // into the JSON being consumed
-      pub target_format: String,
+      pub format: String,                 // the provider format involved
+      pub direction: ConversionDirection, // ToFormat (build) | FromFormat (parse)
       pub overridden: bool,          // `extra` explicitly addressed this path (§ below)
       pub message: String,
   }
@@ -535,8 +550,13 @@ message's `extra` in the IR or by the indexed `on_message` hook.
   `functionResponse.name`) is never invented: its absence is a
   `ConversionError` in both modes — lenient mode drops extras, it does not
   fabricate.
-- Default mode is lenient. `ConvertOptions.strict: bool` turns any `Semantic`
-  warning into an error.
+- Default mode is lenient. `ConvertOptions.strict: bool` turns any
+  non-overridden `Semantic` warning from the **IR→request conversion** into
+  an error. Parse-side warnings (multi-candidate skipped, partial mappings,
+  recoverable malformed data — non-streaming or streaming) always report and
+  never fail the call: the response already happened and was billed, so the
+  client never discards it — inspect `Response.warnings` /
+  `StreamItem.warnings` and react in application code.
 - Warnings survive the client path: `Response.warnings` carries request-build
   and response-parse warnings — parsers fill parse-side warnings in directly,
   the client prepends build-side ones. A streaming call exposes request-build
@@ -780,7 +800,8 @@ including reasoning": CC `completion_tokens` and Anthropic `output_tokens`
 already are (both documented as reasoning-inclusive), while Google's
 `candidatesTokenCount` excludes thoughts — the Google parser sums
 `candidatesTokenCount + thoughtsTokenCount`. Visible output =
-`output_tokens - reasoning_tokens`. `reasoning_tokens` ← OpenAI
+`output_tokens - reasoning_tokens` (saturating — misbehaving provider data
+must not underflow). `reasoning_tokens` ← OpenAI
 `reasoning_tokens` / Anthropic `output_tokens_details.thinking_tokens` /
 Google `thoughtsTokenCount`.
 
@@ -986,6 +1007,7 @@ pub struct ProviderConfig {
     pub extra_query: Vec<(String, String)>,
     pub convert: ConvertOptions,
     pub format_options: FormatOptions,        // per-format knobs
+    pub limits: Limits,                       // body/event size caps, § below
     pub hooks: RequestHooks,
     pub chat: EndpointConfig,                 // required
     pub models: Option<EndpointConfig>,       // capability-level decoupling
@@ -1027,8 +1049,12 @@ pub enum Override<T> { Inherit, Set(T), Disable }
   `responses/input_tokens`; Anthropic chat `messages`, count
   `messages/count_tokens`; Google chat `models/{model}:generateContent`
   (`:streamGenerateContent` when streaming), count `models/{model}:countTokens`;
-  models list `models` on all four. `{model}` is percent-encoded as a path
-  segment. `Full` serves nonstandard paths (`/chat`, `/completions`, bare
+  models list `models` on all four. `{model}` is percent-encoded as a single
+  path segment after stripping a leading `models/` prefix; Google
+  `tunedModels/…` resource names are out of scope for v1 and return
+  `Error::NotSupported` instead of producing a broken URL (tuning survives
+  only on the retiring Vertex Gemini 2.5 line). `Full` serves nonstandard
+  paths (`/chat`, `/completions`, bare
   `/api`, no `/v1` prefix, …); for Google-format chat a `Full` URL should
   contain `{method}`, otherwise the same URL is used for both call modes.
   Query rules: format-required keys (`alt=sse`) are protected — a
@@ -1068,6 +1094,10 @@ pub enum Override<T> { Inherit, Set(T), Disable }
   extra_query, include_raw }` — field-wise merge with the provider config,
   per-call wins. Format, URL and auth are deliberately not per-call
   (use another `ProviderConfig` for that).
+- `Limits` (`#[non_exhaustive]`, generous defaults): size caps for
+  non-streaming bodies, error bodies and individual SSE events, bounding
+  memory against misbehaving proxies; exceeding a cap fails with
+  `Error::Parse`.
 - Default auth header per format: `Authorization: Bearer` (OpenAI family),
   `x-api-key` + `anthropic-version` (Anthropic), `x-goog-api-key` (Google —
   header, not query, to keep keys out of logs).
@@ -1104,13 +1134,21 @@ IR by that format, and the result is a semantic approximation only.
   model-list call. Google has no creation time (`None`).
 - `list_models` auto-paginates to exhaustion (Anthropic cursor via
   `after_id`/`has_more`; Google `pageToken` with `pageSize` up to 1000; OpenAI
-  is a single page). Fine-grained pagination control = use the typed format
-  layer directly.
-- `count_tokens(&Request) -> TokenCount { input_tokens, raw }` (accepts
-  `CallOptions`, § 12) — endpoints:
+  is a single page). A page token/cursor equal to one already seen aborts
+  with `Error::Parse` (malformed pagination) instead of looping forever.
+  Fine-grained pagination control = use the typed format layer directly.
+- `count_tokens(&Request) -> TokenCount { input_tokens, raw, warnings }`
+  (accepts `CallOptions`, § 12) — endpoints:
   OpenAI Responses `POST /v1/responses/input_tokens`, Anthropic
   `POST /v1/messages/count_tokens`, Google `:countTokens`. OpenAI CC has no
-  endpoint → `Error::NotSupported`. The library never estimates tokens locally.
+  endpoint → `Error::NotSupported`. The library never estimates tokens
+  locally. `TokenCount.warnings` carries the chat-build warnings plus the
+  count adapter's own: fields the converter itself generated that the
+  endpoint ignores by design (sampling knobs) are filtered silently; fields
+  the adapter drops that it did not generate (injected via `extra`, hooks or
+  a dialect) get a cosmetic warning — the library cannot know whether they
+  would have affected the count; a decoupled count format adds one cosmetic
+  warning marking the result as a semantic approximation.
 
 ## 14. Errors
 
