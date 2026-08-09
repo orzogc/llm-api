@@ -1,0 +1,65 @@
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "What's the weather in Paris?", "partMetadata": {"k": 1}}],
+      "contentTag": "first"
+    },
+    {
+      "role": "model",
+      "parts": [
+        {"text": "Let me look that up.", "thought": true, "thoughtSignature": "dGhvdWdodC1zaWc="},
+        {"functionCall": {"id": "call-1", "name": "get_weather", "args": {"city": "Paris"}}, "thoughtSignature": "Y2FsbC1zaWc="}
+      ]
+    },
+    {
+      "role": "user",
+      "parts": [
+        {"functionResponse": {"id": "call-1", "name": "get_weather", "response": {"output": "22°C, sunny"}}},
+        {"text": "Great, and tomorrow?"}
+      ]
+    },
+    {"role": "model", "parts": [{"text": "Tomorrow looks similar."}]},
+    {
+      "role": "user",
+      "parts": [
+        {"inlineData": {"mimeType": "image/png", "data": "aW1n"}},
+        {"fileData": {"mimeType": "image/jpeg", "fileUri": "https://generativelanguage.googleapis.com/v1beta/files/abc"}},
+        {"executableCode": {"language": "PYTHON", "code": "print(1)"}}
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "name": "get_weather",
+          "description": "Get the weather for a city.",
+          "parametersJsonSchema": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"]
+          },
+          "behavior": "BLOCKING"
+        }
+      ]
+    },
+    {"googleSearch": {}}
+  ],
+  "toolConfig": {"functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": ["get_weather"]}},
+  "systemInstruction": {"parts": [{"text": "You are a helpful weather bot."}]},
+  "generationConfig": {
+    "stopSequences": ["END"],
+    "responseMimeType": "application/json",
+    "responseJsonSchema": {"type": "object", "properties": {"answer": {"type": "string"}}},
+    "maxOutputTokens": 1024,
+    "temperature": 0.7,
+    "topP": 0.9,
+    "topK": 40,
+    "seed": 7,
+    "presencePenalty": 0.1,
+    "frequencyPenalty": 0.2,
+    "thinkingConfig": {"includeThoughts": true, "thinkingLevel": "HIGH", "thinkingBudget": 1024}
+  },
+  "safetySettings": [{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"}]
+}

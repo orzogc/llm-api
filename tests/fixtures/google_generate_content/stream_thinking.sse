@@ -1,0 +1,8 @@
+data: {"candidates":[{"content":{"parts":[{"text":"**Plan**","thought":true}],"role":"model"},"index":0}],"usageMetadata":{"promptTokenCount":10,"totalTokenCount":10},"modelVersion":"gemini-3-pro-preview","responseId":"r-think"}
+
+data: {"candidates":[{"content":{"parts":[{"text":" check the weather","thought":true,"thoughtSignature":"c2lnLTE="}],"role":"model"},"index":0}],"responseId":"r-think"}
+
+data: {"candidates":[{"content":{"parts":[{"text":"I'll check."}],"role":"model"},"index":0}],"responseId":"r-think"}
+
+data: {"candidates":[{"content":{"parts":[{"functionCall":{"id":"c1","name":"get_weather","args":{"city":"Paris"}},"thoughtSignature":"c2lnLTI="}],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":9,"thoughtsTokenCount":31,"totalTokenCount":50},"responseId":"r-think"}
+

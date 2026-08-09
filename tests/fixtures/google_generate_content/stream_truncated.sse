@@ -1,0 +1,4 @@
+data: {"candidates":[{"content":{"parts":[{"text":"Half a"}],"role":"model"},"index":0}],"usageMetadata":{"promptTokenCount":5,"totalTokenCount":5},"modelVersion":"gemini-2.5-flash","responseId":"r-trunc"}
+
+data: {"candidates":[{"content":{"parts":[{"text":" sentence"}],"role":"model"},"index":0}],"responseId":"r-trunc"}
+

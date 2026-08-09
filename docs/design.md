@@ -317,9 +317,13 @@ pub enum ToolChoice { Auto, None, Required, Tool { name: String } }
   ¹ CC tool messages are text-only. Google's `FunctionResponsePart` union has
   a single member, `inlineData` (base64; `fileData` exists only on Vertex),
   so URL/FileId tool images have no zero-IO channel there. `name` is required
-  by Google's `functionResponse` and optional elsewhere. `is_error` is native
-  to Anthropic only; other targets drop it with a **semantic** warning — an
-  error result would otherwise read as success.
+  by Google's `functionResponse` and optional elsewhere. `is_error: true` is
+  native to Anthropic (`is_error`) **and Google** (the documented
+  `functionResponse.response` failure key: `{"error": …}` instead of
+  `{"output": …}`); CC and Responses drop it with a **semantic** warning — an
+  error result would otherwise read as success. `is_error: Some(false)`
+  equals the default reading everywhere and canonicalizes to absent,
+  silently.
 - Google mapping uses `parametersJsonSchema` (standard JSON Schema
   passthrough), not the OpenAPI-style `parameters`.
 - `FunctionTool.parameters: None` means "no parameters". CC: field omitted

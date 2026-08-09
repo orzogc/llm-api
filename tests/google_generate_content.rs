@@ -1,0 +1,1083 @@
+//! Build-side (IR → request) tests for the `google_generate_content` format:
+//! per-field mappings of design § 4.5–§ 4.9, the § 7 message rules, warnings,
+//! strict mode, hooks and endpoint URLs.
+
+use llm_api::formats::google_generate_content::{GoogleGenerateContent, request_from_ir};
+use llm_api::{
+    ApiFormat, BuildCtx, CacheHint, CallMode, ContentBlock, ConversionError, ConversionWarning,
+    ConvertOptions, Effort, EndpointUrl, Error, FunctionTool, ImageSource, Message,
+    OrphanToolCalls, OutputFormat, Reasoning, Request, RequestHooks, Role, Tool, ToolChoice,
+    ToolOutputBlock, WarningCode, WarningSeverity,
+};
+use serde_json::{Value, json};
+
+const FMT: &str = "google_generate_content";
+
+fn ctx(mode: CallMode) -> BuildCtx {
+    BuildCtx::new(
+        EndpointUrl::base("https://generativelanguage.googleapis.com/v1beta").unwrap(),
+        "gemini-2.5-pro",
+        mode,
+    )
+}
+
+fn build(req: &Request) -> (Value, Vec<ConversionWarning>) {
+    request_from_ir(req, &ConvertOptions::default()).unwrap()
+}
+
+fn codes(warnings: &[ConversionWarning]) -> Vec<WarningCode> {
+    warnings.iter().map(|w| w.code.clone()).collect()
+}
+
+fn find<'a>(warnings: &'a [ConversionWarning], code: &WarningCode) -> &'a ConversionWarning {
+    warnings
+        .iter()
+        .find(|w| w.code == *code)
+        .unwrap_or_else(|| panic!("expected warning {code:?}, got {warnings:?}"))
+}
+
+fn user_req(text: &str) -> Request {
+    Request::with_messages(vec![Message::user_text(text)])
+}
+
+// ---------------------------------------------------------------- URLs, auth
+
+#[test]
+fn chat_url_differs_by_call_mode() {
+    let format = GoogleGenerateContent;
+    let req = user_req("hi");
+
+    let unary = format.build_request(&req, &ctx(CallMode::Unary)).unwrap();
+    assert_eq!(
+        unary.url.to_string(),
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
+    );
+    assert_eq!(unary.method, http::Method::POST);
+    assert_eq!(unary.headers.get("content-type").unwrap(), "application/json");
+    let auth = unary.auth.unwrap();
+    assert_eq!(auth.header.as_str(), "x-goog-api-key");
+    assert_eq!(auth.prefix, None);
+
+    let streaming = format.build_request(&req, &ctx(CallMode::Streaming)).unwrap();
+    assert_eq!(
+        streaming.url.to_string(),
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+    );
+    // Streaming is expressed in the URL, not the body.
+    let body: Value = serde_json::from_slice(&streaming.body).unwrap();
+    assert!(body.get("stream").is_none());
+}
+
+#[test]
+fn model_prefix_stripped_and_tuned_models_rejected() {
+    let format = GoogleGenerateContent;
+    let req = user_req("hi");
+
+    let mut c = ctx(CallMode::Unary);
+    c.model = "models/gemini-2.5-flash".to_owned();
+    let built = format.build_request(&req, &c).unwrap();
+    assert!(built.url.to_string().ends_with("/models/gemini-2.5-flash:generateContent"));
+
+    c.model = "tunedModels/my-tune".to_owned();
+    assert!(matches!(format.build_request(&req, &c), Err(Error::NotSupported(_))));
+
+    c.model = String::new();
+    assert!(matches!(format.build_request(&req, &c), Err(Error::Conversion(_))));
+}
+
+#[test]
+fn protected_alt_query_conflicts() {
+    let format = GoogleGenerateContent;
+    let mut c = ctx(CallMode::Streaming);
+    c.extra_query.push(("alt".to_owned(), "json".to_owned()));
+    let err = format.build_request(&user_req("hi"), &c).unwrap_err();
+    assert!(matches!(
+        err,
+        Error::Conversion(ConversionError::ProtectedQueryKey { .. })
+    ));
+
+    // Unary mode does not protect `alt`.
+    let mut c = ctx(CallMode::Unary);
+    c.extra_query.push(("alt".to_owned(), "json".to_owned()));
+    let built = format.build_request(&user_req("hi"), &c).unwrap();
+    assert!(built.url.to_string().ends_with(":generateContent?alt=json"));
+}
+
+// ------------------------------------------------------- sampling parameters
+
+#[test]
+fn sampling_parameters_all_map_natively() {
+    let mut req = user_req("hi");
+    req.max_output_tokens = Some(1024);
+    req.temperature = Some(0.5);
+    req.top_p = Some(0.9);
+    req.top_k = Some(40);
+    req.stop_sequences = Some(vec!["END".to_owned()]);
+    req.seed = Some(7);
+    req.frequency_penalty = Some(0.25);
+    req.presence_penalty = Some(0.5);
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        body["generationConfig"],
+        json!({
+            "maxOutputTokens": 1024,
+            "temperature": 0.5,
+            "topP": 0.9,
+            "topK": 40,
+            "stopSequences": ["END"],
+            "seed": 7,
+            "frequencyPenalty": 0.25,
+            "presencePenalty": 0.5,
+        })
+    );
+}
+
+#[test]
+fn metadata_and_cache_key_drop_with_cosmetic_warnings() {
+    let mut req = user_req("hi");
+    let mut metadata = serde_json::Map::new();
+    metadata.insert("session".to_owned(), json!("abc"));
+    req.metadata = Some(metadata);
+    req.cache_key = Some("cache-1".to_owned());
+    let (body, warnings) = build(&req);
+    assert!(body.get("metadata").is_none());
+    let m = find(&warnings, &WarningCode::MetadataDropped);
+    assert_eq!(m.severity, WarningSeverity::Cosmetic);
+    assert_eq!(m.location, "/metadata");
+    assert!(m.message.contains("session"));
+    let c = find(&warnings, &WarningCode::CacheKeyDropped);
+    assert_eq!(c.severity, WarningSeverity::Cosmetic);
+}
+
+// ------------------------------------------------------------- system rules
+
+#[test]
+fn system_field_and_leading_system_messages_hoist_in_order() {
+    let mut req = Request::with_messages(vec![
+        Message::system_text("first message rule"),
+        Message::system_text("second message rule"),
+        Message::user_text("hi"),
+    ]);
+    req.system = Some(vec![ContentBlock::text("request-level rule")]);
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        body["systemInstruction"],
+        json!({"parts": [
+            {"text": "request-level rule"},
+            {"text": "first message rule"},
+            {"text": "second message rule"},
+        ]})
+    );
+    assert_eq!(body["contents"], json!([{"role": "user", "parts": [{"text": "hi"}]}]));
+}
+
+#[test]
+fn mid_system_and_developer_downgrade_to_user() {
+    let req = Request::with_messages(vec![
+        Message::user_text("hi"),
+        Message::system_text("mid-conversation rule"),
+        Message::assistant_text("ok"),
+        Message::developer_text("dev note"),
+    ]);
+    let (body, warnings) = build(&req);
+    assert!(body.get("systemInstruction").is_none());
+    let downgrades: Vec<_> =
+        warnings.iter().filter(|w| w.code == WarningCode::RoleDowngraded).collect();
+    assert_eq!(downgrades.len(), 2);
+    assert!(downgrades.iter().all(|w| w.severity == WarningSeverity::Semantic));
+    // hi + mid-system merge into one user turn; dev note becomes its own
+    // user turn after the model turn.
+    assert_eq!(
+        body["contents"],
+        json!([
+            {"role": "user", "parts": [{"text": "hi"}, {"text": "mid-conversation rule"}]},
+            {"role": "model", "parts": [{"text": "ok"}]},
+            {"role": "user", "parts": [{"text": "dev note"}]},
+        ])
+    );
+}
+
+#[test]
+fn invalid_system_blocks_error() {
+    // Request.system allows Text only — even Opaque is rejected there.
+    let mut req = user_req("hi");
+    req.system = Some(vec![ContentBlock::opaque(FMT, json!({"text": "x"}))]);
+    let err = request_from_ir(&req, &ConvertOptions::default()).unwrap_err();
+    assert!(matches!(
+        err,
+        Error::Conversion(ConversionError::InvalidBlockForRole { role: Role::System, .. })
+    ));
+
+    // An image in an in-array system message is invalid per § 7.4.
+    let req = Request::with_messages(vec![
+        Message::new(Role::System, vec![ContentBlock::image_url("https://x/y.png")]),
+        Message::user_text("hi"),
+    ]);
+    let err = request_from_ir(&req, &ConvertOptions::default()).unwrap_err();
+    assert!(matches!(
+        err,
+        Error::Conversion(ConversionError::InvalidBlockForRole { role: Role::System, .. })
+    ));
+
+    // A Google-owned opaque block in an in-array system message is fine.
+    let req = Request::with_messages(vec![
+        Message::new(
+            Role::System,
+            vec![
+                ContentBlock::text("rule"),
+                ContentBlock::opaque(FMT, json!({"text": "opaque rule"})),
+            ],
+        ),
+        Message::user_text("hi"),
+    ]);
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty());
+    assert_eq!(
+        body["systemInstruction"]["parts"],
+        json!([{"text": "rule"}, {"text": "opaque rule"}])
+    );
+}
+
+// --------------------------------------------------------- role × merge rules
+
+#[test]
+fn adjacent_user_and_tool_messages_merge_into_one_turn() {
+    let req = Request::with_messages(vec![
+        Message::user_text("look at this"),
+        Message::assistant(vec![ContentBlock::tool_call_with_id("c1", "lookup", "{}")]),
+        Message::tool(vec![
+            ContentBlock::tool_result_text(Some("c1".to_owned()), "found it"),
+        ]),
+        Message::user_text("thanks"),
+    ]);
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let contents = body["contents"].as_array().unwrap();
+    assert_eq!(contents.len(), 3);
+    assert_eq!(contents[2]["role"], "user");
+    let parts = contents[2]["parts"].as_array().unwrap();
+    assert_eq!(parts.len(), 2);
+    assert!(parts[0].get("functionResponse").is_some());
+    assert_eq!(parts[1], json!({"text": "thanks"}));
+}
+
+#[test]
+fn adjacent_assistant_messages_merge_into_one_model_turn() {
+    let req = Request::with_messages(vec![
+        Message::user_text("hi"),
+        Message::assistant_text("part one."),
+        Message::assistant_text("part two."),
+    ]);
+    let (body, _) = build(&req);
+    assert_eq!(
+        body["contents"],
+        json!([
+            {"role": "user", "parts": [{"text": "hi"}]},
+            {"role": "model", "parts": [{"text": "part one."}, {"text": "part two."}]},
+        ])
+    );
+}
+
+#[test]
+fn role_block_validity_is_enforced() {
+    for (role, block) in [
+        (Role::User, ContentBlock::tool_call("f", "{}")),
+        (Role::User, ContentBlock::thinking("x")),
+        (Role::User, ContentBlock::tool_result(None, vec![])),
+        (Role::Assistant, ContentBlock::tool_result(None, vec![])),
+        (Role::Tool, ContentBlock::text("x")),
+        (Role::Tool, ContentBlock::image_url("https://x/y.png")),
+    ] {
+        let req = Request::with_messages(vec![Message::new(role, vec![block])]);
+        let err = request_from_ir(&req, &ConvertOptions::default()).unwrap_err();
+        assert!(
+            matches!(err, Error::Conversion(ConversionError::InvalidBlockForRole { .. })),
+            "{role:?} should reject the block"
+        );
+    }
+}
+
+// ------------------------------------------------------------------- images
+
+#[test]
+fn image_sources_map_per_table() {
+    let req = Request::with_messages(vec![Message::user(vec![
+        ContentBlock::image_url("https://example.com/cat.png"),
+        ContentBlock::image_base64("image/png", "aW1n"),
+        ContentBlock::image_file_id("https://generativelanguage.googleapis.com/v1beta/files/f1"),
+    ])]);
+    let (body, warnings) = build(&req);
+    let parts = body["contents"][0]["parts"].as_array().unwrap();
+    assert_eq!(parts[0], json!({"fileData": {"fileUri": "https://example.com/cat.png"}}));
+    assert_eq!(parts[1], json!({"inlineData": {"mimeType": "image/png", "data": "aW1n"}}));
+    assert_eq!(
+        parts[2],
+        json!({"fileData": {"fileUri": "https://generativelanguage.googleapis.com/v1beta/files/f1"}})
+    );
+    // Only the arbitrary URL warns (cosmetic).
+    assert_eq!(codes(&warnings), vec![WarningCode::ImageUrlAsFileUri]);
+    assert_eq!(warnings[0].severity, WarningSeverity::Cosmetic);
+}
+
+#[test]
+fn assistant_images_use_the_native_inline_channel() {
+    let req = Request::with_messages(vec![
+        Message::user_text("draw"),
+        Message::assistant(vec![ContentBlock::image_base64("image/png", "cGl4")]),
+    ]);
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        body["contents"][1]["parts"][0],
+        json!({"inlineData": {"mimeType": "image/png", "data": "cGl4"}})
+    );
+}
+
+#[test]
+fn cache_hints_drop_with_cosmetic_warnings() {
+    let req = Request::with_messages(vec![Message::user(vec![
+        ContentBlock::text("cached").with_cache(CacheHint::with_ttl("1h")),
+    ])]);
+    let (body, warnings) = build(&req);
+    assert_eq!(body["contents"][0]["parts"][0], json!({"text": "cached"}));
+    let w = find(&warnings, &WarningCode::CacheHintDropped);
+    assert_eq!(w.severity, WarningSeverity::Cosmetic);
+    assert_eq!(w.location, "/contents/0/parts/0");
+}
+
+// -------------------------------------------------------------------- tools
+
+#[test]
+fn function_tools_map_to_declarations() {
+    let mut req = user_req("hi");
+    let schema = json!({"type": "object", "properties": {"city": {"type": "string"}}});
+    req.tools = Some(vec![
+        Tool::function(
+            FunctionTool::new("get_weather")
+                .with_description("Get the weather.")
+                .with_parameters(schema.clone()),
+        ),
+        Tool::function(FunctionTool::new("no_params")),
+        Tool::opaque(FMT, json!({"googleSearch": {}})),
+    ]);
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        body["tools"],
+        json!([
+            {"functionDeclarations": [
+                {"name": "get_weather", "description": "Get the weather.", "parametersJsonSchema": schema},
+                // parameters: None means "no parameters": the field is omitted.
+                {"name": "no_params"},
+            ]},
+            {"googleSearch": {}},
+        ])
+    );
+}
+
+#[test]
+fn tool_strict_and_cache_warn_and_foreign_opaque_drops() {
+    let mut req = user_req("hi");
+    req.tools = Some(vec![
+        Tool::function(FunctionTool::new("f").with_strict(true).with_cache(CacheHint::new())),
+        Tool::opaque("openai_responses", json!({"type": "web_search"})),
+    ]);
+    let (body, warnings) = build(&req);
+    assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+    let strict = find(&warnings, &WarningCode::StrictUnsupported);
+    assert_eq!(strict.severity, WarningSeverity::Semantic);
+    assert_eq!(strict.location, "/tools/0/functionDeclarations/0");
+    find(&warnings, &WarningCode::CacheHintDropped);
+    let opaque = find(&warnings, &WarningCode::OpaqueDropped);
+    assert_eq!(opaque.severity, WarningSeverity::Semantic);
+}
+
+#[test]
+fn tool_choice_maps_per_table() {
+    for (choice, expected) in [
+        (ToolChoice::Auto, json!({"functionCallingConfig": {"mode": "AUTO"}})),
+        (ToolChoice::None, json!({"functionCallingConfig": {"mode": "NONE"}})),
+        (ToolChoice::Required, json!({"functionCallingConfig": {"mode": "ANY"}})),
+        (
+            ToolChoice::tool("get_weather"),
+            json!({"functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": ["get_weather"]}}),
+        ),
+    ] {
+        let mut req = user_req("hi");
+        req.tools = Some(vec![Tool::function(FunctionTool::new("get_weather"))]);
+        req.tool_choice = Some(choice);
+        let (body, warnings) = build(&req);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(body["toolConfig"], expected);
+    }
+}
+
+#[test]
+fn parallel_tool_calls_warn_matrix() {
+    // Some(false) with tools: the serial constraint is a semantic loss.
+    let mut req = user_req("hi");
+    req.tools = Some(vec![Tool::function(FunctionTool::new("f"))]);
+    req.parallel_tool_calls = Some(false);
+    let (_, warnings) = build(&req);
+    assert_eq!(codes(&warnings), vec![WarningCode::SerialToolCallsDropped]);
+    assert_eq!(warnings[0].severity, WarningSeverity::Semantic);
+
+    // Some(true) with tools: cosmetic (parallel is Google's default).
+    req.parallel_tool_calls = Some(true);
+    let (_, warnings) = build(&req);
+    assert_eq!(codes(&warnings), vec![WarningCode::ParallelToolCallsIgnored]);
+    assert_eq!(warnings[0].severity, WarningSeverity::Cosmetic);
+
+    // Without tools the flag is meaningless for either value.
+    req.tools = None;
+    req.parallel_tool_calls = Some(false);
+    let (_, warnings) = build(&req);
+    assert_eq!(codes(&warnings), vec![WarningCode::ParallelToolCallsIgnored]);
+}
+
+#[test]
+fn tool_call_arguments_must_parse_to_an_object() {
+    for arguments in ["not json", "[1, 2]", "\"str\"", ""] {
+        let req = Request::with_messages(vec![Message::assistant(vec![
+            ContentBlock::tool_call_with_id("c1", "f", arguments),
+        ])]);
+        let err = request_from_ir(&req, &ConvertOptions::default()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Conversion(ConversionError::InvalidToolArguments { .. })
+            ),
+            "arguments {arguments:?} must fail"
+        );
+    }
+}
+
+// -------------------------------------------------------------- tool results
+
+#[test]
+fn tool_result_name_resolves_from_earlier_call() {
+    let req = Request::with_messages(vec![
+        Message::user_text("weather?"),
+        Message::assistant(vec![ContentBlock::tool_call_with_id(
+            "c1",
+            "get_weather",
+            r#"{"city":"Paris"}"#,
+        )]),
+        Message::tool(vec![ContentBlock::tool_result_text(Some("c1".to_owned()), "22C")]),
+    ]);
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        body["contents"][2]["parts"][0],
+        json!({"functionResponse": {
+            "id": "c1",
+            "name": "get_weather",
+            "response": {"output": "22C"},
+        }})
+    );
+}
+
+#[test]
+fn tool_result_without_resolvable_name_errors() {
+    let req = Request::with_messages(vec![Message::tool(vec![
+        ContentBlock::tool_result_text(Some("unknown".to_owned()), "x"),
+    ])]);
+    let err = request_from_ir(&req, &ConvertOptions::default()).unwrap_err();
+    assert!(matches!(
+        err,
+        Error::Conversion(ConversionError::MissingRequired { .. })
+    ));
+}
+
+#[test]
+fn tool_result_is_error_maps_to_the_documented_error_key() {
+    let req = Request::with_messages(vec![Message::tool(vec![
+        ContentBlock::tool_result_text(None, "boom").with_tool_name("f").with_is_error(true),
+    ])]);
+    let (body, warnings) = build(&req);
+    // The official functionResponse.response contract documents the "error"
+    // key for failures, so nothing is lost and no warning is attached.
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        body["contents"][0]["parts"][0]["functionResponse"]["response"],
+        json!({"error": "boom"})
+    );
+
+    // is_error: false canonicalizes to the plain output encoding.
+    let req = Request::with_messages(vec![Message::tool(vec![
+        ContentBlock::tool_result_text(None, "fine").with_tool_name("f").with_is_error(false),
+    ])]);
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty());
+    assert_eq!(
+        body["contents"][0]["parts"][0]["functionResponse"]["response"],
+        json!({"output": "fine"})
+    );
+}
+
+#[test]
+fn tool_result_text_encodings() {
+    // Empty content → response: {}.
+    let req = Request::with_messages(vec![Message::tool(vec![
+        ContentBlock::tool_result(None, vec![]).with_tool_name("f"),
+    ])]);
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty());
+    assert_eq!(body["contents"][0]["parts"][0]["functionResponse"]["response"], json!({}));
+
+    // One empty text block → {"output": ""} (distinct from empty).
+    let req = Request::with_messages(vec![Message::tool(vec![
+        ContentBlock::tool_result_text(None, "").with_tool_name("f"),
+    ])]);
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty());
+    assert_eq!(
+        body["contents"][0]["parts"][0]["functionResponse"]["response"],
+        json!({"output": ""})
+    );
+
+    // Multiple text blocks join with \n\n plus a cosmetic warning.
+    let req = Request::with_messages(vec![Message::tool(vec![
+        ContentBlock::tool_result(
+            None,
+            vec![ToolOutputBlock::text("line one"), ToolOutputBlock::text("line two")],
+        )
+        .with_tool_name("f"),
+    ])]);
+    let (body, warnings) = build(&req);
+    assert_eq!(codes(&warnings), vec![WarningCode::ToolResultTextJoined]);
+    assert_eq!(warnings[0].severity, WarningSeverity::Cosmetic);
+    assert_eq!(
+        body["contents"][0]["parts"][0]["functionResponse"]["response"],
+        json!({"output": "line one\n\nline two"})
+    );
+}
+
+#[test]
+fn tool_result_images_and_order() {
+    // Base64 goes to parts[]; URL and file ids have no channel.
+    let req = Request::with_messages(vec![Message::tool(vec![
+        ContentBlock::tool_result(
+            None,
+            vec![
+                ToolOutputBlock::text("caption"),
+                ToolOutputBlock::image(ImageSource::base64("image/png", "cGl4")),
+                ToolOutputBlock::image(ImageSource::url("https://x/y.png")),
+            ],
+        )
+        .with_tool_name("f"),
+    ])]);
+    let (body, warnings) = build(&req);
+    let dropped = find(&warnings, &WarningCode::ToolResultImageDropped);
+    assert_eq!(dropped.severity, WarningSeverity::Semantic);
+    assert!(!codes(&warnings).contains(&WarningCode::ToolResultOrderLost));
+    assert_eq!(
+        body["contents"][0]["parts"][0]["functionResponse"],
+        json!({
+            "name": "f",
+            "response": {"output": "caption"},
+            "parts": [{"inlineData": {"mimeType": "image/png", "data": "cGl4"}}],
+        })
+    );
+
+    // Text following an emitted image cannot keep its position.
+    let req = Request::with_messages(vec![Message::tool(vec![
+        ContentBlock::tool_result(
+            None,
+            vec![
+                ToolOutputBlock::image(ImageSource::base64("image/png", "cGl4")),
+                ToolOutputBlock::text("after the image"),
+            ],
+        )
+        .with_tool_name("f"),
+    ])]);
+    let (_, warnings) = build(&req);
+    let lost = find(&warnings, &WarningCode::ToolResultOrderLost);
+    assert_eq!(lost.severity, WarningSeverity::Semantic);
+}
+
+// ---------------------------------------------------------------- reasoning
+
+#[test]
+fn reasoning_effort_maps_to_thinking_level() {
+    for (effort, level) in [
+        (Effort::Minimal, "MINIMAL"),
+        (Effort::Low, "LOW"),
+        (Effort::Medium, "MEDIUM"),
+        (Effort::High, "HIGH"),
+        (Effort::Other("ULTRA".to_owned()), "ULTRA"),
+    ] {
+        let mut req = user_req("hi");
+        req.reasoning = Some(Reasoning::effort(effort));
+        let (body, warnings) = build(&req);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"],
+            json!({"thinkingLevel": level})
+        );
+    }
+    for effort in [Effort::None, Effort::XHigh, Effort::Max] {
+        let mut req = user_req("hi");
+        req.reasoning = Some(Reasoning::effort(effort));
+        let (body, warnings) = build(&req);
+        assert!(body.get("generationConfig").is_none());
+        let w = find(&warnings, &WarningCode::EffortUnsupported);
+        assert_eq!(w.severity, WarningSeverity::Semantic);
+        assert_eq!(w.location, "/generationConfig/thinkingConfig");
+    }
+}
+
+#[test]
+fn reasoning_enabled_and_include_thoughts() {
+    // enabled: false has no channel — semantic warning.
+    let mut req = user_req("hi");
+    req.reasoning = Some(Reasoning::enabled(false));
+    let (body, warnings) = build(&req);
+    assert!(body.get("generationConfig").is_none());
+    let w = find(&warnings, &WarningCode::ReasoningDisableUnsupported);
+    assert_eq!(w.severity, WarningSeverity::Semantic);
+
+    // enabled: true is a no-op.
+    req.reasoning = Some(Reasoning::enabled(true));
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty());
+    assert!(body.get("generationConfig").is_none());
+
+    // include_thoughts maps for both values.
+    for value in [true, false] {
+        let mut reasoning = Reasoning::new();
+        reasoning.include_thoughts = Some(value);
+        req.reasoning = Some(reasoning);
+        let (body, warnings) = build(&req);
+        assert!(warnings.is_empty());
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"],
+            json!({"includeThoughts": value})
+        );
+    }
+}
+
+#[test]
+fn reasoning_conflicts_let_effort_win() {
+    // enabled: true + effort: none → effort wins (dropped) + conflict note.
+    let mut req = user_req("hi");
+    let mut reasoning = Reasoning::enabled(true);
+    reasoning.effort = Some(Effort::None);
+    req.reasoning = Some(reasoning);
+    let (body, warnings) = build(&req);
+    assert!(body.get("generationConfig").is_none());
+    find(&warnings, &WarningCode::ReasoningConflict);
+    find(&warnings, &WarningCode::EffortUnsupported);
+    assert!(!codes(&warnings).contains(&WarningCode::ReasoningDisableUnsupported));
+
+    // enabled: false + effort: low → effort wins, mapped.
+    let mut reasoning = Reasoning::enabled(false);
+    reasoning.effort = Some(Effort::Low);
+    req.reasoning = Some(reasoning);
+    let (body, warnings) = build(&req);
+    assert_eq!(body["generationConfig"]["thinkingConfig"], json!({"thinkingLevel": "LOW"}));
+    assert_eq!(codes(&warnings), vec![WarningCode::ReasoningConflict]);
+
+    // enabled: false + effort: none is consistent — no conflict warning.
+    let mut reasoning = Reasoning::enabled(false);
+    reasoning.effort = Some(Effort::None);
+    req.reasoning = Some(reasoning);
+    let (_, warnings) = build(&req);
+    assert_eq!(codes(&warnings), vec![WarningCode::EffortUnsupported]);
+}
+
+#[test]
+fn extra_rewrites_thinking_config_completely() {
+    // The § 4.7 documented pattern: switch thinkingLevel for thinkingBudget.
+    let mut req = user_req("hi");
+    req.reasoning = Some(Reasoning::effort(Effort::Low));
+    req.extra.set(
+        FMT,
+        "generationConfig",
+        json!({"thinkingConfig": {"thinkingLevel": null, "thinkingBudget": 512}}),
+    );
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        body["generationConfig"]["thinkingConfig"],
+        json!({"thinkingBudget": 512})
+    );
+}
+
+#[test]
+fn extra_override_marks_warnings() {
+    // Deleting the exact warned pointer marks the warning overridden, which
+    // also exempts it from the strict gate.
+    let mut req = user_req("hi");
+    req.reasoning = Some(Reasoning::effort(Effort::XHigh));
+    req.extra.set(FMT, "generationConfig", json!({"thinkingConfig": null}));
+    let options = ConvertOptions::new().strict(true);
+    let (_, warnings) = request_from_ir(&req, &options).unwrap();
+    let w = find(&warnings, &WarningCode::EffortUnsupported);
+    assert!(w.overridden);
+}
+
+// -------------------------------------------------------- structured output
+
+#[test]
+fn output_format_maps_to_response_mime_and_schema() {
+    let schema = json!({"type": "object", "properties": {"a": {"type": "number"}}});
+    let mut req = user_req("hi");
+    req.output_format = Some(OutputFormat::json_schema(schema.clone()));
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(body["generationConfig"]["responseMimeType"], "application/json");
+    assert_eq!(body["generationConfig"]["responseJsonSchema"], schema);
+
+    req.output_format = Some(OutputFormat::json_object());
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty());
+    assert_eq!(body["generationConfig"], json!({"responseMimeType": "application/json"}));
+
+    // name/description/strict have no channel — one cosmetic warning.
+    req.output_format = Some(
+        OutputFormat::json_schema(schema)
+            .with_name("answer")
+            .with_description("d")
+            .with_strict(true),
+    );
+    let (_, warnings) = build(&req);
+    let w = find(&warnings, &WarningCode::OutputFormatDetailDropped);
+    assert_eq!(w.severity, WarningSeverity::Cosmetic);
+    assert!(w.message.contains("name") && w.message.contains("strict"));
+}
+
+// ----------------------------------------------------------------- thinking
+
+#[test]
+fn thinking_provenance_controls_serialization() {
+    // Signed, no namespace: optimistic replay — native thought part.
+    let req = Request::with_messages(vec![
+        Message::user_text("hi"),
+        Message::assistant(vec![
+            ContentBlock::thinking_signed("planning", "c2ln"),
+            ContentBlock::text("done"),
+        ]),
+    ]);
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        body["contents"][1]["parts"][0],
+        json!({"text": "planning", "thought": true, "thoughtSignature": "c2ln"})
+    );
+
+    // Google-namespaced (as the parser produces): native.
+    let block = ContentBlock::thinking("planning").with_extra(FMT, "thought", true);
+    let req = Request::with_messages(vec![Message::user_text("hi"), Message::assistant(vec![block])]);
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty());
+    assert_eq!(
+        body["contents"][1]["parts"][0],
+        json!({"text": "planning", "thought": true})
+    );
+
+    // Foreign namespace: dropped with a semantic warning.
+    let block = ContentBlock::thinking_signed("planning", "sig")
+        .with_extra("anthropic_messages", "redacted", false);
+    let req = Request::with_messages(vec![Message::user_text("hi"), Message::assistant(vec![block])]);
+    let (body, warnings) = build(&req);
+    assert_eq!(body["contents"][1]["parts"], json!([]));
+    let w = find(&warnings, &WarningCode::ThinkingDropped);
+    assert_eq!(w.severity, WarningSeverity::Semantic);
+
+    // thinking_as_text re-encodes the plaintext and drops the signature.
+    let block = ContentBlock::thinking_signed("planning", "sig")
+        .with_extra("anthropic_messages", "redacted", false);
+    let req = Request::with_messages(vec![Message::user_text("hi"), Message::assistant(vec![block])]);
+    let mut options = ConvertOptions::default();
+    options.thinking_as_text = true;
+    let (body, warnings) = request_from_ir(&req, &options).unwrap();
+    assert_eq!(
+        body["contents"][1]["parts"][0],
+        json!({"text": "planning", "thought": true})
+    );
+    let w = find(&warnings, &WarningCode::ThinkingSignatureDropped);
+    assert_eq!(w.severity, WarningSeverity::Semantic);
+}
+
+#[test]
+fn tool_call_thought_signature_rides_extra() {
+    let block = ContentBlock::tool_call_with_id("c1", "f", "{}")
+        .with_extra(FMT, "thoughtSignature", "c2lnLXRj");
+    let req = Request::with_messages(vec![Message::user_text("hi"), Message::assistant(vec![block])]);
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        body["contents"][1]["parts"][0],
+        json!({
+            "functionCall": {"id": "c1", "name": "f", "args": {}},
+            "thoughtSignature": "c2lnLXRj",
+        })
+    );
+}
+
+#[test]
+fn missing_thinking_with_tool_calls_warns_or_fills() {
+    let mut req = Request::with_messages(vec![
+        Message::user_text("hi"),
+        Message::assistant(vec![ContentBlock::tool_call_with_id("c1", "f", "{}")]),
+        Message::tool(vec![ContentBlock::tool_result_text(Some("c1".to_owned()), "ok")]),
+    ]);
+    req.reasoning = Some(Reasoning::effort(Effort::High));
+    let (_, warnings) = build(&req);
+    let w = find(&warnings, &WarningCode::MissingThinkingWithToolCalls);
+    assert_eq!(w.severity, WarningSeverity::Semantic);
+    assert_eq!(w.location, "/contents/1");
+
+    // With fill_missing_thinking the placeholder is inserted (and, being
+    // plaintext-only, subsequently dropped on this signature-validated
+    // target — the design documents that the option cannot help here).
+    let mut options = ConvertOptions::default();
+    options.fill_missing_thinking = Some("tool call".to_owned());
+    let (_, warnings) = request_from_ir(&req, &options).unwrap();
+    find(&warnings, &WarningCode::MissingThinkingFilled);
+    find(&warnings, &WarningCode::ThinkingDropped);
+    assert!(!codes(&warnings).contains(&WarningCode::MissingThinkingWithToolCalls));
+
+    // No reasoning configured → no warning at all.
+    req.reasoning = None;
+    let (_, warnings) = build(&req);
+    assert!(warnings.is_empty());
+}
+
+// ------------------------------------------------------------ orphan policy
+
+fn orphan_request() -> Request {
+    Request::with_messages(vec![
+        Message::user_text("hi"),
+        Message::assistant(vec![
+            ContentBlock::thinking_signed("planning", "sig"),
+            ContentBlock::tool_call_with_id("c1", "f", "{}"),
+        ]),
+    ])
+}
+
+#[test]
+fn orphan_passthrough_sends_as_is() {
+    let (body, warnings) = build(&orphan_request());
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(body["contents"][1]["parts"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn orphan_drop_trailing_removes_calls_and_flags_thinking() {
+    let mut options = ConvertOptions::default();
+    options.orphan_tool_calls = OrphanToolCalls::DropTrailing;
+    let (body, warnings) = request_from_ir(&orphan_request(), &options).unwrap();
+    let parts = body["contents"][1]["parts"].as_array().unwrap();
+    assert_eq!(parts.len(), 1, "only the thinking part remains: {parts:?}");
+    find(&warnings, &WarningCode::OrphanToolCallsDropped);
+    let w = find(&warnings, &WarningCode::ThinkingOrphaned);
+    assert_eq!(w.severity, WarningSeverity::Semantic);
+
+    // A message left empty is removed entirely.
+    let req = Request::with_messages(vec![
+        Message::user_text("hi"),
+        Message::assistant(vec![ContentBlock::tool_call_with_id("c1", "f", "{}")]),
+    ]);
+    let (body, warnings) = request_from_ir(&req, &options).unwrap();
+    assert_eq!(body["contents"].as_array().unwrap().len(), 1);
+    find(&warnings, &WarningCode::OrphanToolCallsDropped);
+}
+
+#[test]
+fn orphan_synthesize_error_appends_results() {
+    let mut options = ConvertOptions::default();
+    options.orphan_tool_calls = OrphanToolCalls::SynthesizeError;
+    let (body, warnings) = request_from_ir(&orphan_request(), &options).unwrap();
+    find(&warnings, &WarningCode::OrphanToolCallsSynthesized);
+    let contents = body["contents"].as_array().unwrap();
+    assert_eq!(contents.len(), 3);
+    assert_eq!(
+        contents[2]["parts"][0],
+        json!({"functionResponse": {
+            "id": "c1",
+            "name": "f",
+            "response": {"error": "cancelled"},
+        }})
+    );
+}
+
+#[test]
+fn orphan_mid_array_only_warns() {
+    let req = Request::with_messages(vec![
+        Message::user_text("hi"),
+        Message::assistant(vec![ContentBlock::tool_call_with_id("c1", "f", "{}")]),
+        Message::user_text("never answered"),
+    ]);
+    let (body, warnings) = build(&req);
+    let w = find(&warnings, &WarningCode::OrphanToolCalls);
+    assert_eq!(w.severity, WarningSeverity::Semantic);
+    assert_eq!(body["contents"].as_array().unwrap().len(), 3);
+}
+
+// -------------------------------------------------------------- extra & hooks
+
+#[test]
+fn extra_merges_at_every_level() {
+    let mut req = Request::with_messages(vec![Message::user(vec![
+        ContentBlock::text("hi").with_extra(FMT, "partMetadata", json!({"k": 1})),
+    ])]);
+    req.messages[0].extra.set(FMT, "contentTag", "tagged");
+    req.extra.set(FMT, "cachedContent", "cachedContents/abc");
+    req.extra.set(FMT, "safetySettings", json!([{"category": "X", "threshold": "BLOCK_NONE"}]));
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        body["contents"][0],
+        json!({
+            "role": "user",
+            "parts": [{"text": "hi", "partMetadata": {"k": 1}}],
+            "contentTag": "tagged",
+        })
+    );
+    assert_eq!(body["cachedContent"], "cachedContents/abc");
+    assert_eq!(body["safetySettings"][0]["threshold"], "BLOCK_NONE");
+}
+
+#[test]
+fn hooks_visit_serialized_contents_only() {
+    let format = GoogleGenerateContent;
+    let mut req = Request::with_messages(vec![
+        Message::system_text("hoisted"),
+        Message::user_text("hi"),
+        Message::assistant_text("hello"),
+        Message::tool(vec![ContentBlock::tool_result_text(None, "r").with_tool_name("f")]),
+    ]);
+    req.system = Some(vec![ContentBlock::text("sys")]);
+    let mut c = ctx(CallMode::Unary);
+    c.hooks = RequestHooks::new()
+        .with_on_message(|index, role, value| {
+            // Serialized sequence: user, model, user (tool results merge into
+            // a user turn); the hoisted system content is not visited.
+            let expected = match index {
+                0 | 2 => Role::User,
+                1 => Role::Assistant,
+                _ => panic!("unexpected message index {index}"),
+            };
+            assert_eq!(*role, expected);
+            value["hookIndex"] = json!(index);
+            Ok(())
+        })
+        .with_on_request(|value| {
+            value["hooked"] = json!(true);
+            Ok(())
+        });
+    let built = format.build_request(&req, &c).unwrap();
+    let body: Value = serde_json::from_slice(&built.body).unwrap();
+    assert_eq!(body["hooked"], json!(true));
+    let contents = body["contents"].as_array().unwrap();
+    assert_eq!(contents.len(), 3);
+    for (i, content) in contents.iter().enumerate() {
+        assert_eq!(content["hookIndex"], json!(i));
+    }
+    assert!(body["systemInstruction"].get("hookIndex").is_none());
+}
+
+#[test]
+fn strict_mode_escalates_semantic_warnings() {
+    let mut req = user_req("hi");
+    req.parallel_tool_calls = Some(false);
+    req.tools = Some(vec![Tool::function(FunctionTool::new("f"))]);
+    let err = request_from_ir(&req, &ConvertOptions::new().strict(true)).unwrap_err();
+    match err {
+        Error::Conversion(ConversionError::Strict { warnings, .. }) => {
+            assert_eq!(codes(&warnings), vec![WarningCode::SerialToolCallsDropped]);
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    // Cosmetic warnings pass the strict gate.
+    let mut req = user_req("hi");
+    req.cache_key = Some("k".to_owned());
+    let (_, warnings) = request_from_ir(&req, &ConvertOptions::new().strict(true)).unwrap();
+    assert_eq!(codes(&warnings), vec![WarningCode::CacheKeyDropped]);
+}
+
+// ------------------------------------------------------- models, countTokens
+
+#[test]
+fn models_request_paginates_with_protected_query() {
+    let format = GoogleGenerateContent;
+    let c = ctx(CallMode::Unary);
+    let built = format.build_models_request(&c, None).unwrap();
+    assert_eq!(built.method, http::Method::GET);
+    assert_eq!(
+        built.url.to_string(),
+        "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000"
+    );
+    assert_eq!(built.auth.unwrap().header.as_str(), "x-goog-api-key");
+
+    let built = format.build_models_request(&c, Some("tok-2")).unwrap();
+    assert_eq!(
+        built.url.to_string(),
+        "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000&pageToken=tok-2"
+    );
+
+    // User-supplied pageSize conflicts with the pagination mechanism.
+    let mut c = ctx(CallMode::Unary);
+    c.extra_query.push(("pageSize".to_owned(), "5".to_owned()));
+    assert!(matches!(
+        format.build_models_request(&c, None),
+        Err(Error::Conversion(ConversionError::ProtectedQueryKey { .. }))
+    ));
+}
+
+#[test]
+fn count_tokens_request_wraps_the_chat_body() {
+    let format = GoogleGenerateContent;
+    let mut req = user_req("count me");
+    req.extra.set(FMT, "cachedContent", "cachedContents/abc");
+    let mut c = ctx(CallMode::Unary);
+    c.hooks = RequestHooks::new().with_on_request(|value| {
+        value["hookMark"] = json!(true);
+        Ok(())
+    });
+    let built = format.build_count_tokens_request(&req, &c).unwrap();
+    assert_eq!(
+        built.url.to_string(),
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:countTokens"
+    );
+    assert!(built.warnings.is_empty());
+    let body: Value = serde_json::from_slice(&built.body).unwrap();
+    let inner = &body["generateContentRequest"];
+    assert_eq!(inner["model"], "models/gemini-2.5-pro");
+    assert_eq!(inner["contents"][0]["parts"][0]["text"], "count me");
+    // extra and hooks act on the chat body exactly as for send.
+    assert_eq!(inner["cachedContent"], "cachedContents/abc");
+    assert_eq!(inner["hookMark"], json!(true));
+    assert_eq!(body.as_object().unwrap().len(), 1);
+}
+
+#[test]
+fn hook_errors_abort_the_build() {
+    let format = GoogleGenerateContent;
+    let mut c = ctx(CallMode::Unary);
+    c.hooks =
+        RequestHooks::new().with_on_request(|_| Err(llm_api::HookError::new("rejected")));
+    let err = format.build_request(&user_req("hi"), &c).unwrap_err();
+    assert!(matches!(err, Error::Hook(_)));
+}
+
+#[test]
+fn empty_and_prefill_conversations_serialize() {
+    // Empty request: contents is still present (required upstream).
+    let (body, warnings) = build(&Request::new());
+    assert!(warnings.is_empty());
+    assert_eq!(body, json!({"contents": []}));
+
+    // Trailing assistant prefill passes through as-is.
+    let req = Request::with_messages(vec![
+        Message::user_text("write a poem"),
+        Message::assistant_text("Roses are"),
+    ]);
+    let (body, _) = build(&req);
+    assert_eq!(body["contents"][1], json!({"role": "model", "parts": [{"text": "Roses are"}]}));
+}

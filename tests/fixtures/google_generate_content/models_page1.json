@@ -1,0 +1,16 @@
+{
+  "models": [
+    {
+      "name": "models/gemini-2.5-flash",
+      "version": "2.5",
+      "displayName": "Gemini 2.5 Flash",
+      "description": "Fast multimodal model",
+      "inputTokenLimit": 1048576,
+      "outputTokenLimit": 65536,
+      "supportedGenerationMethods": ["generateContent", "countTokens"]
+    },
+    {"name": "models/gemini-2.5-pro", "displayName": "Gemini 2.5 Pro"},
+    {"version": "0.0", "displayName": "Entry without a resource name"}
+  ],
+  "nextPageToken": "tok-page-2"
+}

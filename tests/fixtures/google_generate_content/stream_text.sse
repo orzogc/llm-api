@@ -1,0 +1,6 @@
+data: {"candidates":[{"content":{"parts":[{"text":"Once upon"}],"role":"model"},"index":0}],"usageMetadata":{"promptTokenCount":8,"totalTokenCount":8},"modelVersion":"gemini-2.5-flash","responseId":"r-abc123"}
+
+data: {"candidates":[{"content":{"parts":[{"text":" a time, a magic backpack"}],"role":"model"},"index":0}],"modelVersion":"gemini-2.5-flash","responseId":"r-abc123"}
+
+data: {"candidates":[{"content":{"parts":[{"text":" granted wishes. The end."}],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":58,"totalTokenCount":66,"promptTokensDetails":[{"modality":"TEXT","tokenCount":8}]},"modelVersion":"gemini-2.5-flash","responseId":"r-abc123"}
+

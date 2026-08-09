@@ -1,0 +1,17 @@
+{
+  "candidates": [
+    {
+      "content": {"parts": [{"text": "First answer."}], "role": "model"},
+      "finishReason": "STOP",
+      "index": 0
+    },
+    {
+      "content": {"parts": [{"text": "Second answer."}], "role": "model"},
+      "finishReason": "STOP",
+      "index": 1
+    }
+  ],
+  "usageMetadata": {"promptTokenCount": 4, "candidatesTokenCount": 6, "totalTokenCount": 10},
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "resp-multi"
+}

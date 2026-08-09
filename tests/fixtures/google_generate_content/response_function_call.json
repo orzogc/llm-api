@@ -1,0 +1,25 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {"id": "call-9", "name": "set_light_color", "args": {"rgb_hex": "ff0000"}},
+            "thoughtSignature": "c2lnLTk="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 21,
+    "candidatesTokenCount": 5,
+    "thoughtsTokenCount": 30,
+    "totalTokenCount": 56
+  },
+  "modelVersion": "gemini-3-pro-preview",
+  "responseId": "resp-fc"
+}

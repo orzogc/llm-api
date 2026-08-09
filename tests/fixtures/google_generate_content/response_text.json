@@ -1,0 +1,21 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [{"text": "AI learns patterns from data to make predictions."}],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 8,
+    "candidatesTokenCount": 10,
+    "totalTokenCount": 18,
+    "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 8}],
+    "candidatesTokensDetails": [{"modality": "TEXT", "tokenCount": 10}]
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "resp-123"
+}

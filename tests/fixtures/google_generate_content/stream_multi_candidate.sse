@@ -1,0 +1,4 @@
+data: {"candidates":[{"content":{"parts":[{"text":"first"}],"role":"model"},"index":0},{"content":{"parts":[{"text":"second"}],"role":"model"},"index":1}],"modelVersion":"gemini-2.5-flash","responseId":"r-multi"}
+
+data: {"candidates":[{"content":{"parts":[{"text":"!"}],"role":"model"},"finishReason":"STOP","index":0},{"content":{"parts":[{"text":"?"}],"role":"model"},"finishReason":"STOP","index":1}],"responseId":"r-multi"}
+
