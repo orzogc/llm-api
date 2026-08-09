@@ -55,6 +55,10 @@ enum ItemState {
         /// Whether a summary part was already opened (later parts insert
         /// the `"\n\n"` joiner, matching the non-streaming parse).
         saw_summary_part: bool,
+        /// `content_index` of the last raw `reasoning_text` part seen; a
+        /// change inserts the `"\n\n"` joiner, matching the non-streaming
+        /// parse of the `content` array.
+        last_text_part: Option<u64>,
     },
     /// A `function_call` item mapped to a `ToolCall` block.
     FunctionCall {
@@ -171,7 +175,10 @@ impl ResponsesStreamParser {
                         .map(str::to_owned),
                     extra: Extra::from_unknown(FORMAT, ns),
                 };
-                self.items.insert(idx, ItemState::Reasoning { index, saw_summary_part: false });
+                self.items.insert(
+                    idx,
+                    ItemState::Reasoning { index, saw_summary_part: false, last_text_part: None },
+                );
                 events.push(StreamEvent::BlockStart { index, block });
             }
             Some("function_call") => {
@@ -339,7 +346,7 @@ impl ResponsesStreamParser {
     ) {
         let idx = payload.get("output_index").and_then(Value::as_u64);
         match idx.and_then(|i| self.items.get_mut(&i)) {
-            Some(ItemState::Reasoning { index, saw_summary_part }) => {
+            Some(ItemState::Reasoning { index, saw_summary_part, .. }) => {
                 let index = *index;
                 if *saw_summary_part {
                     // Later summary parts join with a blank line, matching
@@ -390,15 +397,26 @@ impl ResponsesStreamParser {
         events: &mut Vec<StreamEvent>,
         warnings: &mut Vec<ConversionWarning>,
     ) {
-        // Raw reasoning content (`content` array) is unmodeled: surface it
-        // for real-time consumers; `output_item.done` folds the final
-        // `content` array into the block extra.
+        // Raw reasoning (`content` array of `reasoning_text` parts) is the
+        // chain-of-thought text channel: stream it as `Thinking` deltas.
+        // `output_item.done` still folds the final `content` array into the
+        // block extra via the finalized block.
         let idx = payload.get("output_index").and_then(Value::as_u64);
-        match idx.and_then(|i| self.items.get(&i)) {
-            Some(ItemState::Reasoning { index, .. }) => {
+        let delta = payload.get("delta").and_then(Value::as_str);
+        match (idx.and_then(|i| self.items.get_mut(&i)), delta) {
+            (Some(ItemState::Reasoning { index, last_text_part, .. }), Some(delta)) => {
+                let index = *index;
+                let part = payload.get("content_index").and_then(Value::as_u64);
+                if last_text_part.is_some() && *last_text_part != part {
+                    events.push(StreamEvent::BlockDelta {
+                        index,
+                        delta: BlockDelta::Thinking("\n\n".to_owned()),
+                    });
+                }
+                *last_text_part = part;
                 events.push(StreamEvent::BlockDelta {
-                    index: *index,
-                    delta: BlockDelta::Other(payload.clone()),
+                    index,
+                    delta: BlockDelta::Thinking(delta.to_owned()),
                 });
             }
             _ => self.on_unknown("response.reasoning_text.delta", payload, events, warnings),

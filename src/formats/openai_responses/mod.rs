@@ -45,9 +45,14 @@
 //! `extra["openai_responses"]` namespace so same-format round-trips are
 //! lossless:
 //!
-//! - `Thinking` blocks (from `reasoning` items): `id`, the original
-//!   `summary` array, plus unknown item fields (`content`, `status`, …);
-//!   `encrypted_content` maps to `Thinking.signature`.
+//! - `Thinking` blocks (from `reasoning` items): `Thinking.text` is the
+//!   raw chain of thought — the `reasoning_text` parts of the item's
+//!   `content` array joined with `"\n\n"` — falling back to the joined
+//!   summary text; `encrypted_content` maps to `Thinking.signature`. The
+//!   namespace keeps `id`, the original `summary` and `content` arrays and
+//!   unknown item fields (`status`, …) for verbatim reconstruction; a
+//!   native block without those arrays re-emits its text through
+//!   `content` (the raw-CoT channel), as does `thinking_as_text`.
 //! - `ToolCall` blocks (from `function_call` items): the item `id` plus
 //!   unknown item fields; `call_id` maps to the block id.
 //! - `Text` blocks of assistant messages use the reserved keys of

@@ -254,7 +254,9 @@ absent.
 
 `Thinking { text, signature, extra }`:
 
-- `text`: plaintext chain of thought (CC dialects) or joined summary text.
+- `text`: plaintext chain of thought (CC dialects' `reasoning_content`;
+  Responses `content` arrays of `reasoning_text` parts — raw reasoning,
+  preferred over the summary when both are exposed) or joined summary text.
   Note: replaying `reasoning_content` in **input** messages is rejected by
   some dialects (DeepSeek documents a 400); the library maps the channel
   faithfully and returns the upstream error unchanged.

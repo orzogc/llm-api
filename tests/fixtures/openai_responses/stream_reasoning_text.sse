@@ -1,0 +1,42 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_rt1","object":"response","created_at":1741292000,"status":"in_progress","model":"deepseek-v4-flash","output":[],"usage":null},"sequence_number":0}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_rt1","type":"reasoning","summary":[]},"sequence_number":1}
+
+event: response.reasoning_text.delta
+data: {"type":"response.reasoning_text.delta","item_id":"rs_rt1","output_index":0,"content_index":0,"delta":"9.11 vs 9.8: compare ","sequence_number":2}
+
+event: response.reasoning_text.delta
+data: {"type":"response.reasoning_text.delta","item_id":"rs_rt1","output_index":0,"content_index":0,"delta":"the tenths digit.","sequence_number":3}
+
+event: response.reasoning_text.done
+data: {"type":"response.reasoning_text.done","item_id":"rs_rt1","output_index":0,"content_index":0,"text":"9.11 vs 9.8: compare the tenths digit.","sequence_number":4}
+
+event: response.reasoning_text.delta
+data: {"type":"response.reasoning_text.delta","item_id":"rs_rt1","output_index":0,"content_index":1,"delta":"8 > 1, so 9.8 wins.","sequence_number":5}
+
+event: response.reasoning_text.done
+data: {"type":"response.reasoning_text.done","item_id":"rs_rt1","output_index":0,"content_index":1,"text":"8 > 1, so 9.8 wins.","sequence_number":6}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_rt1","type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"9.11 vs 9.8: compare the tenths digit."},{"type":"reasoning_text","text":"8 > 1, so 9.8 wins."}],"status":"completed"},"sequence_number":7}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_rt1","type":"message","role":"assistant","status":"in_progress","content":[]},"sequence_number":8}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","item_id":"msg_rt1","output_index":1,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]},"sequence_number":9}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","item_id":"msg_rt1","output_index":1,"content_index":0,"delta":"9.8 is greater.","sequence_number":10}
+
+event: response.content_part.done
+data: {"type":"response.content_part.done","item_id":"msg_rt1","output_index":1,"content_index":0,"part":{"type":"output_text","text":"9.8 is greater.","annotations":[]},"sequence_number":11}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_rt1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"9.8 is greater.","annotations":[]}]},"sequence_number":12}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_rt1","object":"response","created_at":1741292000,"status":"completed","model":"deepseek-v4-flash","output":[{"id":"rs_rt1","type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"9.11 vs 9.8: compare the tenths digit."},{"type":"reasoning_text","text":"8 > 1, so 9.8 wins."}],"status":"completed"},{"id":"msg_rt1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"9.8 is greater.","annotations":[]}]}],"usage":{"input_tokens":30,"output_tokens":25,"output_tokens_details":{"reasoning_tokens":18},"total_tokens":55}},"sequence_number":13}
+

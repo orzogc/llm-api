@@ -653,11 +653,15 @@ fn message_item_to_assistant_blocks(
     }
 }
 
-/// Parses a `reasoning` item into a `Thinking` block: `text` is the
-/// summary text joined with `"\n\n"`, `signature` is `encrypted_content`,
-/// and the original `id` / `summary` array (plus unknown fields such as
-/// `content` and `status`) ride the block's format namespace for lossless
-/// reconstruction (§ 4.4, implementation contract).
+/// Parses a `reasoning` item into a `Thinking` block.
+///
+/// `text` is the raw chain of thought — the `reasoning_text` parts of the
+/// item's `content` array joined with `"\n\n"` — falling back to the
+/// summary text (same join) when no raw reasoning is exposed (§ 4.4:
+/// "plaintext chain of thought … or joined summary text"). `signature` is
+/// `encrypted_content`. The original `id` / `summary` array (plus unknown
+/// fields such as `content` and `status`) ride the block's format
+/// namespace for lossless reconstruction (implementation contract).
 pub(crate) fn thinking_from_reasoning(
     item: &Value,
     ptr: &str,
@@ -674,12 +678,30 @@ pub(crate) fn thinking_from_reasoning(
             return ContentBlock::opaque(FORMAT, item.clone());
         }
     };
-    let joined: String = wire
-        .summary
-        .iter()
-        .filter_map(|p| p.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    // Raw reasoning (`content` reasoning_text parts) is the actual chain
+    // of thought; the summary is a derived rendering. Prefer the former.
+    let raw: String = wire
+        .extra
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter(|p| p.get("type").and_then(Value::as_str) == Some("reasoning_text"))
+                .filter_map(|p| p.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
+        .unwrap_or_default();
+    let joined = if raw.is_empty() {
+        wire.summary
+            .iter()
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    } else {
+        raw
+    };
     let text = (!joined.is_empty()).then_some(joined);
     let mut ns = Map::new();
     if let Some(id) = wire.id {

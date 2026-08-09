@@ -81,8 +81,9 @@ additionally injects `stream_options: {"include_usage": true}` when
   drop + `ThinkingDropped` (semantic), unless `thinking_as_text` → emit
   `text` into F's thinking-text channel (CC `reasoning_content`; Anthropic
   `thinking` block without signature; Google `thought: true` part;
-  Responses summary text), adding `ThinkingSignatureDropped` (semantic)
-  when a signature existed.
+  Responses `content: [{type: "reasoning_text"}]` — the official raw-CoT
+  channel), adding `ThinkingSignatureDropped` (semantic) when a signature
+  existed.
 - Plaintext-only thinking (no signature, no namespace) is native to CC
   (its channel is plaintext `reasoning_content`); on the other three it is
   foreign (see above).

@@ -413,3 +413,43 @@ fn synthesized_blocks_for_item_done_without_added() {
     assert!(events.contains(&StreamEvent::MessageStop));
     assert!(parser.finish().is_ok());
 }
+
+#[test]
+fn reasoning_text_streams_as_thinking_deltas() {
+    // `response.reasoning_text.delta` is official raw chain of thought
+    // (`content` reasoning_text parts) and must stream as `Thinking`
+    // deltas, with the `"\n\n"` joiner between content parts — not as
+    // unmodeled `Other` payloads or unknown events.
+    let (events, warnings, finish) = run_stream("stream_reasoning_text.sse");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(finish.unwrap().is_empty());
+
+    let thinking: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::BlockDelta { delta: BlockDelta::Thinking(t), .. } => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        thinking,
+        vec!["9.11 vs 9.8: compare ", "the tenths digit.", "\n\n", "8 > 1, so 9.8 wins."]
+    );
+
+    let resp = accumulate(&events);
+    let ContentBlock::Thinking { text, extra, .. } = &resp.message.content[0] else {
+        panic!("expected a thinking block: {:?}", resp.message.content);
+    };
+    // The incrementally built text matches the finalized block's parse.
+    assert_eq!(
+        text.as_deref(),
+        Some("9.11 vs 9.8: compare the tenths digit.\n\n8 > 1, so 9.8 wins.")
+    );
+    // The finalized block keeps the `content` array for reconstruction.
+    let ns = extra.get(F).expect("namespace stored");
+    assert_eq!(ns.get("content").and_then(Value::as_array).map(Vec::len), Some(2));
+
+    assert_eq!(resp.text(), "9.8 is greater.");
+    assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
+    assert_eq!(resp.usage.as_ref().unwrap().reasoning_tokens, Some(18));
+}

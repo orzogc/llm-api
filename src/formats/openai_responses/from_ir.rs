@@ -655,10 +655,21 @@ fn build_reasoning_item(
 ) -> Option<Value> {
     let native = is_native_thinking(signature, extra);
     if native {
-        let summary: Vec<Value> = text
-            .map(|t| vec![json!({"type": "summary_text", "text": t})])
-            .unwrap_or_default();
-        let mut item = json!({"type": "reasoning", "summary": summary});
+        // A block parsed from this format carries the original `summary`
+        // (and, when raw reasoning was exposed, `content`) arrays in its
+        // namespace — the merge below restores them verbatim, so the base
+        // must not synthesize either. A native block without those arrays
+        // (hand-built, or an optimistically replayed foreign signature)
+        // re-emits its text through `content` — the official raw-CoT
+        // channel (`reasoning_text` parts); `summary` stays the required
+        // empty array.
+        let has_arrays = extra
+            .get(FORMAT)
+            .is_some_and(|ns| ns.contains_key("summary") || ns.contains_key("content"));
+        let mut item = json!({"type": "reasoning", "summary": []});
+        if !has_arrays && let Some(text) = text {
+            item["content"] = json!([{"type": "reasoning_text", "text": text}]);
+        }
         if let Some(sig) = signature {
             item["encrypted_content"] = Value::from(sig);
         }
@@ -672,12 +683,13 @@ fn build_reasoning_item(
             warnings.push(warn(
                 WarningCode::ThinkingSignatureDropped,
                 ptr.to_owned(),
-                "thinking_as_text re-emitted foreign thinking as summary text; its signature was dropped",
+                "thinking_as_text re-emitted foreign thinking as raw reasoning text; its signature was dropped",
             ));
         }
         return Some(json!({
             "type": "reasoning",
-            "summary": [{"type": "summary_text", "text": text}],
+            "summary": [],
+            "content": [{"type": "reasoning_text", "text": text}],
         }));
     }
     warnings.push(warn(

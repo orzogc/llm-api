@@ -211,7 +211,7 @@ fn assistant_message_explodes_into_items() {
     assert_eq!(
         body["input"],
         json!([
-            {"type": "reasoning", "summary": [{"type": "summary_text", "text": "plan"}], "encrypted_content": "enc-1"},
+            {"type": "reasoning", "summary": [], "content": [{"type": "reasoning_text", "text": "plan"}], "encrypted_content": "enc-1"},
             {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Working on it.", "annotations": []}]},
             {"type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": "{}"},
             {"type": "web_search_call", "id": "ws_1"},
@@ -386,7 +386,7 @@ fn thinking_provenance_rules() {
     assert_eq!(body["input"].as_array().unwrap().len(), 1);
     assert!(has_code(&built.warnings, &WarningCode::ThinkingDropped));
 
-    // thinking_as_text re-emits the text as summary text and warns about
+    // thinking_as_text re-emits the text as raw reasoning text and warns about
     // the lost signature.
     let mut tctx = ctx(CallMode::Unary);
     tctx.convert.thinking_as_text = true;
@@ -394,7 +394,7 @@ fn thinking_provenance_rules() {
     let body = body_of(&built);
     assert_eq!(
         body["input"][0],
-        json!({"type": "reasoning", "summary": [{"type": "summary_text", "text": "chain"}]})
+        json!({"type": "reasoning", "summary": [], "content": [{"type": "reasoning_text", "text": "chain"}]})
     );
     assert!(has_code(&built.warnings, &WarningCode::ThinkingSignatureDropped));
 
@@ -405,7 +405,7 @@ fn thinking_provenance_rules() {
     let body = body_of(&built);
     assert_eq!(
         body["input"][0],
-        json!({"type": "reasoning", "summary": [{"type": "summary_text", "text": "plan"}], "encrypted_content": "enc"})
+        json!({"type": "reasoning", "summary": [], "content": [{"type": "reasoning_text", "text": "plan"}], "encrypted_content": "enc"})
     );
 
     // Native via the format namespace reconstructs id/summary verbatim.
@@ -680,13 +680,13 @@ fn missing_thinking_with_tool_calls() {
     assert!(has_code(&built.warnings, &WarningCode::ThinkingDropped));
     assert!(!has_code(&built.warnings, &WarningCode::MissingThinkingWithToolCalls));
 
-    // With thinking_as_text the filled text becomes summary text.
+    // With thinking_as_text the filled text becomes raw reasoning text.
     fctx.convert.thinking_as_text = true;
     let built = OpenAiResponses.build_request(&req, &fctx).unwrap();
     let body = body_of(&built);
     assert_eq!(
         body["input"][1],
-        json!({"type": "reasoning", "summary": [{"type": "summary_text", "text": "tool call"}]})
+        json!({"type": "reasoning", "summary": [], "content": [{"type": "reasoning_text", "text": "tool call"}]})
     );
     assert!(!has_code(&built.warnings, &WarningCode::ThinkingDropped));
 }
@@ -1274,4 +1274,69 @@ fn parse_error_keeps_raw_and_retry_after() {
 fn format_id_is_registered_constant() {
     assert_eq!(OpenAiResponses.id(), "openai_responses");
     assert_eq!(OpenAiResponses.id(), llm_api::ids::OPENAI_RESPONSES);
+}
+
+#[test]
+fn reasoning_text_content_maps_to_thinking_text() {
+    // Raw reasoning (`content` reasoning_text parts) is the chain of
+    // thought and takes priority over the summary for `Thinking.text`;
+    // both arrays stay in the namespace for reconstruction.
+    let body = json!({
+        "id": "resp_rt", "object": "response", "status": "completed",
+        "model": "deepseek-v4-flash",
+        "output": [
+            {"id": "rs_1", "type": "reasoning",
+             "summary": [{"type": "summary_text", "text": "a summary"}],
+             "content": [
+                {"type": "reasoning_text", "text": "part one"},
+                {"type": "reasoning_text", "text": "part two"}
+             ]},
+            {"id": "msg_1", "type": "message", "role": "assistant", "status": "completed",
+             "content": [{"type": "output_text", "text": "answer", "annotations": []}]}
+        ],
+        "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
+    });
+    let resp = OpenAiResponses
+        .parse_response(&serde_json::to_vec(&body).unwrap(), &meta_ok())
+        .unwrap();
+    let ContentBlock::Thinking { text, extra, .. } = &resp.message.content[0] else {
+        panic!("expected a thinking block: {:?}", resp.message.content);
+    };
+    assert_eq!(text.as_deref(), Some("part one\n\npart two"));
+    let ns = extra.get(F).expect("namespace stored");
+    assert_eq!(ns.get("content").and_then(Value::as_array).map(Vec::len), Some(2));
+    assert_eq!(ns.get("summary").and_then(Value::as_array).map(Vec::len), Some(1));
+}
+
+#[test]
+fn reasoning_text_request_round_trip_is_idempotent() {
+    // An input reasoning item carrying raw `content` restores verbatim:
+    // the build base must not synthesize a duplicate channel.
+    let wire = json!({
+        "model": "gpt-5.1",
+        "input": [
+            {"type": "reasoning", "summary": [], "id": "rs_1",
+             "content": [{"type": "reasoning_text", "text": "cot"}]},
+            {"type": "message", "role": "assistant", "id": "msg_1",
+             "content": [{"type": "output_text", "text": "hi", "annotations": []}]}
+        ]
+    });
+    let bytes = serde_json::to_vec(&wire).unwrap();
+    let (req, parse_warnings) = OpenAiResponses.parse_request(&bytes).unwrap();
+    assert!(parse_warnings.is_empty(), "{parse_warnings:?}");
+    // The raw reasoning surfaced as the block's text.
+    assert!(matches!(&req.messages[0].content[0],
+        ContentBlock::Thinking { text: Some(t), .. } if t == "cot"));
+
+    let (body, build_warnings) =
+        request_from_ir(&req, Some("gpt-5.1"), CallMode::Unary, &ConvertOptions::default())
+            .unwrap();
+    assert!(build_warnings.is_empty(), "{build_warnings:?}");
+    assert_eq!(body, wire);
+
+    let (req2, _) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
+    let (body2, _) =
+        request_from_ir(&req2, Some("gpt-5.1"), CallMode::Unary, &ConvertOptions::default())
+            .unwrap();
+    assert_eq!(body2, wire);
 }
