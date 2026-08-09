@@ -61,7 +61,8 @@ code is written for these in v1.
 - Single crate `llm-api`, edition 2024. License: MIT.
 - `default-features = false` yields a pure data layer: IR types, format types,
   conversions — no IO, no tokio, no TLS. Base dependencies: `serde`,
-  `serde_json`, `http`, `bytes`, `futures-core`.
+  `serde_json`, `http`, `bytes`, `futures-core`, plus a small date-time crate
+  for model timestamps (§ 13).
 - Feature `reqwest`: default `HttpClient` implementation.
 - MSRV: decided after implementation with `cargo-msrv`, then declared as
   `rust-version`; policy is to follow a recent stable.
@@ -184,7 +185,7 @@ pub enum ContentBlock {
     ToolCall { id: Option<String>, name: String, arguments: String,
                cache: Option<CacheHint>, extra: Extra },
     ToolResult { tool_call_id: Option<String>, name: Option<String>,
-                 content: Vec<ContentBlock>, is_error: Option<bool>,
+                 content: Vec<ToolOutputBlock>, is_error: Option<bool>,
                  cache: Option<CacheHint>, extra: Extra },
     Thinking { text: Option<String>, signature: Option<String>, extra: Extra },
     /// An unmodeled provider node (Anthropic document/server-tool blocks,
@@ -198,6 +199,18 @@ pub enum ImageSource {
     Url(String),
     Base64 { media_type: String, data: String },
     FileId(String), // provider-specific; cross-provider conversion warns
+}
+
+/// Tool-result content is a deliberately restricted union: no format can
+/// express tool calls, tool results or thinking nested inside a tool result,
+/// so the type rules those out by construction.
+#[non_exhaustive]
+pub enum ToolOutputBlock {
+    Text { text: String, cache: Option<CacheHint>, extra: Extra },
+    Image { source: ImageSource, cache: Option<CacheHint>, extra: Extra },
+    /// Same semantics as ContentBlock::Opaque (unmodeled tool-result content,
+    /// e.g. Anthropic document/search-result blocks).
+    Opaque { format: String, value: Value },
 }
 ```
 
@@ -215,8 +228,8 @@ it syntactically and leaves validity to the upstream API. OpenAI's `detail`
 and similar per-format image options live in `extra`.
 
 `Opaque` blocks parse from any union member the IR does not model, at their
-original position. They serialize back only to their own `format` (verbatim,
-with `extra` merged); any other target raises a semantic warning. This — not
+original position. They serialize back only to their own `format`, verbatim — `value` is its own
+escape hatch, edit it directly; any other target raises a semantic warning. This — not
 `#[non_exhaustive]` — is what lets v1 carry today's unmodeled provider nodes.
 `ToolCall.id`/`ToolResult.tool_call_id` are optional because Google's
 `functionCall.id` is optional (pairing there is by name/order); formats that
@@ -272,18 +285,22 @@ pub enum ToolChoice { Auto, None, Required, Tool { name: String } }
   parses the string; invalid JSON is a `ConversionError` in **both** modes —
   the library never fabricates arguments the model did not produce (the error
   carries the raw string for diagnosis).
-- `ToolResult.content` is a block list (images are valid tool results on
-  Responses, Anthropic and Google; CC tool messages are **text-only**, so
-  image tool results converted to CC produce a semantic warning). `name` is
-  required by Google's
+- `ToolResult.content` is a `Vec<ToolOutputBlock>` (§ 4.3) — text, images and
+  opaque nodes only. Images are valid tool results on Responses, Anthropic and
+  Google; CC tool messages are **text-only**, so image tool results converted
+  to CC produce a semantic warning. `name` is required by Google's
   `functionResponse` and optional elsewhere. `is_error` is native to Anthropic
   only; other targets drop it with a warning.
 - Google mapping uses `parametersJsonSchema` (standard JSON Schema
   passthrough), not the OpenAPI-style `parameters`.
-- `FunctionTool.parameters: None` means "no parameters": the field is omitted
-  on CC/Responses/Google; Anthropic requires `input_schema`, so
-  `{"type":"object"}` is emitted with a cosmetic warning — the canonical
-  no-parameter schema constrains future model output and fabricates nothing.
+- `FunctionTool.parameters: None` means "no parameters". CC: field omitted
+  (officially "defines a function with an empty parameter list"); Google:
+  `parametersJsonSchema` omitted; Responses: `parameters: null` and
+  `strict: null` — both are required-but-nullable there, so omission would
+  violate the schema; Anthropic: `input_schema` is required, so
+  `{"type":"object","properties":{},"additionalProperties":false}` is emitted
+  with a cosmetic warning — the faithful encoding of an empty parameter list
+  (a bare `{"type":"object"}` would instead permit arbitrary arguments).
 - `FunctionTool.cache` maps to Anthropic tool-level `cache_control`; other
   targets drop it with a cosmetic warning.
 
@@ -332,10 +349,11 @@ choice/candidate (the rest remain visible in `Response.raw`).
 
 ### 4.7 Reasoning configuration
 
-Anthropic `budget_tokens` and Google `thinkingBudget` are superseded by
-effort-style controls and are **not modeled** (project decision; note the
-bundled reference docs do not mark them deprecated). Use `extra` where a
-provider still needs them — the RFC 7396 merge makes the override complete,
+Anthropic `budget_tokens` and Google `thinkingBudget` are **not modeled**:
+v1's model-support baseline excludes the retiring models that only accept
+manual budgets. That is a project support policy, not a claim about the APIs
+(the bundled reference docs do not mark those fields deprecated). Use `extra`
+where a provider still needs them — the RFC 7396 merge makes the override complete,
 e.g. `extra["anthropic_messages"] = {"thinking": {"type": "enabled",
 "budget_tokens": 2048}}` rewrites the generated `thinking` object, and
 `{"generationConfig": {"thinkingConfig": {"thinkingLevel": null,
@@ -431,8 +449,10 @@ pub struct Extra(BTreeMap<String, Map<String, Value>>); // format id -> fields
   needs one goes through the `on_request` hook, which edits the raw `Value`
   directly.
 - Parsing (format → IR) collects unknown fields into the source format's
-  namespace — this is what makes same-provider round-trips lossless and keeps
-  foreign dialect fields from leaking into other formats' JSON.
+  namespace, which keeps foreign dialect fields from leaking into other
+  formats' JSON. Non-null unknown fields round-trip verbatim; a null-valued
+  unknown field canonicalizes to absent on re-serialization (null means
+  delete in the merge) — part of the § 1 canonicalization, not data loss.
 - Round-trip markers (original placement of hoisted system content,
   tool-message grouping, developer-role origin, …) do **not** live in `extra`;
   they ride the dedicated `round_trip: Option<RoundTripMeta>` field on
@@ -491,12 +511,17 @@ message's `extra` in the IR or by the indexed `on_message` hook.
 - Default mode is lenient. `ConvertOptions.strict: bool` turns any `Semantic`
   warning into an error.
 - Warnings survive the client path: `Response.warnings` carries request-build
-  and response-parse warnings; a streaming call exposes request-build warnings
-  on the stream handle (§ 12).
-- Build pipeline order: IR→JSON conversion (warnings collected) → strict gate
-  → hooks (fallible, § 5) → send. Post-hook JSON is **not** re-validated;
-  warnings describe the conversion stage only — hook consequences are the
-  user's.
+  and response-parse warnings — parsers fill parse-side warnings in directly,
+  the client prepends build-side ones. A streaming call exposes request-build
+  warnings on the stream handle, parse-side warnings ride each
+  `StreamItem.warnings` (§ 9), and the accumulator folds both into the
+  accumulated `Response.warnings`.
+- Build pipeline order: IR→JSON conversion including the `extra` merge
+  (warnings collected; then warnings whose JSON path the merged `extra`
+  explicitly set are dropped — a deliberate override is not a defect) →
+  strict gate → hooks (fallible, § 5) → send. Post-hook JSON is **not**
+  re-validated; warnings describe the conversion stage only — hook
+  consequences are the user's.
 - Conversions are pure functions and perform **zero IO**.
 - v1 implements both directions for every format — IR→request and request→IR
   (the parse direction powers round-trip tests and future format-to-format
@@ -548,7 +573,9 @@ blocks.
   IR `Tool`/`User` messages merge into that single user turn as required;
   grouping is recorded in `round_trip` metadata and restored when parsing back.
 - Text-only IR tool results map to Google's object-valued `response` as
-  `{"output": "<text>"}` (unwrapped on parse). When `ToolResult.name` is
+  `{"output": "<text>"}`, unwrapped on parse; multiple `Text` blocks join in
+  order with `\n\n` (empty blocks participate verbatim, no warning — the
+  boundary loss is § 1 canonicalization). When `ToolResult.name` is
   unset, the Google converter resolves it from the `ToolCall` with the same id
   earlier in the request; if none resolves, that is a `ConversionError` —
   an invented name would only produce an invalid call. Assistant `ToolCall` blocks map
@@ -596,7 +623,9 @@ in provider responses (e.g. image output parts) and parse as-is;
 user-constructed assistant images converting to a format without that channel
 get the usual semantic warning. Inside CC, tool messages are text-only
 (§ 4.5): image blocks in a `ToolResult` are dropped with a semantic warning in
-lenient mode, error in strict; text is kept.
+lenient mode, error in strict; text is kept. Nesting inside a `ToolResult`
+needs no validation row — the `ToolOutputBlock` type (§ 4.3) rules it out by
+construction.
 
 ### 7.5 Signed-block invariants
 
@@ -607,8 +636,13 @@ never reorder blocks within a message, and same-format round-trips are
 identity on block order, so plain replay is always safe. The opt-ins interact
 as follows:
 
-- `merge_consecutive_roles` concatenates content arrays in order — signature
-  positions survive.
+- `merge_consecutive_roles` treats any message containing a signed block
+  (`Thinking.signature`, or a Google `thoughtSignature` riding a `ToolCall`'s
+  `extra`) as a **merge barrier**: the adjacent pair stays unmerged, with a
+  semantic warning explaining why. Where merges do happen, block order is
+  preserved — but a dialect that requires merged turns cannot be assumed to
+  still validate signatures across rebuilt message boundaries, so that
+  trade-off is surfaced rather than taken silently.
 - `orphan_tool_calls: DropTrailing` can leave a preceding `Thinking` block
   orphaned; this raises a dedicated semantic warning (the upstream may reject
   the turn).
@@ -662,8 +696,12 @@ pub enum StopReason { EndTurn, MaxTokens, StopSequence, ToolUse,
 | Anthropic `stop_reason` | `end_turn`/`max_tokens`/`stop_sequence`/`tool_use`/`refusal` map directly; `pause_turn`→`PauseTurn` (actionable: resend the turn as-is to continue); `model_context_window_exceeded`, `compaction` → `Other(original)` |
 | Google `finishReason` | `STOP`→`EndTurn`, `MAX_TOKENS`→`MaxTokens`, safety family (`SAFETY`, `PROHIBITED_CONTENT`, `BLOCKLIST`, `SPII`, `IMAGE_*`)→`ContentFilter`, everything else → `Other(original)` |
 
-Normalization rule: a would-be `EndTurn` whose message contains `ToolCall`
-blocks becomes `ToolUse` (Google reports `STOP` for function calls).
+Normalization rules, applied in order: a would-be `EndTurn` whose message
+contains `ToolCall` blocks becomes `ToolUse` (Google reports `STOP` for
+function calls); then a would-be `EndTurn` — or absent stop reason — whose
+message contains a refusal-marked block (§ 9) becomes `Refusal`. CC and
+Responses have no refusal finish reason or status of their own, so without
+this rule `StopReason::Refusal` would never be produced for them.
 
 A Google prompt blocked by safety returns **no candidates** (only
 `promptFeedback`): this parses to a `Response` with an empty-content assistant
@@ -711,6 +749,7 @@ pub struct StreamItem {
     pub event: StreamEvent,
     pub raw: Option<String>, // original payload: always Some for Unknown,
                              // Some for every event when include_raw is on
+    pub warnings: Vec<ConversionWarning>, // parse-side warnings, usually empty
 }
 
 #[non_exhaustive]
@@ -745,9 +784,11 @@ pub enum BlockDelta {
   dedicated fixtures.
 - **Accumulator** (`StreamEvent`s → `Response`): appends blocks strictly in
   arrival order and never merges same-typed blocks — interleaved
-  thinking→text→thinking→text sequences survive verbatim. Usage merges
-  field-wise (latest non-`None` value per field wins — e.g. Anthropic reports
-  input counts in `message_start` and cumulative output in `message_delta`).
+  thinking→text→thinking→text sequences survive verbatim. Any `usage` a
+  stream event carries is a **complete cumulative snapshot** — the stateful
+  parser folds provider partials into a running total before emitting (e.g.
+  Anthropic's `message_start` input counts are cached and merged into every
+  `message_delta` usage); the accumulator simply keeps the latest snapshot.
   Provided because agents typically render deltas while also keeping the full
   message for history. A stream that errors before its terminal event
   surfaces the error through the stream; accumulation then fails — the events
@@ -764,6 +805,10 @@ pub enum BlockDelta {
   parses into a `Text` block whose format namespace in `extra` records
   `{"refusal": true}` — it survives accumulation and round-trips even though
   `Response.raw` is `None` for streamed responses.
+- Stream parse warnings ride `StreamItem.warnings`: the client attaches a
+  parse call's warnings to the first item that call emits (held for the next
+  item when a call emits none); the accumulator folds every item's warnings
+  into `Response.warnings`.
 - SSE parsing lives in the library, on top of the transport's byte stream.
   Google streaming always uses `?alt=sse` (the JSON-array mode is not
   implemented). For CC, `stream_options: {include_usage: true}` is injected by
@@ -836,8 +881,9 @@ pub trait ApiFormat: Send + Sync {
     /// (unary vs streaming — Google's URL differs by mode).
     fn build_request(&self, req: &Request, cfg: &BuildCtx)
         -> Result<BuiltRequest>; // JSON body + URL + headers + auth spec + warnings
-    fn parse_response(&self, body: &[u8], meta: &ResponseMeta)
-        -> Result<(Response, Vec<ConversionWarning>)>;
+    /// Parse-side warnings go directly into `Response.warnings`; the client
+    /// prepends request-build warnings afterwards.
+    fn parse_response(&self, body: &[u8], meta: &ResponseMeta) -> Result<Response>;
     /// Non-2xx responses: classify and preserve the provider error shape.
     /// Default impl builds a generic `Error::Api` from status + raw body.
     fn parse_error(&self, status: u16, headers: &http::HeaderMap, body: &[u8]) -> Error;
@@ -854,7 +900,10 @@ pub trait ApiFormat: Send + Sync {
 }
 
 pub trait StreamParser: Send {
-    fn parse(&mut self, event: &SseEvent) -> Result<Vec<StreamEvent>>;
+    /// Unified events plus parse-side warnings for this provider event
+    /// (skipped extra candidates, lossy inference, …).
+    fn parse(&mut self, event: &SseEvent)
+        -> Result<(Vec<StreamEvent>, Vec<ConversionWarning>)>;
 }
 ```
 
@@ -904,8 +953,10 @@ pub enum Override<T> { Inherit, Set(T), Disable }
 
 - Capability decoupling supports real-world providers that, e.g., serve chat in
   Anthropic format but list models only in OpenAI format, or host capabilities
-  on different URLs. Unset `models`/`count_tokens` derive from `chat` where the
-  format supports it.
+  on different URLs. Unset `models`/`count_tokens` derive from `chat` only
+  when `chat.url` is `Base` — a `Full` chat URL cannot be reliably
+  decomposed; with a `Full` chat URL and no explicit config, those
+  capabilities return `Error::NotSupported` when called.
 - URL construction. `Base` joining: trim the base's trailing `/`, append `/`
   plus the capability path; the base's own query string is preserved. Path
   templates — CC chat `chat/completions`; Responses chat `responses`, count
@@ -916,10 +967,16 @@ pub enum Override<T> { Inherit, Set(T), Disable }
   segment. `Full` serves nonstandard paths (`/chat`, `/completions`, bare
   `/api`, no `/v1` prefix, …); for Google-format chat a `Full` URL should
   contain `{method}`, otherwise the same URL is used for both call modes.
-  Query precedence: format-required query (`alt=sse`) first, then provider
-  `extra_query`, then per-call — appended in order, duplicate keys legal.
-  Header precedence: format defaults < provider `extra_headers` < per-call
-  (same-name overrides).
+  Query rules: format-required keys (`alt=sse`) are protected — a
+  user-supplied query with the same key is a `ConversionError`; otherwise
+  later layers replace same-name keys (provider `extra_query`, then
+  per-call); a `Base` URL's own query is decomposed and rebuilt, never
+  string-concatenated. Header precedence: format defaults (version,
+  content-type, betas) < provider `extra_headers` < endpoint `Set` (same-name
+  override, other names add) < per-call < auth injection (applied last, not
+  overridable by any header layer). Endpoint `Disable` drops the provider
+  `extra_headers` layer for that endpoint; format defaults survive — removing
+  those would break the protocol, deliberate surgery goes through hooks.
 - Convenience constructors cover the common case (one format, one base URL, one
   key).
 - `ConvertOptions { strict, downgrade_developer, orphan_tool_calls,
@@ -960,8 +1017,10 @@ request-build warnings, `client.list_models(&provider)`,
   `raw`. `id` is normalized to what `ProviderConfig.model` accepts: Google's
   `models/` prefix is stripped (the original resource name stays in `raw`,
   and the URL builder tolerates both forms). `created` parses OpenAI's Unix
-  seconds and Anthropic's RFC 3339 via a small internal parser (no time-crate
-  dependency); Google has no creation time (`None`).
+  seconds directly and Anthropic's RFC 3339 via a small, well-tested
+  date-time dependency (picked at implementation, e.g. `jiff` or `time`); a
+  timestamp that fails to parse degrades to `None` and never fails the
+  model-list call. Google has no creation time (`None`).
 - `list_models` auto-paginates to exhaustion (Anthropic cursor via
   `after_id`/`has_more`; Google `pageToken` with `pageSize` up to 1000; OpenAI
   is a single page). Fine-grained pagination control = use the typed format
@@ -1009,6 +1068,9 @@ pub enum ApiErrorKind { InvalidRequest, Auth, PermissionDenied, NotFound,
   canonicalize, so tests assert **idempotence** — the canonical JSON is a
   fixed point of parse→serialize — plus preservation of `extra`, `Opaque`
   nodes and `round_trip` metadata.
+- Dedicated tests: the § 4.7 extra-override examples (budget re-enable on
+  Anthropic/Google must fully rewrite the generated thinking fields) and the
+  § 7.5 signed-block merge barrier (merged vs skipped paths).
 - Fixtures under `tests/fixtures/<format_id>/` — real request/response JSON
   and complete SSE streams taken from `docs/official_api` and recorded
   sessions. Stream block-boundary inference (CC, Google) gets the densest
