@@ -1,6 +1,7 @@
 # llm-api Design
 
-Status: v1 design agreed on 2026-08-08. Implementation not started.
+Status: v1 design, agreed 2026-08-08 and revised through subsequent audit
+rounds (see git history). Implementation not started.
 
 `llm-api` is a Rust library providing a unified intermediate representation (IR)
 for LLM chat APIs, bidirectional conversion between the IR and multiple provider
@@ -289,11 +290,20 @@ pub enum ToolChoice { Auto, None, Required, Tool { name: String } }
   the library never fabricates arguments the model did not produce (the error
   carries the raw string for diagnosis).
 - `ToolResult.content` is a `Vec<ToolOutputBlock>` (§ 4.3) — text, images and
-  opaque nodes only. Images are valid tool results on Responses, Anthropic and
-  Google; CC tool messages are **text-only**, so image tool results converted
-  to CC produce a semantic warning. `name` is required by Google's
-  `functionResponse` and optional elsewhere. `is_error` is native to Anthropic
-  only; other targets drop it with a warning.
+  opaque nodes only. Tool-result image mapping per source:
+
+  | `ImageSource` | CC | Responses | Anthropic | Google (`FunctionResponsePart`) |
+  |---|---|---|---|---|
+  | `Url` | dropped, semantic warning¹ | `input_image.image_url` | `source:{type:"url"}` | no channel — semantic warning |
+  | `Base64` | dropped, semantic warning¹ | data URL | `source:{type:"base64"}` | `parts[].inlineData` |
+  | `FileId` | dropped, semantic warning¹ | `input_image.file_id` | `source:{type:"file"}` | no channel — semantic warning |
+
+  ¹ CC tool messages are text-only. Google's `FunctionResponsePart` union has
+  a single member, `inlineData` (base64; `fileData` exists only on Vertex),
+  so URL/FileId tool images have no zero-IO channel there. `name` is required
+  by Google's `functionResponse` and optional elsewhere. `is_error` is native
+  to Anthropic only; other targets drop it with a **semantic** warning — an
+  error result would otherwise read as success.
 - Google mapping uses `parametersJsonSchema` (standard JSON Schema
   passthrough), not the OpenAPI-style `parameters`.
 - `FunctionTool.parameters: None` means "no parameters". CC: field omitted
@@ -307,8 +317,11 @@ pub enum ToolChoice { Auto, None, Required, Tool { name: String } }
 - `FunctionTool.strict` maps independently and is never rewritten by the
   `parameters` rules: CC/Responses/Anthropic send the user's value verbatim
   (Responses emits `strict: null` only when `strict` is also unset); Google
-  has no per-tool strict — cosmetic warning. Whether `strict: true` next to
-  an empty schema is meaningful is the upstream's call.
+  has no per-tool strict — **semantic** warning (schema adherence is a
+  tool-call contract, not tuning; mapping all-strict toolsets to
+  `functionCallingConfig.mode: VALIDATED` is a possible future approximation,
+  not v1). Whether `strict: true` next to an empty schema is meaningful is
+  the upstream's call.
 - `FunctionTool.cache` maps to Anthropic tool-level `cache_control`; other
   targets drop it with a cosmetic warning.
 
@@ -325,8 +338,9 @@ Allowed-tool lists (`allowed_tools`, `allowedFunctionNames` beyond one name)
 and hosted/built-in tools are not modeled; use `extra`.
 
 `parallel_tool_calls`: OpenAI CC/Responses `parallel_tool_calls`; Anthropic
-`tool_choice.disable_parallel_tool_use` (inverted); Google has no equivalent
-(warning).
+`tool_choice.disable_parallel_tool_use` (inverted); Google has no equivalent —
+dropping `Some(false)` (a serial-execution constraint) is a **semantic**
+warning, dropping `Some(true)` is cosmetic.
 
 ### 4.6 Sampling parameters
 
@@ -428,7 +442,7 @@ pub enum OutputFormat {
 |---|---|---|
 | OpenAI CC | `response_format: {type:"json_schema", json_schema:{name, schema, strict}}` (`name` required upstream; `"response"` synthesized when unset) | `response_format: {type:"json_object"}` |
 | Responses | `text.format: {type:"json_schema", name, schema, strict}` | `text.format: {type:"json_object"}` |
-| Anthropic | `output_config.format: {type:"json_schema", schema}` (`name`/`strict` warn) | warn (no schema-less mode) |
+| Anthropic | `output_config.format: {type:"json_schema", schema}` (`name`/`strict` warn — cosmetic: Anthropic's json_schema output is natively enforced, the strict toggle has nothing to lose) | warn (no schema-less mode) |
 | Google | `generationConfig.responseMimeType:"application/json"` + `responseJsonSchema: schema` (standard JSON Schema passthrough; the OpenAPI-style `responseSchema` is not used) | `responseMimeType:"application/json"` |
 
 The schema itself is passed through verbatim. Providers accept different JSON
@@ -503,14 +517,19 @@ message's `extra` in the IR or by the indexed `on_message` hook.
   pub struct ConversionWarning {
       pub code: WarningCode,         // #[non_exhaustive] enum — stable, matchable
       pub severity: WarningSeverity, // Semantic | Cosmetic
-      pub location: String,          // JSON-pointer-style path, e.g. "/messages/3/content/0"
+      pub location: String,          // JSON Pointer: build-side warnings point into
+                                     // the final target JSON, parse-side warnings
+                                     // into the JSON being consumed
       pub target_format: String,
+      pub overridden: bool,          // `extra` explicitly addressed this path (§ below)
       pub message: String,
   }
   ```
 
   `Semantic` = meaning lost (thinking dropped, unsupported image source);
   `Cosmetic` = tuning lost (cache hint dropped, unsupported sampling knob).
+  The test is whether model-visible behavior or contract can change, not the
+  field's category.
   Data the target format structurally **requires** (Anthropic `max_tokens`, a
   required tool-call id, an object parseable from `arguments`, a resolvable
   `functionResponse.name`) is never invented: its absence is a
@@ -525,8 +544,11 @@ message's `extra` in the IR or by the indexed `on_message` hook.
   `StreamItem.warnings` (§ 9), and the accumulator folds both into the
   accumulated `Response.warnings`.
 - Build pipeline order: IR→JSON conversion including the `extra` merge
-  (warnings collected; then warnings whose JSON path the merged `extra`
-  explicitly set are dropped — a deliberate override is not a defect) →
+  (warnings collected; a warning is then marked `overridden` — kept for
+  debugging, ignored by the strict gate — when `extra` set or deleted exactly
+  its pointer, or set a non-object value at an ancestor of it: under RFC 7396
+  arrays and scalars replace while objects merge, so only those constitute an
+  ancestor override; the overriding value's validity is not re-assessed) →
   strict gate → hooks (fallible, § 5) → send. Post-hook JSON is **not**
   re-validated; warnings describe the conversion stage only — hook
   consequences are the user's.
@@ -587,7 +609,13 @@ blocks.
   `{"output": "<text>"}` (unwrapped on parse), multiple blocks joining in
   order with `\n\n` **plus a cosmetic warning** — user-constructed
   multi-block results are a structural downgrade on Google, while anything
-  parsed from Google is single-block and joins warning-free.
+  parsed from Google is single-block and joins warning-free. Google also
+  splits media from text — images go to `parts[]` (relative image order
+  kept), text to `response` — so an IR sequence that interleaves text after
+  an image cannot keep its order: serializing one adds a **semantic** warning
+  (order lost). The parse-side canonical order is the `response` text first,
+  then `parts[]` images, so anything parsed from Google round-trips
+  warning-free.
 - An empty `ToolResult.content` has a defined encoding per target — CC
   `content: ""`, Responses `output: ""`, Anthropic `content` omitted, Google
   `response: {}` — each parsing back to the empty list (Google distinguishes
@@ -799,7 +827,12 @@ pub enum BlockDelta {
   semantic events, Anthropic events (near-direct mapping), Google partial
   `GenerateContentResponse` objects (block boundaries inferred from parts).
   Boundary inference for CC/Google is the highest-risk parsing code and gets
-  dedicated fixtures.
+  dedicated fixtures. Each parser emits `MessageStop` itself on its protocol
+  terminator; a Google blocked-prompt chunk (`promptFeedback.blockReason`, no
+  candidates) immediately yields `MessageStart` (if not yet emitted) +
+  `MessageDelta { stop_reason: ContentFilter }` + `MessageStop`. Google
+  terminal validation looks only at the first candidate (multi-candidate is
+  unsupported, § 8).
 - **Accumulator** (`StreamEvent`s → `Response`): appends blocks strictly in
   arrival order and never merges same-typed blocks — interleaved
   thinking→text→thinking→text sequences survive verbatim. Any `usage` a
@@ -925,11 +958,14 @@ pub trait StreamParser: Send {
     fn parse(&mut self, event: &SseEvent)
         -> Result<(Vec<StreamEvent>, Vec<ConversionWarning>)>;
     /// Called exactly once when the byte stream ends: flushes held warnings
-    /// and safely finalizable blocks, then validates terminal state. A
-    /// stream that never showed its protocol terminator ([DONE],
-    /// message_stop, a terminal Responses event, a finishReason chunk)
-    /// returns `Error::Parse` ("truncated stream") — a silent EOF must not
-    /// pass a half response off as complete.
+    /// and safely finalizable blocks, then validates terminal state — it
+    /// never synthesizes MessageStop (parsers emit that themselves, § 9).
+    /// Terminators: CC `[DONE]`; Anthropic `message_stop`; a terminal
+    /// Responses event; Google either a `finishReason` on the first
+    /// candidate or a blocked-prompt chunk (`promptFeedback.blockReason`
+    /// with no candidates). A stream that showed none of these returns
+    /// `Error::Parse` ("truncated stream") — a silent EOF must not pass a
+    /// half response off as complete.
     fn finish(&mut self)
         -> Result<(Vec<StreamEvent>, Vec<ConversionWarning>)>;
 }
@@ -1042,10 +1078,18 @@ Client surface (sketch): `Client::new(http)`, then
 `StreamHandle: Stream<Item = Result<StreamItem>>` and also exposes the
 request-build warnings, `client.list_models(&provider)`,
 `client.count_tokens(&provider, &request, opts)`. Token counting accepts the
-same `CallOptions` — `model`, `hooks`, `extra_headers`, `extra_query` apply
-(`include_raw` is ignored), so a per-call model override or a hook-injected
-field is counted exactly as it will be sent; hooks run against the count
-endpoint's final JSON.
+same `CallOptions`: every body-affecting option applies with the same merge
+result as `send` — `model`, `convert`, `hooks`, `extra_headers`,
+`extra_query` — and only `include_raw` is ignored. Pipeline: the prospective
+**chat** JSON is built first (extra, convert options and hooks all act on it,
+exactly as for `send`), then a per-format count adapter reshapes it for the
+count endpoint — Google wraps it in `generateContentRequest`, Anthropic
+filters it to the fields its count endpoint accepts, Responses maps it onto
+the `input_tokens` body; fields the endpoint does not accept are filtered by
+the adapter (they cannot affect the count). "Counted exactly as it will be
+sent" therefore holds whenever the count endpoint uses the chat format; with
+a decoupled count format the count request is built independently from the
+IR by that format, and the result is a semantic approximation only.
 
 ## 13. Model listing and token counting
 
@@ -1114,9 +1158,9 @@ pub enum ApiErrorKind { InvalidRequest, Auth, PermissionDenied, NotFound,
   and complete SSE streams taken from `docs/official_api` and recorded
   sessions. Stream block-boundary inference (CC, Google) gets the densest
   coverage, including interleaved thinking/text, tool-argument fragments,
-  citation/annotation streams, blocked-prompt responses, multi-candidate
-  warning paths, and truncated streams (missing protocol terminator ⇒
-  `finish()` error).
+  citation/annotation streams, blocked-prompt responses (non-streaming
+  **and** SSE), multi-candidate warning paths, and truncated streams
+  (missing protocol terminator ⇒ `finish()` error).
 - HTTP layer tested with `wiremock`.
 - Live tests: `#[ignore]` + env-gated API keys (`OPENAI_API_KEY`,
   `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `DEEPSEEK_API_KEY` — DeepSeek
