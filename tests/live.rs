@@ -10,14 +10,12 @@
 //! Keys and model ids are read from the process environment first, then
 //! from a `.env` file at the crate root (`KEY=VALUE` lines, `#` comments,
 //! optional quotes; the file is gitignored). A test silently passes without
-//! its key. Model defaults can be overridden with
-//! `LLM_API_LIVE_{OPENAI,ANTHROPIC,GOOGLE,DEEPSEEK}_MODEL`.
-//!
-//! **Anthropic key resolution differs**: development environments such as
-//! Claude Code occupy `ANTHROPIC_API_KEY` in the process environment with
-//! their own credential, so the tests read `LLM_API_ANTHROPIC_API_KEY`
-//! (process env or `.env`) first and fall back to `ANTHROPIC_API_KEY`
-//! **from `.env` only** — the process-environment value is never used.
+//! its key. Keys are named `LLM_API_{OPENAI,ANTHROPIC,GOOGLE,DEEPSEEK}
+//! _API_KEY` — deliberately prefixed, with no fallback to the providers'
+//! conventional names: development environments own some of those (e.g.
+//! Claude Code sets `ANTHROPIC_API_KEY` to its own credential), and a
+//! shadowed key produces baffling 401s. Model defaults can be overridden
+//! with `LLM_API_LIVE_{OPENAI,ANTHROPIC,GOOGLE,DEEPSEEK}_MODEL`.
 //!
 //! Coverage per format:
 //! - multi-turn conversation matrix (`streaming × thinking`), asserting the
@@ -90,19 +88,12 @@ fn dotenv() -> &'static HashMap<String, String> {
     })
 }
 
-fn dotenv_value(name: &str) -> Option<String> {
-    dotenv().get(name).cloned().filter(|v| !v.is_empty())
-}
-
 /// Reads a configuration value: process environment first, then `.env`.
 fn env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|v| !v.is_empty()).or_else(|| dotenv_value(name))
-}
-
-/// The Anthropic key, dodging the `ANTHROPIC_API_KEY` the surrounding
-/// development environment may own (see the module docs).
-fn anthropic_key() -> Option<String> {
-    env("LLM_API_ANTHROPIC_API_KEY").or_else(|| dotenv_value("ANTHROPIC_API_KEY"))
+    std::env::var(name)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| dotenv().get(name).cloned().filter(|v| !v.is_empty()))
 }
 
 fn provider(
@@ -122,7 +113,7 @@ fn openai(format: impl ApiFormat + 'static) -> Option<ProviderConfig> {
     Some(provider(
         format,
         "https://api.openai.com/v1",
-        env("OPENAI_API_KEY")?,
+        env("LLM_API_OPENAI_API_KEY")?,
         "LLM_API_LIVE_OPENAI_MODEL",
         "gpt-5.6-sol",
     ))
@@ -132,7 +123,7 @@ fn anthropic() -> Option<ProviderConfig> {
     Some(provider(
         AnthropicMessages,
         "https://api.anthropic.com/v1",
-        anthropic_key()?,
+        env("LLM_API_ANTHROPIC_API_KEY")?,
         "LLM_API_LIVE_ANTHROPIC_MODEL",
         "claude-opus-5",
     ))
@@ -142,7 +133,7 @@ fn google() -> Option<ProviderConfig> {
     Some(provider(
         GoogleGenerateContent,
         "https://generativelanguage.googleapis.com/v1beta",
-        env("GOOGLE_API_KEY")?,
+        env("LLM_API_GOOGLE_API_KEY")?,
         "LLM_API_LIVE_GOOGLE_MODEL",
         "gemini-3.6-flash",
     ))
@@ -155,7 +146,7 @@ fn deepseek(format: impl ApiFormat + 'static, base: &str) -> Option<ProviderConf
     Some(provider(
         format,
         base,
-        env("DEEPSEEK_API_KEY")?,
+        env("LLM_API_DEEPSEEK_API_KEY")?,
         "LLM_API_LIVE_DEEPSEEK_MODEL",
         "deepseek-v4-flash",
     ))
@@ -557,14 +548,14 @@ structured_matrix!(openai_chat_completions_structured_output_live, openai(OpenAi
 structured_matrix!(openai_chat_completions_structured_output_stream_live, openai(OpenAiChatCompletions), stream = true);
 
 #[tokio::test]
-#[ignore = "live API call; needs OPENAI_API_KEY (env or .env)"]
+#[ignore = "live API call; needs LLM_API_OPENAI_API_KEY (env or .env)"]
 async fn openai_chat_completions_image_input_live() {
     let Some(p) = openai(OpenAiChatCompletions) else { return };
     assert_image_input(p).await;
 }
 
 #[tokio::test]
-#[ignore = "live API call; needs OPENAI_API_KEY (env or .env)"]
+#[ignore = "live API call; needs LLM_API_OPENAI_API_KEY (env or .env)"]
 async fn openai_chat_completions_models_live() {
     let Some(p) = openai(OpenAiChatCompletions) else { return };
     assert_models_work(p).await;
@@ -586,21 +577,21 @@ structured_matrix!(openai_responses_structured_output_live, openai(OpenAiRespons
 structured_matrix!(openai_responses_structured_output_stream_live, openai(OpenAiResponses), stream = true);
 
 #[tokio::test]
-#[ignore = "live API call; needs OPENAI_API_KEY (env or .env)"]
+#[ignore = "live API call; needs LLM_API_OPENAI_API_KEY (env or .env)"]
 async fn openai_responses_image_input_live() {
     let Some(p) = openai(OpenAiResponses) else { return };
     assert_image_input(p).await;
 }
 
 #[tokio::test]
-#[ignore = "live API call; needs OPENAI_API_KEY (env or .env)"]
+#[ignore = "live API call; needs LLM_API_OPENAI_API_KEY (env or .env)"]
 async fn openai_responses_models_live() {
     let Some(p) = openai(OpenAiResponses) else { return };
     assert_models_work(p).await;
 }
 
 #[tokio::test]
-#[ignore = "live API call; needs OPENAI_API_KEY (env or .env)"]
+#[ignore = "live API call; needs LLM_API_OPENAI_API_KEY (env or .env)"]
 async fn openai_responses_count_tokens_live() {
     let Some(p) = openai(OpenAiResponses) else { return };
     assert_count_works(p).await;
@@ -622,14 +613,14 @@ structured_matrix!(anthropic_messages_structured_output_live, anthropic(), strea
 structured_matrix!(anthropic_messages_structured_output_stream_live, anthropic(), stream = true);
 
 #[tokio::test]
-#[ignore = "live API call; needs LLM_API_ANTHROPIC_API_KEY (or ANTHROPIC_API_KEY in .env)"]
+#[ignore = "live API call; needs LLM_API_ANTHROPIC_API_KEY (env or .env)"]
 async fn anthropic_messages_image_input_live() {
     let Some(p) = anthropic() else { return };
     assert_image_input(p).await;
 }
 
 #[tokio::test]
-#[ignore = "live API call; needs LLM_API_ANTHROPIC_API_KEY (or ANTHROPIC_API_KEY in .env)"]
+#[ignore = "live API call; needs LLM_API_ANTHROPIC_API_KEY (env or .env)"]
 async fn anthropic_models_and_count_live() {
     let Some(p) = anthropic() else { return };
     assert_models_work(p.clone()).await;
@@ -652,21 +643,21 @@ structured_matrix!(google_generate_content_structured_output_live, google(), str
 structured_matrix!(google_generate_content_structured_output_stream_live, google(), stream = true);
 
 #[tokio::test]
-#[ignore = "live API call; needs GOOGLE_API_KEY (env or .env)"]
+#[ignore = "live API call; needs LLM_API_GOOGLE_API_KEY (env or .env)"]
 async fn google_image_input_live() {
     let Some(p) = google() else { return };
     assert_image_input(p).await;
 }
 
 #[tokio::test]
-#[ignore = "live API call; needs GOOGLE_API_KEY (env or .env)"]
+#[ignore = "live API call; needs LLM_API_GOOGLE_API_KEY (env or .env)"]
 async fn google_models_live() {
     let Some(p) = google() else { return };
     assert_models_work(p).await;
 }
 
 #[tokio::test]
-#[ignore = "live API call; needs GOOGLE_API_KEY (env or .env)"]
+#[ignore = "live API call; needs LLM_API_GOOGLE_API_KEY (env or .env)"]
 async fn google_count_tokens_live() {
     let Some(p) = google() else { return };
     assert_count_works(p).await;

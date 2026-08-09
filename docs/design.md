@@ -1279,12 +1279,13 @@ pub enum ApiErrorKind { InvalidRequest, Auth, PermissionDenied, NotFound,
   **and** SSE), multi-candidate warning paths, and truncated streams
   (missing protocol terminator ⇒ `finish()` error).
 - HTTP layer tested with `wiremock`.
-- Live tests: `#[ignore]` + env-gated API keys (`OPENAI_API_KEY`,
-  `GOOGLE_API_KEY`, `DEEPSEEK_API_KEY`; Anthropic reads
-  `LLM_API_ANTHROPIC_API_KEY` first and `ANTHROPIC_API_KEY` from `.env`
-  only — development environments like Claude Code occupy that name in the
-  process environment), also read from a gitignored crate-root `.env`
-  (process environment wins otherwise). Coverage per format: a multi-turn
+- Live tests: `#[ignore]` + env-gated API keys named
+  `LLM_API_{OPENAI,ANTHROPIC,GOOGLE,DEEPSEEK}_API_KEY` — deliberately
+  prefixed with no fallback to the providers' conventional names, which
+  development environments may own (e.g. Claude Code sets
+  `ANTHROPIC_API_KEY` to its own credential; a shadowed key produces
+  baffling 401s). Keys are read from the process environment first, then
+  from a gitignored crate-root `.env`. Coverage per format: a multi-turn
   conversation matrix (`streaming × thinking`) that checks context
   reception against the model's own first-turn answer, multi-round
   tool-call loops with verbatim history replay, JSON-Schema structured

@@ -1,0 +1,57 @@
+# CI: offline tests, lints and MSRV verification.
+#
+# Runs on ubuntu-latest only: the crate has no platform-specific code (IO
+# is abstracted behind `HttpClient`, paths/time/serde are portable), so
+# other platforms would only re-test dependency builds. Live tests
+# (`tests/live.rs`) are `#[ignore]`d and need provider keys — never run
+# here.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (stable)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Test (all features)
+        run: cargo test --all-features
+      - name: Test (pure data layer)
+        run: cargo test --no-default-features
+      - name: Clippy (all features)
+        run: cargo clippy --all-features --all-targets -- -D warnings
+      - name: Clippy (pure data layer)
+        run: cargo clippy --no-default-features --all-targets -- -D warnings
+      - name: Docs
+        run: cargo doc --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  msrv:
+    name: MSRV (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+      - uses: Swatinem/rust-cache@v2
+      # `check` rather than `test`: the MSRV promise is "compiles against
+      # 1.88" (declared as `rust-version`); behavior is covered by the
+      # stable job. `--all-targets` includes tests and dev-dependencies.
+      - name: Check (all features, all targets)
+        run: cargo check --all-features --all-targets
+      - name: Check (pure data layer)
+        run: cargo check --no-default-features
