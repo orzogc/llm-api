@@ -155,10 +155,11 @@ fn hello_request() -> Request {
 }
 
 /// A request roomy enough for a chain of thought plus the answer, with a
-/// question that reliably triggers reasoning.
+/// question that requires actual multi-step work — adaptive thinking modes
+/// skip trivial prompts.
 fn thinking_request() -> Request {
     let mut req = Request::with_messages(vec![Message::user_text(
-        "Which is greater, 9.11 or 9.8? Answer in one short sentence.",
+        "How many prime numbers are there between 100 and 150? Reply with just the count.",
     )]);
     req.max_output_tokens = Some(4096);
     req
@@ -240,10 +241,15 @@ fn openai_no_thinking() -> Request {
     req
 }
 
-/// Anthropic adaptive thinking (`{"type": "adaptive"}`).
+/// Anthropic thinking: `enabled(true)` → `{"type": "adaptive"}` plus
+/// `output_config.effort: high` to bias the model toward thinking (the
+/// current generation rejects the manual-budget `{"type": "enabled"}` —
+/// the upstream error says to use adaptive + effort, confirming § 4.7).
 fn anthropic_thinking() -> Request {
     let mut req = thinking_request();
-    req.reasoning = Some(Reasoning::enabled(true));
+    let mut reasoning = Reasoning::enabled(true);
+    reasoning.effort = Some(Effort::High);
+    req.reasoning = Some(reasoning);
     req
 }
 
