@@ -32,9 +32,13 @@ and pick the upstream API format at call time.
   idempotent — re-parsing and re-serializing the canonical form reproduces it
   exactly. Preserved verbatim: modeled fields, **non-null** unknown fields,
   unmodeled union members (`Opaque`, § 4.3) and message order. The one
-  documented representational loss: null-valued unknown fields canonicalize
+  **silent** representational loss: null-valued unknown fields canonicalize
   to absent — for an unknown field the library cannot know whether `null`
-  carries distinct semantics. Nothing else is silently dropped.
+  carries distinct semantics. Anything else that cannot be represented or
+  rebuilt is dropped **with a warning** — each format module documents its
+  cases (e.g. CC `stream_options` members and inexpressible assistant block
+  order, Google mixed-tool-entry splitting). Nothing else is dropped
+  silently.
 
 ### Non-goals
 
@@ -557,9 +561,10 @@ refer to the **serialized target-format** message sequence (after the splits,
 merges and downgrades of § 7); top-level system channels (Anthropic `system`,
 Responses `instructions`, Google `systemInstruction`) are not visited — use
 `on_request` for those. The (index, role) pairs are a snapshot taken at
-serialization time: a message whose pointer the request-level `extra` merge
-rewrote is skipped, and messages `extra` injected are not visited —
-rewriting the message array wholesale is `on_request` territory. Message-level targeting ("modify the third message",
+serialization time: a message whose pointer — or wire `role` key — an
+`extra` merge rewrote is skipped (the snapshot no longer describes it), and
+messages `extra` injected are not visited — rewriting the message array
+wholesale is `on_request` territory. Message-level targeting ("modify the third message",
 "set a breakpoint on the last user message") is served either by editing that
 message's `extra` in the IR or by the indexed `on_message` hook.
 
@@ -761,11 +766,14 @@ holds one field per channel, so an IR sequence interleaving
 thinking/content/tool-call blocks parses back in canonical channel order;
 joining several thinking texts into the single `reasoning_content` string
 additionally warns `ThinkingBlocksJoined`, cosmetic). Same-format round-trips
-are identity on block order for wire-parsed history (parsers only ever
-produce expressible orders), so plain replay is always safe; the CC caveat
-does not weaken signed replay — `reasoning_content` is a plaintext channel
-whose signatures are already dropped with their own warning. The opt-ins
-interact as follows:
+are identity on block order for history parsed from a **non-streaming body**
+(those parsers only produce expressible orders), so its plain replay is
+always safe. A CC **streamed** response, however, accumulates blocks in wire
+arrival order (§ 9), which may interleave thinking and text; replaying such
+history to CC surfaces the inexpressible order as `BlockOrderLost` (a strict
+build fails). Neither caveat weakens signed replay — `reasoning_content` is
+a plaintext channel whose signatures are already dropped with their own
+warning. The opt-ins interact as follows:
 
 - `merge_consecutive_roles` treats any message containing a signed block
   (`Thinking.signature`, or a Google `thoughtSignature` riding a `ToolCall`'s
@@ -957,9 +965,10 @@ pub enum BlockDelta {
   implemented). For CC, `stream_options: {include_usage: true}` is injected by
   default (`OpenAiChatCompletionsOptions.inject_include_usage: bool`, default `true`;
   disable for dialects that reject it); the CC parse direction consumes
-  `stream`/`stream_options` as configuration, not IR data — `stream_options`
-  members other than `include_usage` cannot be rebuilt from configuration and
-  are dropped with a cosmetic `StreamOptionsDropped` warning. Anthropic usage in `message_delta` is
+  `stream`/`stream_options` as configuration, not IR data — anything in
+  `stream_options` other than a literal `include_usage: true` (the only
+  member configuration can rebuild) is dropped with a cosmetic
+  `StreamOptionsDropped` warning. Anthropic usage in `message_delta` is
   cumulative; Google's final chunk carries the authoritative `usageMetadata`;
   Responses' terminal event carries the full response.
 - Stream-event format-to-format conversion is out of scope for v1.
@@ -1338,3 +1347,8 @@ pub enum ApiErrorKind { InvalidRequest, Auth, PermissionDenied, NotFound,
   already implemented in v1).
 - Audio/video/document content blocks; image generation.
 - Structured-output schema subset validation (deliberately absent today).
+- A dedicated SSE line/metadata cap (a `max_sse_line` limit, or folding
+  persistent parser state — `event:`/`id:` values — into `max_sse_event`):
+  today a giant non-data line that arrives complete within one transport
+  chunk is consumed into parser state unchecked, bounded in practice by the
+  transport's chunk size (see the trade-off note in `http/sse.rs`).

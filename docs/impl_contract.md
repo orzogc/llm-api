@@ -66,8 +66,9 @@ Streaming: CC/Responses/Anthropic set `"stream": true` in the body; CC
 additionally injects `stream_options: {"include_usage": true}` when
 `OpenAiChatCompletionsOptions.inject_include_usage` (default true). CC
 parse consumes `model`/`stream`/`stream_options` (configuration, not IR
-data); `stream_options` members other than `include_usage` are dropped
-with a cosmetic `StreamOptionsDropped` warning (not mirrored into
+data); anything in `stream_options` other than a literal
+`include_usage: true` — the only member configuration can rebuild — is
+dropped with a cosmetic `StreamOptionsDropped` warning (not mirrored into
 `extra` — a rebuilt unary body must not carry a bare `stream_options`).
 
 ## Thinking provenance (pins § 4.4)
