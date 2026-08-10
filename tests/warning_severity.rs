@@ -55,6 +55,8 @@ fn severity_table_is_pinned() {
         // Parse side.
         (MultipleCandidates, Semantic),
         (MalformedField, Cosmetic),
+        (MalformedToolCall, Semantic),
+        (MalformedToolResult, Semantic),
         (UnknownStreamEvent, Cosmetic),
         (StreamOptionsDropped, Cosmetic),
     ];

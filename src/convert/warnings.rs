@@ -156,8 +156,19 @@ pub enum WarningCode {
     /// The response carried more than one choice/candidate; only the first
     /// was read (the rest remain in `raw`).
     MultipleCandidates,
-    /// Recoverable malformed provider data was skipped or partially mapped.
+    /// Recoverable malformed provider data was skipped or partially mapped
+    /// with nothing lost that cannot be detected from the parsed IR.
     MalformedField,
+    /// A tool call was missing or mangling a unified field (`id`, `name`,
+    /// `arguments`) — the parsed block is degraded (empty/`None` stand-ins,
+    /// or the entry dropped): the call may be unexecutable and replay may
+    /// fail or change what the model produced.
+    MalformedToolCall,
+    /// A tool result was missing or mangling a unified field
+    /// (`tool_call_id`, `name`, `response` payload) — call/result pairing
+    /// or replay may fail, or rebuilt output is canonicalized data the
+    /// provider never sent.
+    MalformedToolResult,
     /// A stream event could not be attributed to a block and surfaced as
     /// `Unknown`.
     UnknownStreamEvent,
@@ -196,7 +207,9 @@ impl WarningCode {
             | ExtraDropped
             | CountTokensFieldDropped
             | CountTokensApproximate
-            | MultipleCandidates => WarningSeverity::Semantic,
+            | MultipleCandidates
+            | MalformedToolCall
+            | MalformedToolResult => WarningSeverity::Semantic,
             SamplingParameterDropped
             | MetadataDropped
             | CacheHintDropped
