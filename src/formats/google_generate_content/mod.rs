@@ -33,7 +33,10 @@
 //!   `response`) and drops with an `ExtraDropped` warning; explicit
 //!   `thought: false` and content `role` defaults canonicalize to their
 //!   absent forms; a `tools` entry combining `functionDeclarations` with
-//!   hosted tool members splits into one entry per kind on round-trip — an
+//!   other members (hosted tools or unknown siblings — assumed to be
+//!   independent tool kinds, per the `Tool` object's one-field-per-kind
+//!   design) splits on round-trip into a `functionDeclarations` entry plus
+//!   one entry carrying the remaining members verbatim — an
 //!   upstream-equivalent form (the official tool-combination examples list
 //!   the combined tools as separate entries).
 

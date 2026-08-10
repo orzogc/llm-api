@@ -161,9 +161,9 @@ pub enum WarningCode {
     /// A stream event could not be attributed to a block and surfaced as
     /// `Unknown`.
     UnknownStreamEvent,
-    /// CC `stream_options` members other than `include_usage` have no
-    /// configuration equivalent; they were consumed on parse and the
-    /// build side will not reconstruct them.
+    /// CC `stream_options` content other than a literal
+    /// `include_usage: true` (the only member configuration can rebuild)
+    /// was consumed on parse; the build side will not reconstruct it.
     StreamOptionsDropped,
 }
 

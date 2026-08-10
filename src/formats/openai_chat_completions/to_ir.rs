@@ -38,9 +38,10 @@ fn parse_failure(what: &str, error: impl std::fmt::Display, body: &[u8]) -> Erro
 /// one-element array, legacy `max_tokens` maps to the IR
 /// `max_output_tokens` (re-serializing as `max_completion_tokens`), and
 /// `model` / `stream` / `stream_options` are configuration, not IR data,
-/// and are consumed (`stream_options` members other than `include_usage`
-/// warn `StreamOptionsDropped`). Leading `system` messages stay in-array
-/// (no hoisting to `Request.system`, implementation contract).
+/// and are consumed (`stream_options` members warn `StreamOptionsDropped`
+/// except a literal `include_usage: true`, the only value the build side
+/// re-injects). Leading `system` messages stay in-array (no hoisting to
+/// `Request.system`, implementation contract).
 pub fn request_to_ir(body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)> {
     let wire: types::Request =
         serde_json::from_slice(body).map_err(|e| parse_failure("request", e, body))?;
@@ -133,28 +134,42 @@ pub fn request_to_ir(body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)> {
 }
 
 /// Warns about consumed `stream_options` content the build side cannot
-/// reconstruct: everything except the `include_usage` member, which
-/// [`crate::OpenAiChatCompletionsOptions::inject_include_usage`] re-injects
-/// on streaming builds.
+/// reconstruct: everything except a literal `include_usage: true` — the
+/// only value [`crate::OpenAiChatCompletionsOptions::inject_include_usage`]
+/// re-injects on streaming builds. Any other `include_usage` value
+/// (`false`, `null`, non-boolean) counts as dropped, since rebuilding it
+/// as `true` would flip its meaning.
 fn warn_dropped_stream_options(options: &Value, warnings: &mut Vec<ConversionWarning>) {
     let message = match options {
         Value::Object(members) => {
             let dropped: Vec<String> = members
-                .keys()
-                .filter(|key| key.as_str() != "include_usage")
-                .map(|key| format!("`{key}`"))
+                .iter()
+                .filter(|(key, value)| {
+                    key.as_str() != "include_usage" || **value != Value::Bool(true)
+                })
+                .map(|(key, _)| format!("`{key}`"))
                 .collect();
             if dropped.is_empty() {
                 return;
             }
+            // A dropped non-`true` `include_usage` deserves a remedy hint:
+            // the default streaming build re-injects the literal `true`.
+            let hint = if members
+                .get("include_usage")
+                .is_some_and(|v| *v != Value::Bool(true))
+            {
+                "; set `inject_include_usage: false` to stream without the usage chunk"
+            } else {
+                ""
+            };
             format!(
                 "`stream_options` member(s) {} were dropped; the build side reconstructs \
-                 only `include_usage` (per `OpenAiChatCompletionsOptions`)",
+                 only a literal `include_usage: true` (per `OpenAiChatCompletionsOptions`){hint}",
                 dropped.join(", ")
             )
         }
         _ => "non-object `stream_options` was dropped; the build side reconstructs only \
-              `include_usage` (per `OpenAiChatCompletionsOptions`)"
+              a literal `include_usage: true` (per `OpenAiChatCompletionsOptions`)"
             .to_owned(),
     };
     warnings.push(warn(
@@ -392,11 +407,35 @@ fn refusal_text_block(text: String, mut ns: Map<String, Value>) -> ContentBlock 
     }
 }
 
+/// Warns that a tool-call payload member required upstream is absent; the
+/// lenient parse substitutes an empty string, which re-serializes as `""`.
+fn call_member_or_empty(
+    value: Option<String>,
+    ptr: &str,
+    payload: &str,
+    member: &str,
+    warnings: &mut Vec<ConversionWarning>,
+) -> String {
+    value.unwrap_or_else(|| {
+        warnings.push(warn(
+            WarningCode::MalformedField,
+            format!("{ptr}/{payload}/{member}"),
+            format!(
+                "`{payload}.{member}` is missing; it parses as an empty string and \
+                 re-serializes as such"
+            ),
+        ));
+        String::new()
+    })
+}
+
 /// Parses one `tool_calls[]` entry into a `ToolCall` block. `function`
 /// entries map directly; `custom` entries and unknown kinds use the
 /// reserved `type` key of the format namespace (see
 /// [`super::tool_call_reserved_key`]). Returns `None` (entry skipped, with
-/// a warning) for non-object entries.
+/// a warning) for non-object entries. Upstream-required fields that are
+/// absent parse leniently — `id` as `None`, payload strings as `""` — and
+/// each missing one warns `MalformedField` at its field path.
 pub(crate) fn tool_call_entry_to_block(
     entry: &Value,
     ptr: &str,
@@ -413,9 +452,25 @@ pub(crate) fn tool_call_entry_to_block(
             return None;
         }
     };
+    if wire.id.is_none() {
+        warnings.push(warn(
+            WarningCode::MalformedField,
+            format!("{ptr}/id"),
+            "tool call entry has no `id`; the IR keeps `id: None`, and formats that \
+             require tool call ids will fail to rebuild the call",
+        ));
+    }
     let mut ns = Map::new();
     let (name, arguments) = match wire.call_type.as_deref() {
         None | Some("function") => {
+            if wire.function.is_none() {
+                warnings.push(warn(
+                    WarningCode::MalformedField,
+                    format!("{ptr}/function"),
+                    "`function` tool call carries no `function` payload; `name` and \
+                     `arguments` parse as empty strings",
+                ));
+            }
             let payload = wire.function.unwrap_or_default();
             if !payload.extra.is_empty() {
                 ns.insert("function".to_owned(), Value::Object(payload.extra));
@@ -427,8 +482,8 @@ pub(crate) fn tool_call_entry_to_block(
                 );
             }
             (
-                payload.name.unwrap_or_default(),
-                payload.arguments.unwrap_or_default(),
+                call_member_or_empty(payload.name, ptr, "function", "name", warnings),
+                call_member_or_empty(payload.arguments, ptr, "function", "arguments", warnings),
             )
         }
         Some("custom") => {
@@ -436,6 +491,14 @@ pub(crate) fn tool_call_entry_to_block(
                 tool_call_reserved_key::TYPE.to_owned(),
                 Value::from("custom"),
             );
+            if wire.custom.is_none() {
+                warnings.push(warn(
+                    WarningCode::MalformedField,
+                    format!("{ptr}/custom"),
+                    "`custom` tool call carries no `custom` payload; `name` and `input` \
+                     parse as empty strings",
+                ));
+            }
             let payload = wire.custom.unwrap_or_default();
             if !payload.extra.is_empty() {
                 ns.insert("custom".to_owned(), Value::Object(payload.extra));
@@ -447,8 +510,8 @@ pub(crate) fn tool_call_entry_to_block(
                 );
             }
             (
-                payload.name.unwrap_or_default(),
-                payload.input.unwrap_or_default(),
+                call_member_or_empty(payload.name, ptr, "custom", "name", warnings),
+                call_member_or_empty(payload.input, ptr, "custom", "input", warnings),
             )
         }
         Some(other) => {

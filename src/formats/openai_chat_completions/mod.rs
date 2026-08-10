@@ -101,8 +101,9 @@
 //! everything else uses the part-array form; a string `stop` becomes a
 //! one-element array; legacy `max_tokens` becomes `max_completion_tokens`;
 //! `model`, `stream` and `stream_options` are configuration, not IR data,
-//! and are consumed on parse (`stream_options` members other than
-//! `include_usage` warn `StreamOptionsDropped`); explicit `null` fields
+//! and are consumed on parse (`stream_options` members warn
+//! `StreamOptionsDropped` except a literal `include_usage: true`, the only
+//! value the build side re-injects); explicit `null` fields
 //! (e.g. assistant `content: null`) canonicalize to absent; a
 //! message-level `refusal` field becomes a `refusal` content part.
 //! Streaming `logprobs` and chunk envelope fields (`system_fingerprint`,

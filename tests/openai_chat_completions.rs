@@ -1462,6 +1462,9 @@ fn stream_options_unknown_members_warn_on_parse() {
     assert_eq!(dropped[0].direction, ConversionDirection::FromFormat);
     assert!(dropped[0].message.contains("`include_obfuscation`"));
     assert!(dropped[0].message.contains("`vendor_x`"));
+    // The literal-`true` `include_usage` is covered by configuration and
+    // is not listed among the dropped members.
+    assert!(!dropped[0].message.contains("`include_usage`"));
     // Not mirrored into extra: a unary rebuild must not carry a bare
     // `stream_options` (rejected upstream without `stream`).
     assert!(req.extra.is_empty());
@@ -1480,6 +1483,54 @@ fn stream_options_unknown_members_warn_on_parse() {
     let (_, warnings) =
         request_to_ir(br#"{"stream": true, "stream_options": true, "messages": []}"#).unwrap();
     assert!(has_code(&warnings, &WarningCode::StreamOptionsDropped));
+}
+
+#[test]
+fn stream_options_include_usage_warns_unless_literal_true() {
+    // The build side can only re-inject the literal `true`, so rebuilding
+    // any other value would flip its meaning — `false`, `null` and
+    // non-boolean values all count as dropped members.
+    for value in [json!(false), json!(null), json!(1)] {
+        let body = json!({
+            "stream": true,
+            "stream_options": {"include_usage": value},
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let (req, warnings) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
+        let dropped: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.code == WarningCode::StreamOptionsDropped)
+            .collect();
+        assert_eq!(dropped.len(), 1, "include_usage {value}: {warnings:?}");
+        assert_eq!(dropped[0].location, "/stream_options");
+        assert!(
+            dropped[0].message.contains("`include_usage`"),
+            "{}",
+            dropped[0].message
+        );
+        // The remedy for a lost opt-out is the injection toggle.
+        assert!(
+            dropped[0].message.contains("`inject_include_usage: false`"),
+            "{}",
+            dropped[0].message
+        );
+        assert!(req.extra.is_empty());
+    }
+
+    // Combined with vendor members: one warning listing everything dropped.
+    let (_, warnings) = request_to_ir(
+        br#"{"stream": true,
+             "stream_options": {"include_usage": false, "vendor_x": 1},
+             "messages": [{"role": "user", "content": "hi"}]}"#,
+    )
+    .unwrap();
+    let dropped: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.code == WarningCode::StreamOptionsDropped)
+        .collect();
+    assert_eq!(dropped.len(), 1, "{warnings:?}");
+    assert!(dropped[0].message.contains("`include_usage`"));
+    assert!(dropped[0].message.contains("`vendor_x`"));
 }
 
 #[test]
@@ -1637,6 +1688,113 @@ fn tool_content_encodings_round_trip() {
     let (body, build_warnings) = from_ir_unary(&req);
     assert!(build_warnings.is_empty(), "{build_warnings:?}");
     assert_eq!(body["messages"], wire["messages"]);
+}
+
+#[test]
+fn tool_call_missing_fields_warn_and_parse_lenient() {
+    // Every upstream-required field that is absent gets its own
+    // MalformedField at the field path; the parse stays lenient (empty
+    // strings, `id: None`).
+    let parse = |entry: Value| {
+        let body = json!({"messages": [{"role": "assistant", "tool_calls": [entry]}]});
+        request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap()
+    };
+    let locations = |warnings: &[llm_api::ConversionWarning]| -> Vec<String> {
+        warnings
+            .iter()
+            .map(|w| {
+                assert_eq!(w.code, WarningCode::MalformedField, "{w:?}");
+                w.location.clone()
+            })
+            .collect()
+    };
+
+    // Missing `arguments` only.
+    let (req, warnings) = parse(json!({"id": "c", "type": "function", "function": {"name": "f"}}));
+    assert_eq!(
+        locations(&warnings),
+        vec!["/messages/0/tool_calls/0/function/arguments"]
+    );
+    assert!(matches!(
+        &req.messages[0].content[0],
+        ContentBlock::ToolCall { id: Some(_), name, arguments, .. }
+            if name == "f" && arguments.is_empty()
+    ));
+
+    // Missing `name` only (an absent `type` defaults to `function`).
+    let (_, warnings) = parse(json!({"id": "c", "function": {"arguments": "{}"}}));
+    assert_eq!(
+        locations(&warnings),
+        vec!["/messages/0/tool_calls/0/function/name"]
+    );
+
+    // A bare entry reports the missing payload and both of its members.
+    let (req, warnings) = parse(json!({"id": "c"}));
+    assert_eq!(
+        locations(&warnings),
+        vec![
+            "/messages/0/tool_calls/0/function",
+            "/messages/0/tool_calls/0/function/name",
+            "/messages/0/tool_calls/0/function/arguments",
+        ]
+    );
+    assert!(matches!(
+        &req.messages[0].content[0],
+        ContentBlock::ToolCall { id: Some(id), name, arguments, .. }
+            if id == "c" && name.is_empty() && arguments.is_empty()
+    ));
+
+    // Custom calls report their own member paths.
+    let (_, warnings) = parse(json!({"id": "c", "type": "custom", "custom": {"name": "x"}}));
+    assert_eq!(
+        locations(&warnings),
+        vec!["/messages/0/tool_calls/0/custom/input"]
+    );
+    let (_, warnings) = parse(json!({"id": "c", "type": "custom"}));
+    assert_eq!(
+        locations(&warnings),
+        vec![
+            "/messages/0/tool_calls/0/custom",
+            "/messages/0/tool_calls/0/custom/name",
+            "/messages/0/tool_calls/0/custom/input",
+        ]
+    );
+
+    // A missing id parses to `id: None` with a warning (rebuilding such a
+    // call errors later — § 4.5).
+    let (req, warnings) = parse(json!({
+        "type": "function", "function": {"name": "f", "arguments": "{}"}
+    }));
+    assert_eq!(locations(&warnings), vec!["/messages/0/tool_calls/0/id"]);
+    assert!(matches!(
+        &req.messages[0].content[0],
+        ContentBlock::ToolCall { id: None, .. }
+    ));
+
+    // A complete entry — including an *explicit* empty arguments string —
+    // stays silent.
+    let (_, warnings) = parse(json!({
+        "id": "c", "type": "function", "function": {"name": "f", "arguments": ""}
+    }));
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    // The response side reports through `Response.warnings`.
+    let body = json!({
+        "id": "r", "object": "chat.completion",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant",
+                        "tool_calls": [{"id": "c", "type": "function",
+                                        "function": {"name": "f"}}]},
+            "finish_reason": "tool_calls",
+        }],
+    });
+    let resp = response_to_ir(&serde_json::to_vec(&body).unwrap(), &meta_ok()).unwrap();
+    let locs: Vec<&str> = resp.warnings.iter().map(|w| w.location.as_str()).collect();
+    assert_eq!(
+        locs,
+        vec!["/choices/0/message/tool_calls/0/function/arguments"]
+    );
 }
 
 // ---------------------------------------------------------------- responses

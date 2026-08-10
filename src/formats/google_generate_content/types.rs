@@ -125,9 +125,10 @@ pub struct FunctionCall {
     /// `functionResponse` with the matching id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    /// Name of the function to call.
-    #[serde(default)]
-    pub name: String,
+    /// Name of the function to call (required upstream; `Option` so a
+    /// missing name is detected on parse instead of silently defaulting).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Function arguments as a JSON object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Value>,
@@ -451,8 +452,18 @@ mod tests {
         .unwrap();
         let fc = part.function_call.unwrap();
         assert_eq!(fc.id.as_deref(), Some("c1"));
+        assert_eq!(fc.name.as_deref(), Some("f"));
         assert_eq!(fc.args, Some(json!({"a": 1})));
         assert_eq!(part.thought_signature.as_deref(), Some("sig"));
+
+        // A missing `name` parses as `None` (and stays absent when the
+        // part re-serializes, e.g. from an opaque block).
+        let part: Part = serde_json::from_value(json!({"functionCall": {}})).unwrap();
+        assert_eq!(part.function_call.as_ref().unwrap().name, None);
+        assert_eq!(
+            serde_json::to_value(&part).unwrap(),
+            json!({"functionCall": {}})
+        );
     }
 
     #[test]

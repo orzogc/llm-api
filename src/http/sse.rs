@@ -100,14 +100,25 @@ impl SseParser {
     fn check_cap(&self) -> Result<(), Error> {
         // Guard both the joined data and the raw buffer (a stream that
         // never sends a newline must not grow memory unboundedly).
-        let current = self.data.len().max(self.buf.len());
+        //
+        // Invariant: `data` is either empty or ends with exactly one
+        // trailing `\n` that dispatch removes, so `len - 1` is the final
+        // event length dispatch would yield right now (interior `\n`
+        // between joined lines is real content). `buf` holds an unfinished
+        // line with no newline pending removal, so its length is not
+        // adjusted.
+        debug_assert!(self.data.is_empty() || self.data.ends_with('\n'));
+        let data_len = self.data.len().saturating_sub(1);
+        let current = data_len.max(self.buf.len());
         if current > self.max_event {
-            let src = if self.data.len() >= self.buf.len() {
+            let src = if data_len >= self.buf.len() {
                 self.data.as_bytes()
             } else {
                 &self.buf
             };
             // `prefix` carries at most `limit` bytes of what was read.
+            // When `src` is `data`, `limit < data_len < data.len()` holds
+            // here, so the pending trailing `\n` never enters the prefix.
             let end = src.len().min(self.max_event);
             return Err(Error::BodyTooLarge {
                 kind: BodyKind::SseEvent,
@@ -393,6 +404,50 @@ mod tests {
             Error::BodyTooLarge { prefix, .. } => assert!(prefix.len() <= 8),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn size_cap_counts_final_event_length_exactly() {
+        // A single-line payload exactly at the cap passes and dispatches:
+        // the pending trailing `\n` (removed at dispatch) must not count.
+        let mut p = SseParser::new(1);
+        let events = p.push(b"data:a\n\n").unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "a");
+
+        // One byte over the cap fails; the prefix carries the payload
+        // without the pending trailing newline.
+        let mut p2 = SseParser::new(1);
+        let err = p2.push(b"data:ab\n\n").unwrap_err();
+        match err {
+            Error::BodyTooLarge { prefix, limit, .. } => {
+                assert_eq!(limit, 1);
+                assert_eq!(&prefix[..], b"a");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn size_cap_counts_joined_multi_line_length_exactly() {
+        // "a\nb" is exactly 3 bytes: the interior newline between joined
+        // `data:` lines is real content and counts.
+        let mut p = SseParser::new(3);
+        let events = p.push(b"data:a\ndata:b\n\n").unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "a\nb");
+
+        // "ab\nc" is 4 bytes: over the cap.
+        let mut p2 = SseParser::new(3);
+        assert!(p2.push(b"data:ab\ndata:c\n\n").is_err());
+    }
+
+    #[test]
+    fn size_cap_zero_allows_empty_payload() {
+        let mut p = SseParser::new(0);
+        let events = p.push(b"data:\n\n").unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "");
     }
 
     #[test]

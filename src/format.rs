@@ -384,9 +384,11 @@ pub trait StreamParser: Send {
 /// target-format message, in serialized order — after the splits, merges
 /// and downgrades of § 7. Top-level system channels are not visited.
 /// Index and role are a serialization-time snapshot: a message whose
-/// pointer the request-level `extra` merge overrode (e.g. the whole
-/// message array was replaced) is not visited — use `on_request` to edit
-/// wholesale-rewritten arrays.
+/// pointer — or wire `role` key — a request- or message-level `extra`
+/// merge overrode (e.g. the whole message array was replaced, or the
+/// message's `role` was set or deleted) is not visited — use `on_request`
+/// to edit such rewritten messages. Overrides are positional, not
+/// value-comparing: setting `role` to its existing value still skips.
 pub fn finalize_request(
     body: &mut Value,
     warnings: &mut [ConversionWarning],
@@ -407,8 +409,11 @@ pub fn finalize_request(
             // scalar/array set or delete at an ancestor — e.g. a replaced
             // message array) is skipped: the pointer may now resolve to a
             // different message, and calling the hook with the snapshotted
-            // index/role would silently misattribute it.
-            if merge_log.overrides(pointer) {
+            // index/role would silently misattribute it. Likewise a message
+            // whose wire `role` key `extra` set or deleted: the snapshotted
+            // role no longer describes what is on the wire. (`role` needs
+            // no pointer-token escaping.)
+            if merge_log.overrides(pointer) || merge_log.overrides(&format!("{pointer}/role")) {
                 continue;
             }
             // A pointer that no longer resolves is skipped defensively.
@@ -880,6 +885,64 @@ mod tests {
         )
         .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn finalize_request_skips_on_message_for_extra_rewritten_roles() {
+        use crate::ir::{MergeLog, Role, merge_patch};
+        use serde_json::json;
+        use std::sync::{Arc, Mutex};
+
+        // Simulates a message-level extra merge (base = the message's
+        // pointer, exactly how formats record it): rewriting the wire
+        // `role` key invalidates the snapshotted (index, role) contract,
+        // so the hook must skip that message and still visit the rest.
+        // Overrides are positional, not value-comparing — setting `role`
+        // to its existing value skips too (documented over-skip).
+        let cases: [(Value, bool); 5] = [
+            (json!({"role": "system"}), true), // changed (SetScalar)
+            (json!({"role": null}), true),     // deleted
+            (json!({"role": "user"}), true),   // same value
+            (json!({"role": {"x": 1}}), true), // object (SetTree)
+            (json!({"name": "bob"}), false),   // role untouched
+        ];
+        for (patch, skips) in cases {
+            let mut body = json!({"messages": [
+                {"role": "user", "content": "a"},
+                {"role": "user", "content": "b"},
+            ]});
+            let mut log = MergeLog::new();
+            let Value::Object(patch) = patch else {
+                unreachable!()
+            };
+            merge_patch(&mut body["messages"][0], &patch, "/messages/0", &mut log);
+
+            let visited = Arc::new(Mutex::new(Vec::new()));
+            let seen = visited.clone();
+            let hooks = RequestHooks::new().with_on_message(move |index, _, _| {
+                seen.lock().unwrap().push(index);
+                Ok(())
+            });
+            finalize_request(
+                &mut body,
+                &mut [],
+                &log,
+                false,
+                &hooks,
+                &[
+                    ("/messages/0".to_owned(), Role::User),
+                    ("/messages/1".to_owned(), Role::User),
+                ],
+            )
+            .unwrap();
+            let expected: Vec<usize> = if skips { vec![1] } else { vec![0, 1] };
+            assert_eq!(
+                *visited.lock().unwrap(),
+                expected,
+                "patch {patch:?} should {}skip message 0",
+                if skips { "" } else { "not " }
+            );
+        }
     }
 
     #[test]

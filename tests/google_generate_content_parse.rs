@@ -404,6 +404,51 @@ fn function_call_args_edge_cases() {
 }
 
 #[test]
+fn function_call_missing_name_warns_and_defaults_empty() {
+    // `name` is required upstream; a missing one warns instead of being
+    // silently defaulted, and parses (and re-serializes) as `""`.
+    let body = json!({
+        "contents": [{"role": "model", "parts": [{"functionCall": {"args": {}}}]}]
+    });
+    let (ir, warnings) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedField);
+    assert_eq!(
+        warnings[0].location,
+        "/contents/0/parts/0/functionCall/name"
+    );
+    assert!(matches!(
+        &ir.messages[0].content[0],
+        ContentBlock::ToolCall { id: None, name, arguments, .. }
+            if name.is_empty() && arguments == "{}"
+    ));
+    let (serialized, _) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
+    assert_eq!(
+        serialized["contents"][0]["parts"][0]["functionCall"],
+        json!({"name": "", "args": {}})
+    );
+
+    // The response side reports through `Response.warnings`.
+    let body = json!({
+        "candidates": [{
+            "content": {"parts": [{"functionCall": {"args": {"a": 1}}}], "role": "model"},
+            "finishReason": "STOP",
+        }]
+    });
+    let resp = response_to_ir(&serde_json::to_vec(&body).unwrap(), &meta()).unwrap();
+    assert_eq!(resp.warnings.len(), 1, "{:?}", resp.warnings);
+    assert_eq!(resp.warnings[0].code, WarningCode::MalformedField);
+    assert_eq!(
+        resp.warnings[0].location,
+        "/candidates/0/content/parts/0/functionCall/name"
+    );
+    assert!(matches!(
+        &resp.message.content[0],
+        ContentBlock::ToolCall { name, .. } if name.is_empty()
+    ));
+}
+
+#[test]
 fn user_parts_that_are_invalid_for_the_role_stay_opaque() {
     // A functionCall inside a user turn and a thought part inside a user
     // turn are invalid IR combinations (§ 7.4) — they parse as opaque

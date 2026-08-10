@@ -27,10 +27,11 @@ pub struct RequestHooks {
     /// merges and downgrades of § 7); top-level system channels (Anthropic
     /// `system`, Responses `instructions`, Google `systemInstruction`) are
     /// not visited — use `on_request` for those. The (index, role) pairs are
-    /// a snapshot taken at serialization time: a message whose pointer the
-    /// request-level `extra` merge rewrote is skipped, and messages `extra`
-    /// injected are not visited — rewriting the message array wholesale is
-    /// `on_request` territory.
+    /// a snapshot taken at serialization time: a message whose pointer — or
+    /// wire `role` key — a request- or message-level `extra` merge rewrote
+    /// is skipped (the snapshot would no longer match the wire), and
+    /// messages `extra` injected are not visited — rewriting messages that
+    /// way is `on_request` territory.
     pub on_message: Option<Arc<MessageHook>>,
     /// Runs on the final request JSON before sending.
     pub on_request: Option<Arc<RequestHook>>,

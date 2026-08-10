@@ -138,6 +138,17 @@ pub(crate) fn classify_assistant_part(
         return AssistantPart::Complete(opaque_part(part));
     }
     if let Some(fc) = &part.function_call {
+        // `name` is required upstream; a missing one degrades to an empty
+        // string (which is what re-serialization emits) with a warning.
+        let name = fc.name.clone().unwrap_or_else(|| {
+            warn(
+                warnings,
+                WarningCode::MalformedField,
+                format!("{location}/functionCall/name"),
+                "functionCall.name is missing; treated as an empty string",
+            );
+            String::new()
+        });
         let arguments = match &fc.args {
             None => "{}".to_owned(),
             Some(args @ Value::Object(_)) => {
@@ -159,7 +170,7 @@ pub(crate) fn classify_assistant_part(
         }
         return AssistantPart::Complete(ContentBlock::ToolCall {
             id: fc.id.clone(),
-            name: fc.name.clone(),
+            name,
             arguments,
             cache: None,
             extra: Extra::from_unknown(ID, ns),
