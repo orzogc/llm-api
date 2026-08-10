@@ -166,9 +166,12 @@ Round-trip metadata flows **parse-attach → serialize-consume**.
   CC `[DONE]` handling, comment keep-alives) is silently consumed.
 - Malformed tool payloads: a unified field (`id`, `name`, `arguments`,
   `tool_call_id`, `response`) missing or mangled — parsed with
-  empty/`None` stand-ins or dropped — warns `MalformedToolCall` /
-  `MalformedToolResult` (semantic). Verbatim-preserving recoveries
-  (out-of-schema values mirrored into `extra`/`arguments`, whole nodes
+  empty/`None` stand-ins, dropped, or kept verbatim in a state the
+  source format cannot re-serialize (non-object wire arguments in IR
+  `arguments`: § 4.5 rejects them on rebuild) — warns
+  `MalformedToolCall` / `MalformedToolResult` (semantic).
+  Verbatim-preserving recoveries that the source format **can**
+  re-serialize (out-of-schema values mirrored into `extra`, whole nodes
   kept as `Opaque`) stay `MalformedField` (cosmetic).
 - `parse_error`: map provider error types to `ApiErrorKind` (OpenAI
   `error.type`; Anthropic `error.type` incl. `overloaded_error` →

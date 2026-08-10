@@ -161,8 +161,9 @@ pub enum WarningCode {
     MalformedField,
     /// A tool call was missing or mangling a unified field (`id`, `name`,
     /// `arguments`) — the parsed block is degraded (empty/`None` stand-ins,
-    /// or the entry dropped): the call may be unexecutable and replay may
-    /// fail or change what the model produced.
+    /// the entry dropped, or a value kept verbatim in a state the source
+    /// format cannot re-serialize): the call may be unexecutable and replay
+    /// may fail or change what the model produced.
     MalformedToolCall,
     /// A tool result was missing or mangling a unified field
     /// (`tool_call_id`, `name`, `response` payload) — call/result pairing
