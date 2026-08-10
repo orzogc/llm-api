@@ -65,11 +65,27 @@ impl SseParser {
     /// Feeds bytes; returns the events completed by them.
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<SseEvent>, Error> {
         self.buf.extend_from_slice(bytes);
-        if !self.bom_checked && self.buf.len() >= 3 {
-            if self.buf.starts_with(&[0xEF, 0xBB, 0xBF]) {
-                self.buf.drain(..3);
+        // Strip a single leading UTF-8 BOM (spec: only at the very start of
+        // the stream; a BOM anywhere else is content). Decided by prefix
+        // comparison so chunk boundaries cannot change the outcome:
+        // - Any diverging byte proves the stream does not start with a BOM
+        //   and settles the check for good.
+        // - Until settled, `buf` is a strict 1-2 byte BOM prefix; deferring
+        //   is safe because `drain_lines` splits only on `\n`/`\r` and
+        //   0xEF/0xBB are neither, so the prefix cannot be consumed as (part
+        //   of) a line. At EOF such a leftover yields no line and `finish`
+        //   discards it with the rest of the buffer.
+        if !self.bom_checked {
+            const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+            let n = self.buf.len().min(BOM.len());
+            if self.buf[..n] != BOM[..n] {
+                self.bom_checked = true;
+            } else if n == BOM.len() {
+                self.buf.drain(..n);
+                self.bom_checked = true;
             }
-            self.bom_checked = true;
+            // else: an empty buffer or a partial BOM prefix — undecided,
+            // wait for more bytes.
         }
         // Drain complete lines first (the per-event data cap is enforced
         // inside `process_line`), then check what remains: `buf` now holds
@@ -235,6 +251,15 @@ mod tests {
         events
     }
 
+    /// Parses `input` delivered as two chunks split at `at`, then finished.
+    fn parse_split(input: &[u8], at: usize) -> Vec<SseEvent> {
+        let mut p = SseParser::new(usize::MAX);
+        let mut events = p.push(&input[..at]).unwrap();
+        events.extend(p.push(&input[at..]).unwrap());
+        events.extend(p.finish().unwrap());
+        events
+    }
+
     #[test]
     fn basic_events() {
         let mut p = SseParser::new(usize::MAX);
@@ -317,6 +342,94 @@ mod tests {
         input.extend_from_slice(b"data: x\n\n");
         let events = p.push(&input).unwrap();
         assert_eq!(events[0].data, "x");
+    }
+
+    #[test]
+    fn bom_stripped_across_chunk_boundaries() {
+        // The leading BOM is stripped however it is split across chunks,
+        // including byte-by-byte delivery.
+        let mut input = vec![0xEF, 0xBB, 0xBF];
+        input.extend_from_slice(b"data: x\n\n");
+        for at in 0..=input.len() {
+            let events = parse_split(&input, at);
+            assert_eq!(events.len(), 1, "split at {at}");
+            assert_eq!(events[0].data, "x", "split at {at}");
+        }
+
+        let mut p = SseParser::new(usize::MAX);
+        let mut events = Vec::new();
+        for b in &input {
+            events.extend(p.push(&[*b]).unwrap());
+        }
+        events.extend(p.finish().unwrap());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "x");
+    }
+
+    #[test]
+    fn mid_stream_bom_is_content_regardless_of_chunking() {
+        // The stream starts with a comment, so the later BOM is content: it
+        // turns the following field name into "\u{FEFF}data", which is
+        // ignored, and no event dispatches. Every split point must agree
+        // with the unsplit parse — draining the short ":\n" chunk used to
+        // leave the BOM check pending and mis-strip the next chunk's
+        // mid-stream BOM.
+        let mut input = b":\n".to_vec();
+        input.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+        input.extend_from_slice(b"data:x\n\n");
+        let whole = parse_split(&input, input.len());
+        assert!(whole.is_empty(), "mid-stream BOM must not be stripped");
+        for at in 0..=input.len() {
+            assert_eq!(parse_split(&input, at), whole, "split at {at}");
+        }
+    }
+
+    #[test]
+    fn mid_stream_bom_after_events_is_content() {
+        // A non-BOM stream with a BOM between events: the BOM-prefixed
+        // `data:` line is ignored on every chunking.
+        let mut input = b"data:a\n\n".to_vec();
+        input.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+        input.extend_from_slice(b"data:b\n\n");
+        let whole = parse_split(&input, input.len());
+        assert_eq!(whole.len(), 1);
+        assert_eq!(whole[0].data, "a");
+        for at in 0..=input.len() {
+            assert_eq!(parse_split(&input, at), whole, "split at {at}");
+        }
+    }
+
+    #[test]
+    fn bom_only_and_partial_bom_streams_end_cleanly() {
+        // A stream that is exactly one BOM: no events, no error.
+        let mut p = SseParser::new(usize::MAX);
+        assert!(p.push(&[0xEF, 0xBB, 0xBF]).unwrap().is_empty());
+        assert!(p.finish().unwrap().is_empty());
+
+        // EOF while the check is still undecided on a 1-2 byte BOM prefix:
+        // the leftover yields no line and is discarded.
+        for prefix in [&[0xEF][..], &[0xEF, 0xBB][..]] {
+            let mut p = SseParser::new(usize::MAX);
+            assert!(p.push(prefix).unwrap().is_empty());
+            assert!(p.finish().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn partial_bom_prefix_that_diverges_settles_the_check() {
+        // [0xEF] alone is undecided; the following `\n` proves the stream
+        // does not start with a BOM and settles the check. A later BOM is
+        // then content, and the parser keeps working normally.
+        let mut p = SseParser::new(usize::MAX);
+        assert!(p.push(&[0xEF]).unwrap().is_empty());
+        assert!(p.push(b"\n").unwrap().is_empty());
+        let mut rest = vec![0xEF, 0xBB, 0xBF];
+        rest.extend_from_slice(b"data:x\n\ndata:y\n\n");
+        let mut events = p.push(&rest).unwrap();
+        events.extend(p.finish().unwrap());
+        // "\u{FEFF}data:x" is an ignored field; the clean event parses.
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "y");
     }
 
     #[test]

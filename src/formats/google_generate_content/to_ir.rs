@@ -143,7 +143,7 @@ pub(crate) fn classify_assistant_part(
         let name = fc.name.clone().unwrap_or_else(|| {
             warn(
                 warnings,
-                WarningCode::MalformedField,
+                WarningCode::MalformedToolCall,
                 format!("{location}/functionCall/name"),
                 "functionCall.name is missing; treated as an empty string",
             );
@@ -286,6 +286,10 @@ fn user_block_from_part(part: &types::Part) -> ContentBlock {
 /// error (`is_error: true`, documented failure key), an `"output"` string
 /// becomes text content; all other keys are preserved in the block's `extra`
 /// namespace at their mirrored path.
+///
+/// The upstream-required fields parse leniently when absent — `name` stays
+/// `None`, a missing `response` becomes empty content — each with a
+/// `MalformedToolResult` warning.
 fn tool_result_from_part(
     part: &types::Part,
     location: &str,
@@ -299,6 +303,16 @@ fn tool_result_from_part(
     let mut fr_ns = fr.extra.clone();
     let mut content: Vec<ToolOutputBlock> = Vec::new();
     let mut is_error = None;
+
+    if fr.name.is_none() {
+        warn(
+            warnings,
+            WarningCode::MalformedToolResult,
+            format!("{location}/functionResponse/name"),
+            "functionResponse.name is missing; the block's name stays unset, so \
+             re-serialization needs an id matching an earlier tool call (or fails)",
+        );
+    }
 
     match &fr.response {
         Some(Value::Object(obj)) => {
@@ -330,7 +344,15 @@ fn tool_result_from_part(
             );
             fr_ns.insert("response".to_owned(), other.clone());
         }
-        None => {}
+        None => {
+            warn(
+                warnings,
+                WarningCode::MalformedToolResult,
+                format!("{location}/functionResponse/response"),
+                "functionResponse.response is missing; parsed as empty content, \
+                 which re-serializes as an empty object the wire never carried",
+            );
+        }
     }
 
     for frp in fr.parts.as_deref().unwrap_or_default() {

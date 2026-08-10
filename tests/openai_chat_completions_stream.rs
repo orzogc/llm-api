@@ -10,11 +10,14 @@
 
 use serde_json::{Value, json};
 
-use llm_api::formats::openai_chat_completions::OpenAiChatCompletions;
+use llm_api::formats::openai_chat_completions::{
+    OpenAiChatCompletions, request_from_ir, request_to_ir,
+};
 use llm_api::http::{SseEvent, SseParser};
 use llm_api::{
-    Accumulator, ApiFormat, BlockDelta, ContentBlock, ConversionWarning, Error, StopReason,
-    StreamEvent, StreamItem, WarningCode,
+    Accumulator, ApiFormat, BlockDelta, CallMode, ContentBlock, ConversionWarning, ConvertOptions,
+    Error, Message, OpenAiChatCompletionsOptions, Request, StopReason, StreamEvent, StreamItem,
+    WarningCode,
 };
 
 const F: &str = "openai_chat_completions";
@@ -74,6 +77,17 @@ fn accumulate(events: &[StreamEvent]) -> llm_api::Response {
 
 fn chunk_event(data: &Value) -> SseEvent {
     SseEvent::new(None, data.to_string())
+}
+
+/// The first finalized block carried by a `BlockStop` event.
+fn finalized_block(events: &[StreamEvent]) -> ContentBlock {
+    events
+        .iter()
+        .find_map(|e| match e {
+            StreamEvent::BlockStop { block: Some(b), .. } => Some(b.clone()),
+            _ => None,
+        })
+        .expect("finalized block")
 }
 
 #[test]
@@ -389,7 +403,10 @@ fn done_without_finish_reason_closes_open_blocks() {
 }
 
 #[test]
-fn tool_call_fragment_without_id_or_name_warns() {
+fn tool_call_without_id_or_name_warns_at_finalize() {
+    // An opening fragment may legitimately carry only arguments (id/name
+    // can arrive in later fragments), so the missing-field verdict lands
+    // at finalization, per field, matching the non-streaming entry parse.
     let mut parser = OpenAiChatCompletions.stream_parser();
     let chunk = json!({
         "id": "c", "model": "m",
@@ -398,11 +415,7 @@ fn tool_call_fragment_without_id_or_name_warns() {
         ]}, "finish_reason": null}],
     });
     let (events, warnings) = parser.parse(&chunk_event(&chunk)).unwrap();
-    assert!(
-        warnings
-            .iter()
-            .any(|w| w.code == WarningCode::MalformedField)
-    );
+    assert!(warnings.is_empty(), "{warnings:?}");
     // The block still opens (empty name) and the arguments still stream.
     assert_eq!(
         ev(&events[1]),
@@ -413,6 +426,18 @@ fn tool_call_fragment_without_id_or_name_warns() {
         ev(&events[2]),
         json!({"type": "block_delta", "index": 0, "delta": {"type": "tool_arguments", "value": "{\"x\":1}"}})
     );
+
+    let finish =
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]});
+    let (_, warnings) = parser.parse(&chunk_event(&finish)).unwrap();
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert!(
+        warnings
+            .iter()
+            .all(|w| w.code == WarningCode::MalformedToolCall)
+    );
+    assert!(warnings[0].message.contains("no `id`"), "{warnings:?}");
+    assert!(warnings[1].message.contains("empty `name`"), "{warnings:?}");
 }
 
 #[test]
@@ -486,8 +511,10 @@ fn unknown_delta_fields_attach_to_open_block_or_unknown() {
 
 #[test]
 fn custom_tool_call_type_survives_streaming() {
-    // Undocumented for deltas, but dialects may stream custom calls; the
-    // reserved `type` key keeps the kind for re-serialization.
+    // Undocumented for deltas (chunk schemas only define `function`), but
+    // dialects may stream custom calls; the payload maps like the
+    // non-streaming parse — `custom.name` → name, `custom.input` →
+    // arguments — and the reserved `type` key keeps the kind.
     let mut parser = OpenAiChatCompletions.stream_parser();
     let chunks = [
         json!({"id": "c", "choices": [{"index": 0, "delta": {"tool_calls": [
@@ -497,23 +524,225 @@ fn custom_tool_call_type_survives_streaming() {
     ];
     let mut events = Vec::new();
     for chunk in &chunks {
-        let (evs, _) = parser.parse(&chunk_event(chunk)).unwrap();
+        let (evs, ws) = parser.parse(&chunk_event(chunk)).unwrap();
+        assert!(ws.is_empty(), "{ws:?}");
         events.extend(evs);
     }
-    let stop = events
-        .iter()
-        .find_map(|e| match e {
-            StreamEvent::BlockStop { block: Some(b), .. } => Some(b.clone()),
-            _ => None,
-        })
-        .expect("finalized block");
-    let ContentBlock::ToolCall { id, extra, .. } = &stop else {
+    // The opening block already carries the custom name.
+    assert_eq!(
+        ev(&events[1]),
+        json!({"type": "block_start", "index": 0,
+               "block": {"type": "tool_call", "id": "call_c", "name": "run_sql", "arguments": ""}})
+    );
+    let ContentBlock::ToolCall {
+        id,
+        name,
+        arguments,
+        extra,
+        ..
+    } = &finalized_block(&events)
+    else {
         panic!("expected tool call")
     };
     assert_eq!(id.as_deref(), Some("call_c"));
+    assert_eq!(name, "run_sql");
+    assert!(arguments.is_empty());
     let ns = extra.get(F).unwrap();
     assert_eq!(ns.get("type"), Some(&json!("custom")));
-    assert_eq!(ns.get("custom"), Some(&json!({"name": "run_sql"})));
+    // `custom.name` is a modeled member — nothing rides the nested extra.
+    assert!(!ns.contains_key("custom"), "{ns:?}");
+}
+
+#[test]
+fn custom_tool_call_fragments_accumulate_and_rebuild() {
+    // `custom.name` / `custom.input` accumulate across fragments, `input`
+    // pieces stream as ToolArguments deltas, unmodeled payload members
+    // nest under `custom`, and the finalized block re-serializes as a
+    // proper custom entry.
+    let mut parser = OpenAiChatCompletions.stream_parser();
+    let chunks = [
+        json!({"id": "c", "choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "id": "call_c", "type": "custom",
+             "custom": {"name": "run_", "input": "SELECT", "vendor": true}},
+        ]}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "custom": {"name": "sql", "input": " 1"}},
+        ]}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+    ];
+    let mut events = Vec::new();
+    for chunk in &chunks {
+        let (evs, ws) = parser.parse(&chunk_event(chunk)).unwrap();
+        assert!(ws.is_empty(), "{ws:?}");
+        events.extend(evs);
+    }
+    let pieces: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::BlockDelta {
+                delta: BlockDelta::ToolArguments(piece),
+                ..
+            } => Some(piece.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pieces, vec!["SELECT", " 1"]);
+
+    let block = finalized_block(&events);
+    let ContentBlock::ToolCall {
+        id,
+        name,
+        arguments,
+        extra,
+        ..
+    } = &block
+    else {
+        panic!("expected tool call")
+    };
+    assert_eq!(id.as_deref(), Some("call_c"));
+    assert_eq!(name, "run_sql");
+    assert_eq!(arguments, "SELECT 1");
+    let ns = extra.get(F).unwrap();
+    assert_eq!(ns.get("type"), Some(&json!("custom")));
+    assert_eq!(ns.get("custom"), Some(&json!({"vendor": true})));
+
+    // Round trip: the accumulated block rebuilds the wire entry.
+    let req = Request::with_messages(vec![Message::assistant(vec![block])]);
+    let (body, warnings) = request_from_ir(
+        &req,
+        None,
+        CallMode::Unary,
+        &ConvertOptions::default(),
+        &OpenAiChatCompletionsOptions::default(),
+    )
+    .unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        body["messages"][0]["tool_calls"][0],
+        json!({"id": "call_c", "type": "custom",
+               "custom": {"name": "run_sql", "input": "SELECT 1", "vendor": true}})
+    );
+}
+
+#[test]
+fn streamed_custom_call_matches_non_streaming_parse() {
+    // Invariant: accumulating a complete entry from the stream yields the
+    // same block as the non-streaming parse of that entry.
+    let entry = json!({"id": "call_c", "type": "custom",
+                       "custom": {"name": "run_sql", "input": "SELECT 1", "vendor": {"a": 1}}});
+    let mut fragment = entry.clone();
+    fragment["index"] = json!(0);
+    let mut parser = OpenAiChatCompletions.stream_parser();
+    let mut events = Vec::new();
+    for chunk in [
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"tool_calls": [fragment]}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+    ] {
+        let (evs, ws) = parser.parse(&chunk_event(&chunk)).unwrap();
+        assert!(ws.is_empty(), "{ws:?}");
+        events.extend(evs);
+    }
+    let streamed = finalized_block(&events);
+
+    let body = json!({"messages": [{"role": "assistant", "tool_calls": [entry]}]});
+    let (req, ws) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(streamed, req.messages[0].content[0]);
+}
+
+#[test]
+fn mixed_payload_kinds_mirror_and_warn() {
+    // A call cannot switch payload kinds mid-stream; the conflicting
+    // fragment is mirrored verbatim instead of spliced, with a warning.
+    let mut parser = OpenAiChatCompletions.stream_parser();
+    let first = json!({"id": "c", "choices": [{"index": 0, "delta": {"tool_calls": [
+        {"index": 0, "id": "call_m", "type": "function",
+         "function": {"name": "f", "arguments": "{}"}},
+    ]}, "finish_reason": null}]});
+    let (mut events, ws) = parser.parse(&chunk_event(&first)).unwrap();
+    assert!(ws.is_empty(), "{ws:?}");
+
+    let conflicting = json!({"id": "c", "choices": [{"index": 0, "delta": {"tool_calls": [
+        {"index": 0, "custom": {"name": "x", "input": "y"}},
+    ]}, "finish_reason": null}]});
+    let (evs, ws) = parser.parse(&chunk_event(&conflicting)).unwrap();
+    events.extend(evs);
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert_eq!(ws[0].code, WarningCode::MalformedToolCall);
+    assert!(ws[0].message.contains("mixes"), "{ws:?}");
+
+    let finish =
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]});
+    let (evs, ws) = parser.parse(&chunk_event(&finish)).unwrap();
+    assert!(ws.is_empty(), "{ws:?}");
+    events.extend(evs);
+
+    let ContentBlock::ToolCall {
+        name,
+        arguments,
+        extra,
+        ..
+    } = &finalized_block(&events)
+    else {
+        panic!("expected tool call")
+    };
+    // The locked function channels are untouched; the foreign payload
+    // rides the extra wholesale.
+    assert_eq!(name, "f");
+    assert_eq!(arguments, "{}");
+    assert_eq!(
+        extra.get(F).unwrap().get("custom"),
+        Some(&json!({"name": "x", "input": "y"}))
+    );
+}
+
+#[test]
+fn custom_stream_without_id_warns_at_finalize() {
+    let mut parser = OpenAiChatCompletions.stream_parser();
+    let mut warnings = Vec::new();
+    let mut events = Vec::new();
+    for chunk in [
+        json!({"id": "c", "choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "type": "custom", "custom": {"name": "run_sql", "input": "SELECT 1"}},
+        ]}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+    ] {
+        let (evs, ws) = parser.parse(&chunk_event(&chunk)).unwrap();
+        events.extend(evs);
+        warnings.extend(ws);
+    }
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedToolCall);
+    assert!(warnings[0].message.contains("no `id`"), "{warnings:?}");
+    assert!(matches!(
+        finalized_block(&events),
+        ContentBlock::ToolCall { id: None, .. }
+    ));
+}
+
+#[test]
+fn non_string_argument_fragments_warn() {
+    // A non-string `function.arguments` (or `custom.input`) piece cannot
+    // be spliced into the accumulated string and is dropped with a
+    // warning instead of silently.
+    let mut parser = OpenAiChatCompletions.stream_parser();
+    let chunk = json!({"id": "c", "choices": [{"index": 0, "delta": {"tool_calls": [
+        {"index": 0, "id": "call_n", "function": {"name": "f", "arguments": {"x": 1}}},
+    ]}, "finish_reason": null}]});
+    let (_, ws) = parser.parse(&chunk_event(&chunk)).unwrap();
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert_eq!(ws[0].code, WarningCode::MalformedToolCall);
+    assert!(ws[0].message.contains("function.arguments"), "{ws:?}");
+
+    let mut parser = OpenAiChatCompletions.stream_parser();
+    let chunk = json!({"id": "c", "choices": [{"index": 0, "delta": {"tool_calls": [
+        {"index": 0, "id": "call_n", "type": "custom", "custom": {"name": "f", "input": 5}},
+    ]}, "finish_reason": null}]});
+    let (_, ws) = parser.parse(&chunk_event(&chunk)).unwrap();
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert_eq!(ws[0].code, WarningCode::MalformedToolCall);
+    assert!(ws[0].message.contains("custom.input"), "{ws:?}");
 }
 
 #[test]

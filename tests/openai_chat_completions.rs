@@ -1691,10 +1691,52 @@ fn tool_content_encodings_round_trip() {
 }
 
 #[test]
+fn tool_message_without_tool_call_id_warns_malformed_tool_result() {
+    // Missing entirely: the IR keeps `None` (rebuilding on this format
+    // errors later — the structural requirement) and warns.
+    let (req, warnings) =
+        request_to_ir(br#"{"messages": [{"role": "tool", "content": "ok"}]}"#).unwrap();
+    let ContentBlock::ToolResult { tool_call_id, .. } = &req.messages[0].content[0] else {
+        panic!("expected tool result");
+    };
+    assert!(tool_call_id.is_none());
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedToolResult);
+    assert_eq!(warnings[0].severity, WarningSeverity::Semantic);
+    assert_eq!(warnings[0].location, "/messages/0/tool_call_id");
+
+    // An explicit null canonicalizes to absent — same degradation.
+    let (_, warnings) = request_to_ir(
+        br#"{"messages": [{"role": "tool", "tool_call_id": null, "content": "ok"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedToolResult);
+
+    // Non-string: kept verbatim in the block extra, the IR still `None`.
+    let (req, warnings) =
+        request_to_ir(br#"{"messages": [{"role": "tool", "tool_call_id": 7, "content": "ok"}]}"#)
+            .unwrap();
+    let ContentBlock::ToolResult {
+        tool_call_id,
+        extra,
+        ..
+    } = &req.messages[0].content[0]
+    else {
+        panic!("expected tool result");
+    };
+    assert!(tool_call_id.is_none());
+    assert_eq!(extra.get(F).unwrap().get("tool_call_id"), Some(&json!(7)));
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedToolResult);
+    assert_eq!(warnings[0].location, "/messages/0/tool_call_id");
+}
+
+#[test]
 fn tool_call_missing_fields_warn_and_parse_lenient() {
     // Every upstream-required field that is absent gets its own
-    // MalformedField at the field path; the parse stays lenient (empty
-    // strings, `id: None`).
+    // MalformedToolCall (a degraded unified field, semantic) at the field
+    // path; the parse stays lenient (empty strings, `id: None`).
     let parse = |entry: Value| {
         let body = json!({"messages": [{"role": "assistant", "tool_calls": [entry]}]});
         request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap()
@@ -1703,7 +1745,8 @@ fn tool_call_missing_fields_warn_and_parse_lenient() {
         warnings
             .iter()
             .map(|w| {
-                assert_eq!(w.code, WarningCode::MalformedField, "{w:?}");
+                assert_eq!(w.code, WarningCode::MalformedToolCall, "{w:?}");
+                assert_eq!(w.severity, WarningSeverity::Semantic, "{w:?}");
                 w.location.clone()
             })
             .collect()
@@ -1770,6 +1813,19 @@ fn tool_call_missing_fields_warn_and_parse_lenient() {
         &req.messages[0].content[0],
         ContentBlock::ToolCall { id: None, .. }
     ));
+
+    // A structurally garbage entry is skipped wholesale — the heaviest
+    // loss — with one warning at the entry path.
+    let (req, warnings) = parse(json!({"id": 5}));
+    assert!(req.messages[0].content.is_empty());
+    assert_eq!(locations(&warnings), vec!["/messages/0/tool_calls/0"]);
+
+    // Boundary: an unknown call kind mirrors the entry verbatim — nothing
+    // is degraded or lost, so it stays cosmetic MalformedField.
+    let (_, warnings) = parse(json!({"id": "c", "type": "browser", "action": "open"}));
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedField);
+    assert_eq!(warnings[0].severity, WarningSeverity::Cosmetic);
 
     // A complete entry — including an *explicit* empty arguments string —
     // stays silent.

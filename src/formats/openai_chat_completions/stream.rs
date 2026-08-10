@@ -10,10 +10,12 @@
 //!   interleaved `Thinking` / `Text` blocks in arrival order.
 //! - `delta.tool_calls` fragments group by their `index`: the first
 //!   fragment of an index opens a `ToolCall` block (`arguments: ""`),
-//!   later `function.arguments` pieces stream as
-//!   [`BlockDelta::ToolArguments`], and the block finalizes at close with
-//!   the accumulated id/name/arguments plus mirrored unknown fragment
-//!   fields.
+//!   later `function.arguments` (or dialect `custom.input`) pieces stream
+//!   as [`BlockDelta::ToolArguments`], and the block finalizes at close
+//!   with the accumulated id/name/arguments plus mirrored unknown
+//!   fragment fields. A call that finishes without an `id` or with an
+//!   empty `name` warns `MalformedToolCall`, matching the non-streaming
+//!   entry parse.
 //! - A choice `finish_reason` closes all open blocks and emits
 //!   `MessageDelta { stop_reason }`; a non-null chunk `usage` (the
 //!   `include_usage` final chunk, or dialects that attach usage to the
@@ -60,6 +62,34 @@ enum Channel {
     Refusal,
 }
 
+/// Which payload object a streamed tool call carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PayloadKind {
+    /// A `function` payload (`name` / `arguments`).
+    Function,
+    /// A `custom` payload (`name` / `input`, dialect: chunks document only
+    /// `function`).
+    Custom,
+}
+
+impl PayloadKind {
+    /// The payload object key on the wire entry.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Function => "function",
+            Self::Custom => "custom",
+        }
+    }
+
+    /// The argument-channel member of the payload object.
+    fn args_key(self) -> &'static str {
+        match self {
+            Self::Function => "arguments",
+            Self::Custom => "input",
+        }
+    }
+}
+
 /// Accumulated state of one streamed tool call, keyed by its wire `index`.
 #[derive(Debug, Default)]
 struct ToolCallState {
@@ -67,14 +97,19 @@ struct ToolCallState {
     block_index: usize,
     /// Call id (first fragment).
     id: Option<String>,
-    /// Accumulated function name fragments.
+    /// Accumulated name fragments.
     name: String,
     /// Accumulated argument fragments.
     arguments: String,
     /// The entry `type`, when not `function`.
     call_type: Option<String>,
+    /// The payload kind locked by the declared `type` or by the first
+    /// payload object; a conflicting later payload cannot be spliced and
+    /// mirrors into `extra` instead.
+    kind: Option<PayloadKind>,
     /// Unknown entry-level fragment fields, mirrored into the finalized
-    /// block extra (`function` unknowns nested under `function`).
+    /// block extra (`function` / `custom` unknowns nested under their
+    /// payload key).
     extra: Map<String, Value>,
 }
 
@@ -128,15 +163,21 @@ impl ChatCompletionsStreamParser {
     }
 
     /// Closes the open text channel and every open tool call, in block
-    /// order. Tool calls finalize with their accumulated state.
-    fn close_open_blocks(&mut self, events: &mut Vec<StreamEvent>) {
+    /// order. Tool calls finalize with their accumulated state, warning
+    /// about unified fields the stream never delivered.
+    fn close_open_blocks(
+        &mut self,
+        events: &mut Vec<StreamEvent>,
+        warnings: &mut Vec<ConversionWarning>,
+    ) {
         let mut stops: Vec<(usize, Option<ContentBlock>)> = Vec::new();
         if let Some((_, index)) = self.channel.take() {
             stops.push((index, None));
         }
-        for (_, state) in std::mem::take(&mut self.tool_calls) {
+        for (wire_index, state) in std::mem::take(&mut self.tool_calls) {
             let block_index = state.block_index;
-            stops.push((block_index, Some(finalize_tool_call(state))));
+            let block = finalize_tool_call(state, wire_index, warnings);
+            stops.push((block_index, Some(block)));
         }
         stops.sort_by_key(|(index, _)| *index);
         for (index, block) in stops {
@@ -205,31 +246,48 @@ impl ChatCompletionsStreamParser {
                 position as u64
             }
         };
-        let function = fragment.get("function");
-        let name_fragment = function.and_then(|f| f.get("name")).and_then(Value::as_str);
-        let args_fragment = function
-            .and_then(|f| f.get("arguments"))
-            .and_then(Value::as_str);
         let is_new = !self.tool_calls.contains_key(&index);
         if is_new {
             let block_index = self.alloc_index();
-            let mut state = ToolCallState {
-                block_index,
-                ..ToolCallState::default()
-            };
-            state.id = fragment
-                .get("id")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            state.name = name_fragment.unwrap_or_default().to_owned();
-            if state.id.is_none() && state.name.is_empty() {
-                warnings.push(warn(
-                    WarningCode::MalformedField,
-                    "/choices/0/delta/tool_calls",
-                    format!("tool call index {index} started without an id or name"),
-                ));
+            self.tool_calls.insert(
+                index,
+                ToolCallState {
+                    block_index,
+                    ..ToolCallState::default()
+                },
+            );
+        }
+        let state = self.tool_calls.get_mut(&index).expect("inserted above");
+        // Id fragments concatenate (dialects may split them).
+        if let Some(id) = fragment.get("id").and_then(Value::as_str) {
+            match &mut state.id {
+                Some(existing) => existing.push_str(id),
+                none => *none = Some(id.to_owned()),
             }
-            collect_fragment_extras(fragment, &mut state);
+        }
+        // An explicit `type` locks the payload kind up front (it appears
+        // only on a call's first fragment), so a lone conflicting payload
+        // object is mirrored, not spliced, like on the non-streaming side.
+        if state.kind.is_none() {
+            state.kind = match fragment.get("type").and_then(Value::as_str) {
+                Some("function") => Some(PayloadKind::Function),
+                Some("custom") => Some(PayloadKind::Custom),
+                _ => None,
+            };
+        }
+        // Continuation fragments omit `type`; route by the payload object
+        // the fragment actually carries.
+        let mut deltas: Vec<String> = Vec::new();
+        for kind in [PayloadKind::Function, PayloadKind::Custom] {
+            match fragment.get(kind.key()) {
+                None | Some(Value::Null) => {}
+                Some(payload) => {
+                    route_payload(kind, payload, index, state, &mut deltas, warnings);
+                }
+            }
+        }
+        collect_fragment_extras(fragment, state);
+        if is_new {
             let block = ContentBlock::ToolCall {
                 id: state.id.clone(),
                 name: state.name.clone(),
@@ -237,38 +295,14 @@ impl ChatCompletionsStreamParser {
                 cache: None,
                 extra: Extra::new(),
             };
-            events.push(StreamEvent::block_start(block_index, block));
-            if let Some(args) = args_fragment
-                && !args.is_empty()
-            {
-                events.push(StreamEvent::block_delta(
-                    block_index,
-                    BlockDelta::ToolArguments(args.to_owned()),
-                ));
-                state.arguments.push_str(args);
-            }
-            self.tool_calls.insert(index, state);
-            return;
+            events.push(StreamEvent::block_start(state.block_index, block));
         }
-        let state = self.tool_calls.get_mut(&index).expect("checked above");
-        if let Some(id) = fragment.get("id").and_then(Value::as_str) {
-            match &mut state.id {
-                Some(existing) => existing.push_str(id),
-                none => *none = Some(id.to_owned()),
-            }
-        }
-        if let Some(name) = name_fragment {
-            state.name.push_str(name);
-        }
-        collect_fragment_extras(fragment, state);
-        if let Some(args) = args_fragment
-            && !args.is_empty()
-        {
+        for piece in deltas {
+            state.arguments.push_str(&piece);
             events.push(StreamEvent::block_delta(
                 state.block_index,
-                BlockDelta::ToolArguments(args.to_owned()),
+                BlockDelta::ToolArguments(piece),
             ));
-            state.arguments.push_str(args);
         }
     }
 
@@ -335,16 +369,105 @@ impl ChatCompletionsStreamParser {
     }
 }
 
-/// Copies unmodeled fragment fields into the tool-call state: entry-level
-/// unknowns at the top, `function` unknowns nested, non-`function` types
-/// under the reserved `type` key.
+/// Routes one payload object (`function` or `custom`) of a tool-call
+/// fragment. The call's first payload locks its kind (unless the declared
+/// `type` already did): `name` pieces concatenate into the state and
+/// argument-channel pieces are collected for delta emission, mirroring the
+/// non-streaming entry parse. A payload of the conflicting kind cannot be
+/// spliced into the accumulated name/arguments and mirrors verbatim into
+/// the state extra with a `MalformedToolCall` warning.
+fn route_payload(
+    kind: PayloadKind,
+    payload: &Value,
+    wire_index: u64,
+    state: &mut ToolCallState,
+    deltas: &mut Vec<String>,
+    warnings: &mut Vec<ConversionWarning>,
+) {
+    let Some(members) = payload.as_object() else {
+        warnings.push(warn(
+            WarningCode::MalformedToolCall,
+            "/choices/0/delta/tool_calls",
+            format!(
+                "tool call index {wire_index}: non-object `{}` payload fragment was ignored",
+                kind.key()
+            ),
+        ));
+        return;
+    };
+    match state.kind {
+        None => state.kind = Some(kind),
+        Some(locked) if locked != kind => {
+            warnings.push(warn(
+                WarningCode::MalformedToolCall,
+                "/choices/0/delta/tool_calls",
+                format!(
+                    "tool call index {wire_index} mixes `{}` and `{}` payloads; the `{}` \
+                     fragment was mirrored into the block extra instead of accumulated",
+                    locked.key(),
+                    kind.key(),
+                    kind.key(),
+                ),
+            ));
+            extend_nested_extra(state, kind.key(), members.clone());
+            return;
+        }
+        Some(_) => {}
+    }
+    let mut unknowns = Map::new();
+    for (key, value) in members {
+        if key == "name" || key == kind.args_key() {
+            match value.as_str() {
+                Some(piece) if key == "name" => state.name.push_str(piece),
+                Some(piece) => {
+                    if !piece.is_empty() {
+                        deltas.push(piece.to_owned());
+                    }
+                }
+                None if value.is_null() => {}
+                None => {
+                    warnings.push(warn(
+                        WarningCode::MalformedToolCall,
+                        "/choices/0/delta/tool_calls",
+                        format!(
+                            "tool call index {wire_index}: non-string `{}.{key}` fragment \
+                             was ignored",
+                            kind.key()
+                        ),
+                    ));
+                }
+            }
+        } else if !value.is_null() {
+            unknowns.insert(key.clone(), value.clone());
+        }
+    }
+    extend_nested_extra(state, kind.key(), unknowns);
+}
+
+/// Merges payload members into the object mirrored at `state.extra[key]`.
+fn extend_nested_extra(state: &mut ToolCallState, key: &str, members: Map<String, Value>) {
+    if members.is_empty() {
+        return;
+    }
+    let nested = state
+        .extra
+        .entry(key.to_owned())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if let Some(nested) = nested.as_object_mut() {
+        nested.extend(members);
+    }
+}
+
+/// Copies unmodeled entry-level fragment fields into the tool-call state;
+/// payload objects are handled by [`route_payload`] and non-`function`
+/// `type`s are recorded for the reserved key.
 fn collect_fragment_extras(fragment: &Value, state: &mut ToolCallState) {
     let Some(obj) = fragment.as_object() else {
         return;
     };
     for (key, value) in obj {
         match key.as_str() {
-            "index" | "id" | "function" => {}
+            "index" | "id" | "function" | "custom" => {}
             "type" => {
                 if let Some(t) = value.as_str()
                     && t != "function"
@@ -358,26 +481,34 @@ fn collect_fragment_extras(fragment: &Value, state: &mut ToolCallState) {
             }
         }
     }
-    if let Some(function) = obj.get("function").and_then(Value::as_object) {
-        let unknowns: Map<String, Value> = function
-            .iter()
-            .filter(|(k, v)| k.as_str() != "name" && k.as_str() != "arguments" && !v.is_null())
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        if !unknowns.is_empty() {
-            let nested = state
-                .extra
-                .entry("function".to_owned())
-                .or_insert_with(|| Value::Object(Map::new()));
-            if let Some(nested) = nested.as_object_mut() {
-                nested.extend(unknowns);
-            }
-        }
-    }
 }
 
-/// Builds the finalized `ToolCall` block from accumulated fragments.
-fn finalize_tool_call(state: ToolCallState) -> ContentBlock {
+/// Builds the finalized `ToolCall` block from accumulated fragments. A
+/// call that never delivered an `id` or a `name` is degraded the same way
+/// the non-streaming entry parse degrades it (`id: None`, empty `name`)
+/// and warns `MalformedToolCall` per field.
+fn finalize_tool_call(
+    state: ToolCallState,
+    wire_index: u64,
+    warnings: &mut Vec<ConversionWarning>,
+) -> ContentBlock {
+    if state.id.is_none() {
+        warnings.push(warn(
+            WarningCode::MalformedToolCall,
+            "/choices/0/delta/tool_calls",
+            format!(
+                "tool call index {wire_index} has no `id`; the IR keeps `id: None`, and \
+                 formats that require tool call ids will fail to rebuild the call"
+            ),
+        ));
+    }
+    if state.name.is_empty() {
+        warnings.push(warn(
+            WarningCode::MalformedToolCall,
+            "/choices/0/delta/tool_calls",
+            format!("tool call index {wire_index} finished with an empty `name`"),
+        ));
+    }
     let mut ns = state.extra;
     if let Some(t) = state.call_type {
         ns.insert(tool_call_reserved_key::TYPE.to_owned(), Value::from(t));
@@ -397,7 +528,7 @@ impl StreamParser for ChatCompletionsStreamParser {
         let mut warnings = Vec::new();
         if event.data.trim() == "[DONE]" {
             self.ensure_started(None, &mut events);
-            self.close_open_blocks(&mut events);
+            self.close_open_blocks(&mut events, &mut warnings);
             events.push(StreamEvent::MessageStop);
             self.terminal = true;
             return Ok((events, warnings));
@@ -448,7 +579,7 @@ impl StreamParser for ChatCompletionsStreamParser {
 
         let usage = chunk.get("usage").and_then(to_ir::usage_from_value);
         if let Some(reason) = finish_reason {
-            self.close_open_blocks(&mut events);
+            self.close_open_blocks(&mut events, &mut warnings);
             events.push(StreamEvent::message_delta(
                 Some(to_ir::map_finish_reason(&reason)),
                 usage,

@@ -240,6 +240,118 @@ fn malformed_function_response_value_is_preserved() {
 }
 
 #[test]
+fn function_response_missing_response_warns_and_reads_empty() {
+    // `response` is required upstream; its absence warns, parses as empty
+    // content, and the rebuilt part carries the canonicalized
+    // `"response": {}` the wire never had (so the body is not a fixed
+    // point — the disclosure exists precisely because of that).
+    let body = json!({
+        "contents": [
+            {"role": "user", "parts": [{"functionResponse": {"name": "f"}}]}
+        ]
+    });
+    let (ir, warnings) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedToolResult);
+    assert_eq!(
+        warnings[0].location,
+        "/contents/0/parts/0/functionResponse/response"
+    );
+    let ContentBlock::ToolResult {
+        name,
+        content,
+        is_error,
+        ..
+    } = &ir.messages[0].content[0]
+    else {
+        panic!("expected tool result");
+    };
+    assert_eq!(name.as_deref(), Some("f"));
+    assert!(content.is_empty());
+    assert_eq!(*is_error, None);
+    let (serialized, _) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
+    assert_eq!(
+        serialized["contents"][0]["parts"][0]["functionResponse"],
+        json!({"name": "f", "response": {}})
+    );
+}
+
+#[test]
+fn function_response_missing_name_warns_and_stays_unset() {
+    // `name` is required upstream; its absence warns and the IR keeps
+    // `name: None` (nothing fabricated), so serializing without a
+    // resolvable id fails per the § 7.2 contract.
+    let body = json!({
+        "contents": [
+            {"role": "user", "parts": [{"functionResponse": {"response": {"output": "ok"}}}]}
+        ]
+    });
+    let (ir, warnings) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedToolResult);
+    assert_eq!(
+        warnings[0].location,
+        "/contents/0/parts/0/functionResponse/name"
+    );
+    let ContentBlock::ToolResult { name, content, .. } = &ir.messages[0].content[0] else {
+        panic!("expected tool result");
+    };
+    assert_eq!(*name, None);
+    assert!(matches!(&content[0], ToolOutputBlock::Text { text, .. } if text == "ok"));
+    assert!(request_from_ir(&ir, &ConvertOptions::default()).is_err());
+
+    // With an id matching an earlier call, re-serialization recovers the
+    // name from history; the parse-side disclosure still fires.
+    let body = json!({
+        "contents": [
+            {"role": "model", "parts": [{"functionCall": {"id": "c1", "name": "f", "args": {}}}]},
+            {"role": "user", "parts": [{"functionResponse": {"id": "c1", "response": {"output": "ok"}}}]}
+        ]
+    });
+    let (ir, warnings) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedToolResult);
+    assert_eq!(
+        warnings[0].location,
+        "/contents/1/parts/0/functionResponse/name"
+    );
+    let (serialized, _) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
+    assert_eq!(
+        serialized["contents"][1]["parts"][0]["functionResponse"],
+        json!({"id": "c1", "name": "f", "response": {"output": "ok"}})
+    );
+}
+
+#[test]
+fn function_response_missing_both_fields_warns_per_field() {
+    let body = json!({
+        "contents": [
+            {"role": "user", "parts": [{"functionResponse": {}}]}
+        ]
+    });
+    let (ir, warnings) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert!(
+        warnings
+            .iter()
+            .all(|w| w.code == WarningCode::MalformedToolResult)
+    );
+    assert_eq!(
+        warnings[0].location,
+        "/contents/0/parts/0/functionResponse/name"
+    );
+    assert_eq!(
+        warnings[1].location,
+        "/contents/0/parts/0/functionResponse/response"
+    );
+    let ContentBlock::ToolResult { name, content, .. } = &ir.messages[0].content[0] else {
+        panic!("expected tool result");
+    };
+    assert_eq!(*name, None);
+    assert!(content.is_empty());
+}
+
+#[test]
 fn legacy_function_role_parses_as_tool_turn() {
     let body = json!({
         "contents": [
@@ -412,7 +524,7 @@ fn function_call_missing_name_warns_and_defaults_empty() {
     });
     let (ir, warnings) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
     assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert_eq!(warnings[0].code, WarningCode::MalformedField);
+    assert_eq!(warnings[0].code, WarningCode::MalformedToolCall);
     assert_eq!(
         warnings[0].location,
         "/contents/0/parts/0/functionCall/name"
@@ -437,7 +549,7 @@ fn function_call_missing_name_warns_and_defaults_empty() {
     });
     let resp = response_to_ir(&serde_json::to_vec(&body).unwrap(), &meta()).unwrap();
     assert_eq!(resp.warnings.len(), 1, "{:?}", resp.warnings);
-    assert_eq!(resp.warnings[0].code, WarningCode::MalformedField);
+    assert_eq!(resp.warnings[0].code, WarningCode::MalformedToolCall);
     assert_eq!(
         resp.warnings[0].location,
         "/candidates/0/content/parts/0/functionCall/name"

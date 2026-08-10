@@ -418,7 +418,7 @@ fn call_member_or_empty(
 ) -> String {
     value.unwrap_or_else(|| {
         warnings.push(warn(
-            WarningCode::MalformedField,
+            WarningCode::MalformedToolCall,
             format!("{ptr}/{payload}/{member}"),
             format!(
                 "`{payload}.{member}` is missing; it parses as an empty string and \
@@ -435,7 +435,7 @@ fn call_member_or_empty(
 /// [`super::tool_call_reserved_key`]). Returns `None` (entry skipped, with
 /// a warning) for non-object entries. Upstream-required fields that are
 /// absent parse leniently — `id` as `None`, payload strings as `""` — and
-/// each missing one warns `MalformedField` at its field path.
+/// each missing one warns `MalformedToolCall` at its field path.
 pub(crate) fn tool_call_entry_to_block(
     entry: &Value,
     ptr: &str,
@@ -445,7 +445,7 @@ pub(crate) fn tool_call_entry_to_block(
         Ok(e) => e,
         Err(e) => {
             warnings.push(warn(
-                WarningCode::MalformedField,
+                WarningCode::MalformedToolCall,
                 ptr.to_owned(),
                 format!("tool call entry failed to parse and was skipped: {e}"),
             ));
@@ -454,7 +454,7 @@ pub(crate) fn tool_call_entry_to_block(
     };
     if wire.id.is_none() {
         warnings.push(warn(
-            WarningCode::MalformedField,
+            WarningCode::MalformedToolCall,
             format!("{ptr}/id"),
             "tool call entry has no `id`; the IR keeps `id: None`, and formats that \
              require tool call ids will fail to rebuild the call",
@@ -465,7 +465,7 @@ pub(crate) fn tool_call_entry_to_block(
         None | Some("function") => {
             if wire.function.is_none() {
                 warnings.push(warn(
-                    WarningCode::MalformedField,
+                    WarningCode::MalformedToolCall,
                     format!("{ptr}/function"),
                     "`function` tool call carries no `function` payload; `name` and \
                      `arguments` parse as empty strings",
@@ -493,7 +493,7 @@ pub(crate) fn tool_call_entry_to_block(
             );
             if wire.custom.is_none() {
                 warnings.push(warn(
-                    WarningCode::MalformedField,
+                    WarningCode::MalformedToolCall,
                     format!("{ptr}/custom"),
                     "`custom` tool call carries no `custom` payload; `name` and `input` \
                      parse as empty strings",
@@ -648,6 +648,8 @@ fn stash_unused_message_fields(wire: &types::Message, ns: &mut Map<String, Value
 /// holding one `ToolResult` (implementation contract). `content: ""`
 /// parses to the empty content list (§ 7.2); unknown wire-message fields
 /// ride the block extra so multi-result IR messages keep per-message data.
+/// A missing or non-string `tool_call_id` parses as `None` and warns
+/// `MalformedToolResult` — rebuilding such a result on this format fails.
 fn tool_message_to_ir(
     wire: &types::Message,
     ptr: &str,
@@ -656,12 +658,21 @@ fn tool_message_to_ir(
     let mut ns = Map::new();
     let tool_call_id = match &wire.tool_call_id {
         Some(Value::String(s)) => Some(s.clone()),
-        None | Some(Value::Null) => None,
+        None | Some(Value::Null) => {
+            warnings.push(warn(
+                WarningCode::MalformedToolResult,
+                format!("{ptr}/tool_call_id"),
+                "tool message has no `tool_call_id`; the IR keeps `tool_call_id: None`, \
+                 and formats that require tool call ids will fail to rebuild the result",
+            ));
+            None
+        }
         Some(other) => {
             warnings.push(warn(
-                WarningCode::MalformedField,
+                WarningCode::MalformedToolResult,
                 format!("{ptr}/tool_call_id"),
-                "non-string `tool_call_id` kept verbatim in the block extra",
+                "non-string `tool_call_id` kept verbatim in the block extra; the IR keeps \
+                 `tool_call_id: None`",
             ));
             ns.insert("tool_call_id".to_owned(), other.clone());
             None
