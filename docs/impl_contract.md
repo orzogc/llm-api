@@ -164,6 +164,12 @@ Round-trip metadata flows **parse-attach → serialize-consume**.
 - Unknown stream events → `StreamEvent::Unknown` + `UnknownStreamEvent`
   (cosmetic) warning; known-ignorable protocol noise (Anthropic `ping`,
   CC `[DONE]` handling, comment keep-alives) is silently consumed.
+- Malformed tool payloads: a unified field (`id`, `name`, `arguments`,
+  `tool_call_id`, `response`) missing or mangled — parsed with
+  empty/`None` stand-ins or dropped — warns `MalformedToolCall` /
+  `MalformedToolResult` (semantic). Verbatim-preserving recoveries
+  (out-of-schema values mirrored into `extra`/`arguments`, whole nodes
+  kept as `Opaque`) stay `MalformedField` (cosmetic).
 - `parse_error`: map provider error types to `ApiErrorKind` (OpenAI
   `error.type`; Anthropic `error.type` incl. `overloaded_error` →
   `Overloaded`; Google `error.status` gRPC-style codes, e.g.

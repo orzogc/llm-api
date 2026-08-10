@@ -26,18 +26,22 @@ and pick the upstream API format at call time.
   request) is a design constraint (the IR must not preclude it) but is **not
   implemented in v1**, neither streaming nor non-streaming.
 - Same-provider round-trips are **canonicalizing, with explicitly documented
-  representational losses**: the first `format -> IR -> format` pass may
-  normalize equivalent encodings (string shorthands vs single-element arrays,
-  explicit `null` vs absent optional fields), after which the mapping is
-  idempotent — re-parsing and re-serializing the canonical form reproduces it
-  exactly. Preserved verbatim: modeled fields, **non-null** unknown fields,
-  unmodeled union members (`Opaque`, § 4.3) and message order. The one
-  **silent** representational loss: null-valued unknown fields canonicalize
-  to absent — for an unknown field the library cannot know whether `null`
-  carries distinct semantics. Anything else that cannot be represented or
-  rebuilt is dropped **with a warning** — each format module documents its
-  cases (e.g. CC `stream_options` members and inexpressible assistant block
-  order, Google mixed-tool-entry splitting). Nothing else is dropped
+  representational losses**. What the first `format -> IR -> format` pass may
+  change falls into three tiers; after that pass the mapping is idempotent —
+  re-parsing and re-serializing the canonical form reproduces it exactly.
+  1. The one **silent loss**: null-valued unknown fields canonicalize to
+     absent — for an unknown field the library cannot know whether `null`
+     carries distinct semantics.
+  2. **Warning-free equivalent re-encodings**: normalizations whose upstream
+     meaning is identical — string shorthands vs single-element arrays,
+     explicit defaults vs absent (`is_error: false`, Google
+     `thought: false`), Google mixed-tool-entry grouping.
+  3. **Warned non-equivalent losses**: anything else that cannot be
+     represented or rebuilt is dropped with a warning — each format module
+     documents its cases (e.g. CC `stream_options` members, inexpressible
+     assistant block order).
+  Preserved verbatim: modeled fields, **non-null** unknown fields, unmodeled
+  union members (`Opaque`, § 4.3) and message order. Nothing else is dropped
   silently.
 
 ### Non-goals

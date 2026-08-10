@@ -32,8 +32,9 @@ reachable.
   canonicalizing then idempotent; unmodeled provider nodes (documents,
   built-in tool calls, executable code, …) ride along as `Opaque` values in
   their original positions. The one silent representational loss:
-  explicitly-`null` unknown fields canonicalize to absent; every other
-  non-recoverable canonicalization carries a warning (`docs/design.md` § 1).
+  explicitly-`null` unknown fields canonicalize to absent. Upstream-
+  equivalent re-encodings (string shorthands, entry grouping) are silent;
+  every non-equivalent loss carries a warning (`docs/design.md` § 1).
   Persisting agent history as IR JSON is a supported, semver-covered use
   case.
 
