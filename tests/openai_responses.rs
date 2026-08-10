@@ -147,6 +147,46 @@ fn sampling_parameters_map_or_warn() {
 }
 
 #[test]
+fn non_finite_sampling_values_are_conversion_errors() {
+    // Checked for all four f64 fields — including the ones Responses drops
+    // with a warning: a non-finite value is a caller bug, not a droppable
+    // knob.
+    type SetField = fn(&mut Request, f64);
+    let fields: [(SetField, &str); 4] = [
+        (|r, v| r.temperature = Some(v), "/temperature"),
+        (|r, v| r.top_p = Some(v), "/top_p"),
+        (|r, v| r.frequency_penalty = Some(v), "/frequency_penalty"),
+        (|r, v| r.presence_penalty = Some(v), "/presence_penalty"),
+    ];
+    for (set, expected) in fields {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut req = Request::with_messages(vec![Message::user_text("hi")]);
+            set(&mut req, bad);
+            let err = OpenAiResponses
+                .build_request(&req, &ctx(CallMode::Unary))
+                .unwrap_err();
+            match err {
+                Error::Conversion(ConversionError::NonFiniteNumber { location, .. }) => {
+                    assert_eq!(location, expected);
+                }
+                other => panic!("expected NonFiniteNumber for {bad}, got {other:?}"),
+            }
+        }
+    }
+
+    // Finite values keep the existing behavior (mapped or dropped+warned).
+    let mut req = Request::with_messages(vec![Message::user_text("hi")]);
+    req.temperature = Some(0.0);
+    req.top_p = Some(f64::MAX);
+    req.frequency_penalty = Some(-0.0);
+    let built = build(&req);
+    let body = body_of(&built);
+    assert_eq!(body["temperature"], json!(0.0));
+    assert_eq!(body["top_p"], json!(f64::MAX));
+    assert!(body.get("frequency_penalty").is_none());
+}
+
+#[test]
 fn strict_mode_escalates_unless_overridden() {
     let mut req = Request::with_messages(vec![Message::user_text("hi")]);
     req.stop_sequences = Some(vec!["END".into()]);
@@ -313,6 +353,135 @@ fn assistant_texts_group_by_item_id_and_refusal_parts_rebuild() {
             },
         ])
     );
+}
+
+#[test]
+fn no_id_assistant_items_with_distinct_phase_keep_boundaries() {
+    // Two id-less assistant message items whose `phase` differs must not
+    // collapse into one item — the second phase would be lost. They still
+    // merge into one IR assistant message (turn grouping); the block-level
+    // item metadata splits them again on serialization.
+    let wire = json!({
+        "input": [
+            {"type": "message", "role": "assistant", "phase": "commentary",
+             "content": [{"type": "input_text", "text": "thinking aloud"}]},
+            {"type": "message", "role": "assistant", "phase": "final_answer",
+             "content": [{"type": "input_text", "text": "the answer"}]},
+        ]
+    });
+    let (req, parse_warnings) = OpenAiResponses
+        .parse_request(&serde_json::to_vec(&wire).unwrap())
+        .unwrap();
+    assert!(parse_warnings.is_empty(), "{parse_warnings:?}");
+    assert_eq!(req.messages.len(), 1);
+    let (body, build_warnings) = request_from_ir(
+        &req,
+        Some("gpt-5.1"),
+        CallMode::Unary,
+        &ConvertOptions::default(),
+    )
+    .unwrap();
+    assert!(build_warnings.is_empty(), "{build_warnings:?}");
+    // `input_text` canonicalizes to `output_text` (documented).
+    assert_eq!(
+        body["input"],
+        json!([
+            {"type": "message", "role": "assistant", "phase": "commentary",
+             "content": [{"type": "output_text", "text": "thinking aloud", "annotations": []}]},
+            {"type": "message", "role": "assistant", "phase": "final_answer",
+             "content": [{"type": "output_text", "text": "the answer", "annotations": []}]},
+        ])
+    );
+}
+
+#[test]
+fn no_id_assistant_items_with_distinct_status_keep_boundaries() {
+    let wire = json!({
+        "input": [
+            {"type": "message", "role": "assistant", "status": "completed", "content": "a"},
+            {"type": "message", "role": "assistant", "status": "in_progress", "content": "b"},
+        ]
+    });
+    let (req, parse_warnings) = OpenAiResponses
+        .parse_request(&serde_json::to_vec(&wire).unwrap())
+        .unwrap();
+    assert!(parse_warnings.is_empty(), "{parse_warnings:?}");
+    let (body, build_warnings) = request_from_ir(
+        &req,
+        Some("gpt-5.1"),
+        CallMode::Unary,
+        &ConvertOptions::default(),
+    )
+    .unwrap();
+    assert!(build_warnings.is_empty(), "{build_warnings:?}");
+    let input = body["input"].as_array().unwrap();
+    assert_eq!(input.len(), 2, "{input:?}");
+    assert_eq!(input[0]["status"], json!("completed"));
+    assert_eq!(input[1]["status"], json!("in_progress"));
+}
+
+#[test]
+fn no_id_metadata_free_assistant_items_still_merge() {
+    // Without any item-level metadata the id-less boundary is not
+    // representable in the IR: the two items merge into one (documented
+    // turn-grouping normalization), warning-free.
+    let wire = json!({
+        "input": [
+            {"type": "message", "role": "assistant",
+             "content": [{"type": "output_text", "text": "a", "annotations": []}]},
+            {"type": "message", "role": "assistant",
+             "content": [{"type": "output_text", "text": "b", "annotations": []}]},
+        ]
+    });
+    let (req, parse_warnings) = OpenAiResponses
+        .parse_request(&serde_json::to_vec(&wire).unwrap())
+        .unwrap();
+    assert!(parse_warnings.is_empty(), "{parse_warnings:?}");
+    let (body, build_warnings) = request_from_ir(
+        &req,
+        Some("gpt-5.1"),
+        CallMode::Unary,
+        &ConvertOptions::default(),
+    )
+    .unwrap();
+    assert!(build_warnings.is_empty(), "{build_warnings:?}");
+    assert_eq!(
+        body["input"],
+        json!([
+            {"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": "a", "annotations": []},
+                {"type": "output_text", "text": "b", "annotations": []},
+            ]},
+        ])
+    );
+}
+
+#[test]
+fn same_id_blocks_with_conflicting_item_fields_warn_first_wins() {
+    // Hand-built blocks sharing an item id but disagreeing on an
+    // item-level field: the id keeps them in one item (two wire items
+    // with the same id would be invalid), the first block's value wins
+    // and the dropped value warns.
+    let msg = Message::assistant(vec![
+        ContentBlock::text("a")
+            .with_extra(F, "id", "msg_1")
+            .with_extra(F, "phase", "commentary"),
+        ContentBlock::text("b")
+            .with_extra(F, "id", "msg_1")
+            .with_extra(F, "phase", "final_answer"),
+    ]);
+    let built = build(&Request::with_messages(vec![msg]));
+    let body = body_of(&built);
+    let input = body["input"].as_array().unwrap();
+    assert_eq!(input.len(), 1, "{input:?}");
+    assert_eq!(input[0]["phase"], json!("commentary"));
+    let w = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::ExtraDropped)
+        .expect("conflicting phase warns");
+    assert_eq!(w.severity, WarningSeverity::Semantic);
+    assert_eq!(w.location, "/input/0/content/1");
 }
 
 #[test]

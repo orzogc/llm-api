@@ -469,14 +469,21 @@ enum BodyEnd {
     Failed(HttpError),
 }
 
-/// Collects a body stream into memory, reading at most `cap + 1` bytes'
-/// worth of chunks (a body strictly larger than `cap` stops early).
+/// Collects a body stream into memory (a body strictly larger than `cap`
+/// stops early). An oversized chunk is sliced before it is copied, so the
+/// buffer never grows past `cap + 1` bytes regardless of chunk size — the
+/// transport's own chunk allocation is outside this function's control.
 async fn read_capped(body: &mut BodyStream, cap: usize) -> (Vec<u8>, BodyEnd) {
     let mut buf = Vec::new();
     loop {
         match std::future::poll_fn(|cx| body.as_mut().poll_next(cx)).await {
             Some(Ok(chunk)) => {
-                buf.extend_from_slice(&chunk);
+                // `cap + 1` bytes prove the body exceeds the cap while
+                // copying no more than one byte past it (`buf.len() <= cap`
+                // here, so `remaining >= 1`; saturating for
+                // `cap == usize::MAX`).
+                let remaining = cap.saturating_add(1) - buf.len();
+                buf.extend_from_slice(&chunk[..remaining.min(chunk.len())]);
                 if buf.len() > cap {
                     buf.truncate(cap);
                     return (buf, BodyEnd::CapHit);
@@ -679,5 +686,45 @@ mod tests {
         let (buf, end) = read_capped(&mut body, 100).await;
         assert_eq!(buf, b"par");
         assert!(matches!(end, BodyEnd::Failed(_)));
+    }
+
+    #[tokio::test]
+    async fn read_capped_slices_oversized_chunk() {
+        // A single chunk far larger than the cap: only `cap` bytes are
+        // kept, and the chunk was sliced to `cap + 1` bytes before the
+        // copy — the buffer never held the whole chunk.
+        let mut body = body_of(vec![Ok(Bytes::from(vec![b'x'; 1000]))]);
+        let (buf, end) = read_capped(&mut body, 8).await;
+        assert!(matches!(end, BodyEnd::CapHit));
+        assert_eq!(buf, vec![b'x'; 8]);
+        assert!(
+            buf.capacity() < 1000,
+            "an oversized chunk must not be copied whole (capacity {})",
+            buf.capacity()
+        );
+    }
+
+    #[tokio::test]
+    async fn read_capped_cap_boundary_across_chunks() {
+        // `cap + 1` reached exactly by a later chunk: CapHit with exactly
+        // `cap` bytes kept.
+        let mut body = body_of(vec![
+            Ok(Bytes::from_static(b"12345")),
+            Ok(Bytes::from_static(b"678")), // exactly `cap` so far
+            Ok(Bytes::new()),               // an empty chunk is a no-op
+            Ok(Bytes::from_static(b"9")),   // crosses to `cap + 1`
+        ]);
+        let (buf, end) = read_capped(&mut body, 8).await;
+        assert_eq!(buf, b"12345678");
+        assert!(matches!(end, BodyEnd::CapHit));
+
+        // Crossing the cap mid-chunk keeps the prefix up to the cap.
+        let mut body = body_of(vec![
+            Ok(Bytes::from_static(b"12345")),
+            Ok(Bytes::from_static(b"6789")),
+        ]);
+        let (buf, end) = read_capped(&mut body, 8).await;
+        assert_eq!(buf, b"12345678");
+        assert!(matches!(end, BodyEnd::CapHit));
     }
 }

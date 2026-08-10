@@ -5,9 +5,16 @@
 //!
 //! - `delta.content`, `delta.reasoning_content` and `delta.refusal` are
 //!   three text channels; a fragment on a different channel than the last
-//!   one closes the current block (`BlockStop { block: None }`) and opens
-//!   a new one, so `reasoning_content` ↔ `content` transitions produce
-//!   interleaved `Thinking` / `Text` blocks in arrival order.
+//!   one closes the current block and opens a new one, so
+//!   `reasoning_content` ↔ `content` transitions produce interleaved
+//!   `Thinking` / `Text` blocks in arrival order. Tool-call fragments do
+//!   **not** close the text channel — the wire message holds one string
+//!   per channel, so later same-channel text merges into its earlier
+//!   block and the accumulated message equals the non-streaming parse of
+//!   the assembled message (canonical channel order). A non-empty text
+//!   fragment arriving after a tool call opened warns `BlockOrderLost`
+//!   once per stream: the arrival interleaving is folded and cannot be
+//!   recovered from the accumulated response.
 //! - `delta.tool_calls` fragments group by their `index`: the first
 //!   fragment of an index opens a `ToolCall` block (`arguments: ""`),
 //!   later `function.arguments` (or dialect `custom.input`) pieces stream
@@ -27,13 +34,20 @@
 //!   finish chunk) emits a `MessageDelta` usage snapshot.
 //! - The literal `data: [DONE]` terminator emits `MessageStop`; a stream
 //!   that ends without it fails [`StreamParser::finish`] with a
-//!   truncated-stream parse error.
+//!   truncated-stream parse error, and anything received after it (data
+//!   or a repeated `[DONE]`) surfaces as [`StreamEvent::Unknown`] with an
+//!   `UnknownStreamEvent` warning.
 //! - Chunks for choice indexes beyond the first surface as
 //!   [`StreamEvent::Unknown`] with a `MultipleCandidates` warning once per
 //!   stream (§ 8). Chunk envelope noise (`system_fingerprint`,
 //!   `obfuscation`, `service_tier`, `logprobs`, null `usage`) is consumed
-//!   silently; unknown `delta` fields surface as [`BlockDelta::Other`] on
-//!   the current channel block when one is open.
+//!   silently; unknown `delta` fields (`annotations`, `audio`, the legacy
+//!   `function_call`, dialect fields) surface as [`BlockDelta::Other`] on
+//!   the current channel block when one is open **and** fold into that
+//!   block's extra when it closes, so they survive accumulation. Fields
+//!   repeating across chunks merge under Chat Completions delta
+//!   semantics: strings concatenate, arrays append, objects merge per key
+//!   recursively, anything else replaces (last wins).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -65,6 +79,97 @@ enum Channel {
     Reasoning,
     /// `delta.refusal` → refusal-marked `Text` block (§ 9).
     Refusal,
+}
+
+impl Channel {
+    /// The wire `delta` field this channel reads.
+    fn field(self) -> &'static str {
+        match self {
+            Self::Content => "content",
+            Self::Reasoning => "reasoning_content",
+            Self::Refusal => "refusal",
+        }
+    }
+}
+
+/// The open text channel: text and unknown delta fields accumulate so the
+/// close can hand the accumulator a finalized block when anything beyond
+/// the plain deltas must survive (§ 9).
+#[derive(Debug)]
+struct ChannelState {
+    /// Which text channel the block belongs to.
+    kind: Channel,
+    /// Unified block index.
+    index: usize,
+    /// Concatenation of the emitted fragments. `None` mirrors the
+    /// accumulator's incrementally built block: a `Thinking` block whose
+    /// stream never delivered a non-empty fragment keeps `text: None`.
+    text: Option<String>,
+    /// Unknown delta fields attributed to this block, merged across
+    /// chunks ([`merge_unknown_fields`]) and folded into the finalized
+    /// block extra at close.
+    leftover: Map<String, Value>,
+}
+
+/// Merges one chunk's unknown delta fields into the channel accumulation
+/// under Chat Completions delta semantics: strings are incremental
+/// fragments and concatenate, arrays append per item, objects merge per
+/// key — recursively, so nested increments like the legacy
+/// `function_call.arguments` keep concatenating — and any other pairing
+/// replaces the accumulated value (last wins).
+fn merge_unknown_fields(target: &mut Map<String, Value>, fields: Map<String, Value>) {
+    for (key, value) in fields {
+        match target.get_mut(&key) {
+            Some(slot) => merge_unknown_value(slot, value),
+            None => {
+                target.insert(key, value);
+            }
+        }
+    }
+}
+
+/// The per-value merge rule of [`merge_unknown_fields`].
+fn merge_unknown_value(slot: &mut Value, value: Value) {
+    match (slot, value) {
+        (Value::String(acc), Value::String(piece)) => acc.push_str(&piece),
+        (Value::Array(acc), Value::Array(items)) => acc.extend(items),
+        (Value::Object(acc), Value::Object(members)) => merge_unknown_fields(acc, members),
+        (slot, value) => *slot = value,
+    }
+}
+
+/// Folds an accumulated text channel into its `BlockStop` payload: with
+/// unknown delta fields attributed to the block the stop carries the
+/// parser-finalized block — accumulated text plus the folded fields in
+/// the format namespace, which the accumulator adopts wholesale (§ 9) —
+/// and without any it stays `block: None` (the accumulator's
+/// incrementally built block is already complete).
+fn finalize_channel(state: ChannelState) -> (usize, Option<ContentBlock>) {
+    if state.leftover.is_empty() {
+        return (state.index, None);
+    }
+    let block = match state.kind {
+        Channel::Content => ContentBlock::Text {
+            text: state.text.unwrap_or_default(),
+            cache: None,
+            extra: Extra::from_unknown(FORMAT, state.leftover),
+        },
+        Channel::Reasoning => ContentBlock::Thinking {
+            text: state.text,
+            signature: None,
+            extra: Extra::from_unknown(FORMAT, state.leftover),
+        },
+        Channel::Refusal => {
+            let mut ns = state.leftover;
+            ns.insert("refusal".to_owned(), Value::from(true));
+            ContentBlock::Text {
+                text: state.text.unwrap_or_default(),
+                cache: None,
+                extra: Extra::from_unknown(FORMAT, ns),
+            }
+        }
+    };
+    (state.index, Some(block))
 }
 
 /// Which payload object a streamed tool call carries.
@@ -345,11 +450,14 @@ pub struct ChatCompletionsStreamParser {
     started: bool,
     terminal: bool,
     next_index: usize,
-    /// The open text channel and its block index.
-    channel: Option<(Channel, usize)>,
+    /// The open text channel and its accumulation.
+    channel: Option<ChannelState>,
     /// Open tool calls by wire `index`.
     tool_calls: BTreeMap<u64, ToolCallState>,
     warned_multiple: bool,
+    /// Whether the text-after-tool-call fold already warned
+    /// `BlockOrderLost` (once per stream).
+    warned_interleaved: bool,
     /// Unknown delta field names already warned about.
     warned_unknown: BTreeSet<String>,
 }
@@ -396,8 +504,8 @@ impl ChatCompletionsStreamParser {
         warnings: &mut Vec<ConversionWarning>,
     ) {
         let mut stops: Vec<(usize, Option<ContentBlock>)> = Vec::new();
-        if let Some((_, index)) = self.channel.take() {
-            stops.push((index, None));
+        if let Some(state) = self.channel.take() {
+            stops.push(finalize_channel(state));
         }
         for (wire_index, state) in std::mem::take(&mut self.tool_calls) {
             let block_index = state.block_index;
@@ -412,38 +520,83 @@ impl ChatCompletionsStreamParser {
 
     /// Routes a fragment on a text channel: switching channels closes the
     /// current block and opens a new one; empty fragments open blocks but
-    /// emit no delta.
-    fn channel_delta(&mut self, kind: Channel, fragment: &str, events: &mut Vec<StreamEvent>) {
-        let index = match self.channel {
-            Some((current, index)) if current == kind => index,
-            _ => {
-                if let Some((_, old)) = self.channel.take() {
-                    events.push(StreamEvent::block_stop(old, None));
-                }
-                let index = self.alloc_index();
-                let block = match kind {
-                    Channel::Content => ContentBlock::text(""),
-                    Channel::Reasoning => ContentBlock::Thinking {
+    /// emit no delta. A tool call never closes the channel (the wire
+    /// holds one string per channel), so a non-empty fragment arriving
+    /// after a tool call opened merges into its earlier block and warns
+    /// `BlockOrderLost` once per stream — the accumulated message equals
+    /// the non-streaming parse of the assembled message, but the arrival
+    /// interleaving is lost. Empty fragments stay silent: dialects ride
+    /// `content: ""` along tool-call chunks, and nothing folds.
+    fn channel_delta(
+        &mut self,
+        kind: Channel,
+        fragment: &str,
+        events: &mut Vec<StreamEvent>,
+        warnings: &mut Vec<ConversionWarning>,
+    ) {
+        let reused = matches!(&self.channel, Some(state) if state.kind == kind);
+        if !reused {
+            if let Some(state) = self.channel.take() {
+                let (index, block) = finalize_channel(state);
+                events.push(StreamEvent::block_stop(index, block));
+            }
+            let index = self.alloc_index();
+            let (block, text) = match kind {
+                Channel::Content => (ContentBlock::text(""), Some(String::new())),
+                Channel::Reasoning => (
+                    ContentBlock::Thinking {
                         text: None,
                         signature: None,
                         extra: Extra::new(),
                     },
-                    Channel::Refusal => {
-                        let mut ns = Map::new();
-                        ns.insert("refusal".to_owned(), Value::from(true));
+                    None,
+                ),
+                Channel::Refusal => {
+                    let mut ns = Map::new();
+                    ns.insert("refusal".to_owned(), Value::from(true));
+                    (
                         ContentBlock::Text {
                             text: String::new(),
                             cache: None,
                             extra: Extra::from_unknown(FORMAT, ns),
-                        }
-                    }
-                };
-                self.channel = Some((kind, index));
-                events.push(StreamEvent::block_start(index, block));
-                index
-            }
-        };
+                        },
+                        Some(String::new()),
+                    )
+                }
+            };
+            events.push(StreamEvent::block_start(index, block));
+            self.channel = Some(ChannelState {
+                kind,
+                index,
+                text,
+                leftover: Map::new(),
+            });
+        }
+        let index = self.channel.as_ref().expect("channel ensured open").index;
+        if reused
+            && !fragment.is_empty()
+            && !self.warned_interleaved
+            && self.tool_calls.values().any(|t| t.block_index > index)
+        {
+            self.warned_interleaved = true;
+            warnings.push(warn(
+                WarningCode::BlockOrderLost,
+                format!("/choices/0/delta/{}", kind.field()),
+                format!(
+                    "a `{}` fragment arrived after a tool call opened; the wire holds one \
+                     string per channel, so the fragment merged into its earlier block and \
+                     the arrival interleaving is lost (the accumulated message reads in \
+                     canonical channel order, like the non-streaming parse)",
+                    kind.field()
+                ),
+            ));
+        }
         if !fragment.is_empty() {
+            let state = self.channel.as_mut().expect("channel ensured open");
+            state
+                .text
+                .get_or_insert_with(String::new)
+                .push_str(fragment);
             let delta = match kind {
                 Channel::Content | Channel::Refusal => BlockDelta::Text(fragment.to_owned()),
                 Channel::Reasoning => BlockDelta::Thinking(fragment.to_owned()),
@@ -553,13 +706,13 @@ impl ChatCompletionsStreamParser {
         warnings: &mut Vec<ConversionWarning>,
     ) {
         if let Some(s) = delta.get("reasoning_content").and_then(Value::as_str) {
-            self.channel_delta(Channel::Reasoning, s, events);
+            self.channel_delta(Channel::Reasoning, s, events, warnings);
         }
         if let Some(s) = delta.get("content").and_then(Value::as_str) {
-            self.channel_delta(Channel::Content, s, events);
+            self.channel_delta(Channel::Content, s, events, warnings);
         }
         if let Some(s) = delta.get("refusal").and_then(Value::as_str) {
-            self.channel_delta(Channel::Refusal, s, events);
+            self.channel_delta(Channel::Refusal, s, events, warnings);
         }
         if let Some(entries) = delta.get("tool_calls").and_then(Value::as_array) {
             for (position, fragment) in entries.iter().enumerate() {
@@ -567,7 +720,8 @@ impl ChatCompletionsStreamParser {
             }
         }
         // Unknown delta fields: surface on the current channel block when
-        // one is open, otherwise as Unknown (warned once per field name).
+        // one is open — and accumulate for the finalized-block fold at
+        // close (§ 9) — otherwise as Unknown (warned once per field name).
         let mut leftover = Map::new();
         if let Some(obj) = delta.as_object() {
             for (key, value) in obj {
@@ -581,12 +735,13 @@ impl ChatCompletionsStreamParser {
             }
         }
         if !leftover.is_empty() {
-            match self.channel {
-                Some((_, index)) => {
+            match &mut self.channel {
+                Some(state) => {
                     events.push(StreamEvent::block_delta(
-                        index,
-                        BlockDelta::Other(Value::Object(leftover)),
+                        state.index,
+                        BlockDelta::Other(Value::Object(leftover.clone())),
                     ));
+                    merge_unknown_fields(&mut state.leftover, leftover);
                 }
                 None => {
                     events.push(StreamEvent::Unknown);
@@ -862,6 +1017,18 @@ fn finalize_tool_call(
 
 impl StreamParser for ChatCompletionsStreamParser {
     fn parse(&mut self, event: &SseEvent) -> Result<(Vec<StreamEvent>, Vec<ConversionWarning>)> {
+        if self.terminal {
+            // Data after the protocol terminator — a repeated `[DONE]`
+            // included — cannot be attributed.
+            return Ok((
+                vec![StreamEvent::Unknown],
+                vec![warn(
+                    WarningCode::UnknownStreamEvent,
+                    "",
+                    "chunk received after the stream terminated",
+                )],
+            ));
+        }
         let mut events = Vec::new();
         let mut warnings = Vec::new();
         if event.data.trim() == "[DONE]" {

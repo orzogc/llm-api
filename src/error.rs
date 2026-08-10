@@ -162,6 +162,17 @@ pub enum ConversionError {
         /// Location of the offending block in the IR.
         location: String,
     },
+    /// A sampling value is NaN or ±infinity. JSON cannot represent
+    /// non-finite floats (`serde_json` would silently serialize `null`), so
+    /// the § 4.6 verbatim passthrough is impossible — reported regardless
+    /// of strict mode; there is no faithful degrade.
+    #[non_exhaustive]
+    NonFiniteNumber {
+        /// The offending value (NaN, `inf` or `-inf`).
+        value: f64,
+        /// JSON-Pointer-style location in the would-be output.
+        location: String,
+    },
     /// Strict mode: non-overridden semantic warnings were escalated.
     #[non_exhaustive]
     Strict {
@@ -192,6 +203,15 @@ impl ConversionError {
     pub fn missing(what: impl Into<String>, location: impl Into<String>) -> Self {
         Self::MissingRequired {
             what: what.into(),
+            location: location.into(),
+        }
+    }
+
+    /// A `NonFiniteNumber` error.
+    #[must_use]
+    pub fn non_finite(value: f64, location: impl Into<String>) -> Self {
+        Self::NonFiniteNumber {
+            value,
             location: location.into(),
         }
     }
@@ -298,6 +318,14 @@ impl fmt::Display for ConversionError {
                 write!(
                     f,
                     "{block} block is not valid in a {role:?} message (at {location})"
+                )
+            }
+            Self::NonFiniteNumber {
+                value, location, ..
+            } => {
+                write!(
+                    f,
+                    "non-finite float {value} cannot be represented in JSON (at {location})"
                 )
             }
             Self::Strict { warnings, .. } => {

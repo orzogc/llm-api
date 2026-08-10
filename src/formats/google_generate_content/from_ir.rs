@@ -86,6 +86,12 @@ fn warn(
 
 /// Builds the request body per the § 6 pipeline (steps 1–3).
 pub(crate) fn build_body(req: &Request, options: &ConvertOptions) -> Result<BuiltBody> {
+    crate::convert::check_finite_sampling(&[
+        (req.temperature, "/generationConfig/temperature"),
+        (req.top_p, "/generationConfig/topP"),
+        (req.frequency_penalty, "/generationConfig/frequencyPenalty"),
+        (req.presence_penalty, "/generationConfig/presencePenalty"),
+    ])?;
     let mut warnings: Vec<ConversionWarning> = Vec::new();
     let mut pending: Vec<PendingWarning> = Vec::new();
     let mut log = MergeLog::new();

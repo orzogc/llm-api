@@ -49,6 +49,12 @@ pub(crate) fn build_body(
     mode: CallMode,
     options: &ConvertOptions,
 ) -> Result<BuiltBody> {
+    crate::convert::check_finite_sampling(&[
+        (req.temperature, "/temperature"),
+        (req.top_p, "/top_p"),
+        (req.frequency_penalty, "/frequency_penalty"),
+        (req.presence_penalty, "/presence_penalty"),
+    ])?;
     let mut warnings = Vec::new();
     let mut log = MergeLog::new();
     let messages = preprocess_messages(req, options, &mut warnings);
@@ -497,6 +503,32 @@ fn build_input_message_item(
     Ok(item)
 }
 
+/// The item-identity grouping key of an assistant `Text` block.
+///
+/// A stored item `id` is authoritative on its own: parse distributes the
+/// same item-level fields to every block of one item, so id-sharing
+/// blocks always belong together (splitting hand-built blocks whose
+/// other fields diverge would emit two wire items with the same id).
+/// Without an id, blocks group only when the remaining item-level
+/// reserved fields (`status` / `phase` / `item`) all agree — distinct
+/// id-less items with differing metadata keep their boundaries, while
+/// metadata-free ones still merge (the documented normalization).
+fn item_group_key(extra: &Extra) -> [Option<Value>; 4] {
+    let ns = extra.get(FORMAT);
+    let get = |key: &str| ns.and_then(|ns| ns.get(key)).cloned();
+    let id = get(text_block_reserved_key::ID);
+    if id.is_some() {
+        [id, None, None, None]
+    } else {
+        [
+            None,
+            get(text_block_reserved_key::STATUS),
+            get(text_block_reserved_key::PHASE),
+            get(text_block_reserved_key::ITEM),
+        ]
+    }
+}
+
 /// Explodes an assistant message into top-level items (reasoning /
 /// message / `function_call` / opaque), preserving block order.
 fn build_assistant_items(
@@ -509,10 +541,10 @@ fn build_assistant_items(
     log: &mut MergeLog,
 ) -> Result<()> {
     let first_item = items.len();
-    // Consecutive Text blocks sharing the same stored item id group into
-    // one assistant `message` item.
+    // Consecutive Text blocks with the same item-identity key (see
+    // `item_group_key`) group into one assistant `message` item.
     let mut text_group: Vec<&ContentBlock> = Vec::new();
-    let mut group_key: Option<Value> = None;
+    let mut group_key: [Option<Value>; 4] = Default::default();
 
     let flush = |group: &mut Vec<&ContentBlock>,
                  items: &mut Vec<Value>,
@@ -532,10 +564,7 @@ fn build_assistant_items(
     for (bi, block) in msg.content.iter().enumerate() {
         match block {
             ContentBlock::Text { extra, .. } => {
-                let key = extra
-                    .get(FORMAT)
-                    .and_then(|ns| ns.get(text_block_reserved_key::ID))
-                    .cloned();
+                let key = item_group_key(extra);
                 if !text_group.is_empty() && key != group_key {
                     flush(&mut text_group, items, pointers, warnings, log);
                 }
@@ -644,6 +673,10 @@ fn build_assistant_items(
 /// Reserved keys of each block's format namespace (see the module docs)
 /// select the part shape (`refusal`) and restore item-level fields (`id`,
 /// `status`, `phase`, `item`); the remaining keys merge into the part.
+/// Item-level fields come from the first block; a later block's value
+/// that disagrees with it (possible only in id-keyed groups, i.e.
+/// hand-built inconsistent metadata under one item id) is dropped with
+/// an `ExtraDropped` warning.
 fn build_assistant_message_item(
     group: &[&ContentBlock],
     item_ptr: &str,
@@ -652,6 +685,13 @@ fn build_assistant_message_item(
 ) -> Value {
     let mut content: Vec<Value> = Vec::new();
     let mut item_patch = Map::new();
+    let first_ns = group
+        .first()
+        .and_then(|b| match b {
+            ContentBlock::Text { extra, .. } => extra.get(FORMAT).cloned(),
+            _ => None,
+        })
+        .unwrap_or_default();
     for (pi, block) in group.iter().enumerate() {
         let ContentBlock::Text { text, cache, extra } = block else {
             continue;
@@ -679,16 +719,25 @@ fn build_assistant_message_item(
             match key.as_str() {
                 text_block_reserved_key::ID
                 | text_block_reserved_key::STATUS
-                | text_block_reserved_key::PHASE => {
+                | text_block_reserved_key::PHASE
+                | text_block_reserved_key::ITEM => {
                     if pi == 0 {
-                        item_patch.insert(key.clone(), value.clone());
-                    }
-                }
-                text_block_reserved_key::ITEM => {
-                    if pi == 0
-                        && let Value::Object(fields) = value
-                    {
-                        item_patch.extend(fields.clone());
+                        if key == text_block_reserved_key::ITEM {
+                            if let Value::Object(fields) = value {
+                                item_patch.extend(fields.clone());
+                            }
+                        } else {
+                            item_patch.insert(key.clone(), value.clone());
+                        }
+                    } else if first_ns.get(key) != Some(value) {
+                        warnings.push(warn(
+                            WarningCode::ExtraDropped,
+                            part_ptr.clone(),
+                            format!(
+                                "item-level `{key}` on a non-leading block of this item \
+                                 conflicts with the first block's value and was dropped"
+                            ),
+                        ));
                     }
                 }
                 text_block_reserved_key::REFUSAL => {}
@@ -810,7 +859,7 @@ fn build_tool_items(
                     warnings.push(warn(
                         WarningCode::IsErrorDropped,
                         ptr.clone(),
-                        "`is_error` is native to Anthropic only; the error marker was dropped",
+                        "`is_error` is native to Anthropic and Google; the error marker was dropped",
                     ));
                 }
                 if cache.is_some() {

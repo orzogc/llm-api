@@ -452,3 +452,78 @@ fn event_name_falls_back_to_payload_type() {
     assert_eq!(events, vec![StreamEvent::MessageStop]);
     assert!(parser.finish().is_ok());
 }
+
+#[test]
+fn post_terminal_data_does_not_turn_the_stream_fatal() {
+    // A complete minimal stream…
+    let mut parser = AnthropicMessages.stream_parser();
+    let mut events = Vec::new();
+    for (name, data) in [
+        (
+            "message_start",
+            json!({"type": "message_start", "message": {
+                "id": "msg_1", "model": "claude-sonnet-5",
+                "usage": {"input_tokens": 3},
+            }})
+            .to_string(),
+        ),
+        (
+            "content_block_start",
+            json!({"type": "content_block_start", "index": 0,
+                   "content_block": {"type": "text", "text": ""}})
+            .to_string(),
+        ),
+        (
+            "content_block_delta",
+            json!({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "text_delta", "text": "hi"}})
+            .to_string(),
+        ),
+        (
+            "content_block_stop",
+            json!({"type": "content_block_stop", "index": 0}).to_string(),
+        ),
+        (
+            "message_delta",
+            json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+                   "usage": {"output_tokens": 2}})
+            .to_string(),
+        ),
+        ("message_stop", json!({"type": "message_stop"}).to_string()),
+    ] {
+        let (evs, ws) = parser.parse(&SseEvent::new(Some(name), data)).unwrap();
+        events.extend(evs);
+        assert!(ws.is_empty());
+    }
+
+    // …followed by a stray but well-formed event: surfaced as Unknown with
+    // a warning instead of being applied to the finished message.
+    let (post, ws) = parser
+        .parse(&SseEvent::new(
+            Some("content_block_delta"),
+            json!({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "text_delta", "text": "junk"}})
+            .to_string(),
+        ))
+        .unwrap();
+    assert_eq!(post, vec![StreamEvent::Unknown]);
+    assert_eq!(ws.len(), 1);
+    assert_eq!(ws[0].code, WarningCode::UnknownStreamEvent);
+    assert!(ws[0].message.contains("after the stream terminated"));
+
+    // …and by non-JSON junk (proxy trailer): not a fatal error either.
+    let (post2, ws2) = parser.parse(&SseEvent::new(None, "not json")).unwrap();
+    assert_eq!(post2, vec![StreamEvent::Unknown]);
+    assert_eq!(ws2[0].code, WarningCode::UnknownStreamEvent);
+
+    // The stream still finishes cleanly and the accumulated response is
+    // untouched by the post-terminal data.
+    let (fin, fin_ws) = parser.finish().unwrap();
+    assert!(fin.is_empty() && fin_ws.is_empty());
+    events.extend(post);
+    events.extend(post2);
+    let resp = accumulate(&events);
+    assert_eq!(resp.text(), "hi");
+    assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
+    assert_eq!(resp.usage.as_ref().unwrap().output_tokens, 2);
+}

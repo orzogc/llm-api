@@ -483,6 +483,74 @@ fn parse_unknown_role_kept_verbatim_and_round_trips() {
     assert_eq!(rebuild(&req2, "m"), first);
 }
 
+#[test]
+fn over_u32_numbers_warn_and_round_trip_via_extra() {
+    // `max_tokens` / `top_k` above the IR's u32 range are not clamped: the
+    // IR field stays unset, a MalformedField warning discloses it, and the
+    // original number re-serializes verbatim through `extra`.
+    let body = json!({
+        "model": "m",
+        "max_tokens": 5_000_000_000_u64,
+        "top_k": 4_294_967_296_u64,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+    });
+    let (req, warnings) = AnthropicMessages
+        .parse_request(&serde_json::to_vec(&body).unwrap())
+        .unwrap();
+    assert_eq!(req.max_output_tokens, None);
+    assert_eq!(req.top_k, None);
+    let locations: Vec<&str> = warnings
+        .iter()
+        .filter(|w| w.code == WarningCode::MalformedField)
+        .map(|w| w.location.as_str())
+        .collect();
+    assert_eq!(locations, ["/max_tokens", "/top_k"]);
+    assert!(
+        warnings
+            .iter()
+            .all(|w| w.severity == WarningSeverity::Cosmetic)
+    );
+
+    // Rebuild: `max_tokens` is required on serialize, so the unset IR field
+    // needs `default_max_tokens`; the extra merge then restores the original
+    // wire numbers verbatim.
+    let mut ctx = ctx_for("m");
+    ctx.format_options.anthropic.default_max_tokens = Some(1024);
+    let built = AnthropicMessages.build_request(&req, &ctx).unwrap();
+    let out: Value = serde_json::from_slice(&built.body).unwrap();
+    assert_eq!(out, body);
+
+    // Without a default the unset required field fails loudly — no silent
+    // stand-in value.
+    let err = AnthropicMessages
+        .build_request(&req, &ctx_for("m"))
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        Error::Conversion(ConversionError::MissingRequired { .. })
+    ));
+}
+
+#[test]
+fn u32_range_numbers_parse_unchanged() {
+    // Boundary and ordinary values keep the modeled path: no warning, no
+    // extra residue.
+    let body = json!({
+        "model": "m",
+        "max_tokens": 4_294_967_295_u64,
+        "top_k": 40,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+    });
+    let (req, warnings) = AnthropicMessages
+        .parse_request(&serde_json::to_vec(&body).unwrap())
+        .unwrap();
+    assert!(warnings.is_empty());
+    assert_eq!(req.max_output_tokens, Some(u32::MAX));
+    assert_eq!(req.top_k, Some(40));
+    assert!(req.extra.is_empty());
+    assert_eq!(rebuild(&req, "m"), body);
+}
+
 fn meta() -> ResponseMeta {
     ResponseMeta::new(200, Default::default())
 }

@@ -41,7 +41,7 @@ pub enum ConversionDirection {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WarningCode {
-    // ---- semantic, build side ----
+    // ---- semantic, build side (BlockOrderLost also fires at parse) ----
     /// A thinking block was dropped for a cross-provider target (§ 4.4).
     ThinkingDropped,
     /// A thinking signature could not be carried (e.g. `thinking_as_text`).
@@ -77,10 +77,12 @@ pub enum WarningCode {
     /// Google tool results split media from text; an interleaved sequence
     /// lost its order (§ 7.2).
     ToolResultOrderLost,
-    /// The target wire message holds one field per channel (CC assistant
-    /// `reasoning_content` / `content` / `tool_calls`); an interleaved
-    /// block sequence lost its order and replays in canonical channel
-    /// order.
+    /// The wire message holds one field per channel (CC assistant
+    /// `reasoning_content` / `content` / `tool_calls`), so interleaved
+    /// order is inexpressible: building an interleaved IR message
+    /// serializes in canonical channel order, and a streamed text
+    /// fragment arriving after a tool call folds into its earlier block
+    /// at parse time.
     BlockOrderLost,
     /// Unmatched tool calls in the middle of the conversation (never
     /// repaired).

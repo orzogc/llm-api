@@ -89,6 +89,12 @@ fn warn(
 /// Builds the Anthropic Messages request body from the IR (§ 6 pipeline
 /// steps 1–3; `finalize_request` and URL building happen in the caller).
 pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) -> Result<ChatBody> {
+    crate::convert::check_finite_sampling(&[
+        (req.temperature, "/temperature"),
+        (req.top_p, "/top_p"),
+        (req.frequency_penalty, "/frequency_penalty"),
+        (req.presence_penalty, "/presence_penalty"),
+    ])?;
     let opts = &ctx.format_options.anthropic;
     let convert = &ctx.convert;
     let mut warnings: Vec<ConversionWarning> = Vec::new();

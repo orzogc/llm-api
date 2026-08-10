@@ -437,6 +437,18 @@ fn opaque_open(
 
 impl StreamParser for AnthropicStreamParser {
     fn parse(&mut self, event: &SseEvent) -> Result<(Vec<StreamEvent>, Vec<ConversionWarning>)> {
+        // Post-terminal gate, before JSON decoding: `message_stop` completed
+        // the protocol, so trailing data (a stray event, proxy keep-alive or
+        // junk) cannot be attributed and must not turn an already-complete
+        // stream into a fatal error (aligned with the Google parser).
+        if self.terminated {
+            let warnings = vec![pwarn(
+                WarningCode::UnknownStreamEvent,
+                "",
+                "chunk received after the stream terminated",
+            )];
+            return Ok((vec![StreamEvent::Unknown], warnings));
+        }
         let data: Value = serde_json::from_str(&event.data).map_err(|e| {
             perr(
                 format!("SSE event data is not valid JSON: {e}"),

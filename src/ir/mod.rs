@@ -1,8 +1,10 @@
 //! The unified intermediate representation (IR).
 //!
-//! All IR types are serializable — persisting agent history as IR JSON is a
-//! supported use case, and the IR JSON representation is covered by semver
-//! (§ 3 of the design document).
+//! All IR data types are serializable — persisting agent history as IR JSON
+//! is a supported use case, and the IR JSON representation is covered by
+//! semver (§ 3 of the design document). The two process-state types exported
+//! here ([`Accumulator`], [`MergeLog`]) are not persistable IR data and
+//! carry no serde support.
 
 mod block;
 mod events;

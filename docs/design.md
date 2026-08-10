@@ -35,7 +35,10 @@ and pick the upstream API format at call time.
   2. **Warning-free equivalent re-encodings**: normalizations whose upstream
      meaning is identical — string shorthands vs single-element arrays,
      explicit defaults vs absent (`is_error: false`, Google
-     `thought: false`), Google mixed-tool-entry grouping.
+     `thought: false`), Google mixed-tool-entry grouping, Google snake_case
+     request aliases re-emitting as camelCase, and id-less Responses
+     assistant items whose item metadata is identical merging into one item
+     (differing metadata keeps the item boundary).
   3. **Warned non-equivalent losses**: anything else that cannot be
      represented or rebuilt is dropped with a warning — each format module
      documents its cases (e.g. CC `stream_options` members, inexpressible
@@ -84,21 +87,28 @@ code is written for these in v1.
 - Feature `reqwest`: default `HttpClient` implementation.
 - MSRV: 1.88 (measured with `cargo-msrv`, declared as `rust-version`);
   policy is to follow a recent stable.
-- All public IR types are `#[non_exhaustive]`; enums additionally mark
-  struct-like variants `#[non_exhaustive]` (enum-level `#[non_exhaustive]`
-  alone does not cover variant fields, which would otherwise freeze a
-  variant's shape). Construction goes through builders and constructor
-  functions (`ContentBlock::text(...)`, …); matching these variants requires
-  `..`. All IR types derive `Serialize`/`Deserialize`/`Clone`/`Debug` (and
-  `PartialEq` where possible): persisting agent history as IR JSON is a
-  supported use case, which is why closures are kept out of IR nodes (see
-  § 5). One exception: `Response.headers` (`http::HeaderMap` has no serde
-  support) serializes through a custom `Vec<(String, String)>` representation
-  (lossy for non-UTF-8 header values).
+- All public IR **data** types are `#[non_exhaustive]`; enums additionally
+  mark struct-like variants `#[non_exhaustive]` (enum-level
+  `#[non_exhaustive]` alone does not cover variant fields, which would
+  otherwise freeze a variant's shape). Construction goes through builders and
+  constructor functions (`ContentBlock::text(...)`, …); matching these
+  variants requires `..`. All IR data types are `Serialize`/`Deserialize`/
+  `Clone`/`Debug` (and `PartialEq` where possible), derived or — where the
+  JSON shape needs it (`ImageSource`, `Effort`, `StopReason`) — via custom
+  impls: persisting agent history as IR JSON is a supported use case, which
+  is why closures are kept out of IR nodes (see § 5). Exceptions:
+  `Response.headers` (`http::HeaderMap` has no serde support) serializes
+  through a custom `Vec<(String, String)>` representation (lossy for
+  non-UTF-8 header values); the process-state types `Accumulator` and
+  `MergeLog` (a fold in progress, a serialization log) are not persistable
+  IR data — no serde, no `#[non_exhaustive]`.
 - IR JSON representation: `ContentBlock` and `StreamEvent` use
   `#[serde(tag = "type", rename_all = "snake_case")]`; string-like enums
-  (`Role`, `Effort`, `StopReason`) serialize as plain strings, with `Other`
-  carrying its raw string (custom impls). Optional fields use
+  serialize as plain strings — `Role` is a closed set (derived, lowercase;
+  unknown wire roles never reach it: parsers keep the whole message as an
+  own-format `Opaque` per the implementation contract), while `Effort` and
+  `StopReason` carry out-of-set values in `Other` (custom impls). Optional
+  fields use
   `#[serde(default, skip_serializing_if)]`, and fields added later are always
   optional, so previously persisted IR JSON keeps deserializing. The IR JSON
   representation is covered by semver — an incompatible change is a
@@ -391,8 +401,12 @@ dropping `Some(true)` is cosmetic.
 
 Values are **passed through verbatim** — no scaling, no clamping, no
 normalization. Ranges differ (e.g. temperature 0–2 on OpenAI/Google, 0–1 on
-Anthropic); out-of-range values are the upstream API's error to report.
-Parameters unsupported by the target format produce a warning:
+Anthropic); out-of-range values are the upstream API's error to report. The
+one build-time rejection: non-finite floats (`NaN`, ±∞) are a
+`ConversionError` on every format — JSON cannot represent them, and
+serializing the `null` serde_json would produce silently flips the field to
+"provider default". Parameters unsupported by the target format produce a
+warning:
 
 | IR field | OpenAI CC | Responses | Anthropic | Google (`generationConfig`) |
 |---|---|---|---|---|
@@ -768,6 +782,9 @@ cannot express the order, surfaced as a **semantic** warning (Google tool
 results, § 7.2; CC assistant channels, `BlockOrderLost`: the wire message
 holds one field per channel, so an IR sequence interleaving
 thinking/content/tool-call blocks parses back in canonical channel order;
+the same inexpressibility exists at parse time — a CC **streamed** text
+fragment arriving after a tool call folds into its earlier same-channel
+block, warned `BlockOrderLost` once per stream;
 joining several thinking texts into the single `reasoning_content` string
 additionally warns `ThinkingBlocksJoined`, cosmetic). Same-format round-trips
 are identity on block order for history parsed from a **non-streaming body**
@@ -932,7 +949,17 @@ pub enum BlockDelta {
   candidates) immediately yields `MessageStart` (if not yet emitted) +
   `MessageDelta { stop_reason: ContentFilter }` + `MessageStop`. Google
   terminal validation looks only at the first candidate (multi-candidate is
-  unsupported, § 8).
+  unsupported, § 8). After the terminator every further chunk — well-formed
+  events, error frames, duplicate terminators alike — surfaces as `Unknown`
+  + `UnknownStreamEvent` on all four formats (the response is already
+  complete, so nothing after the terminator may mutate or fail it).
+  Responses terminal events carry the full final response; it is used to
+  reconcile items that never saw `output_item.done` (matched by id, falling
+  back to `output_index`) and to synthesize never-announced items — a
+  compliant stream is unaffected. CC text channels survive a tool call: a
+  later same-channel fragment reuses the open block (matching the
+  non-streaming parse of the same wire message) and warns `BlockOrderLost`
+  (§ 7.5).
 - **Accumulator** (`StreamEvent`s → `Response`): appends blocks strictly in
   arrival order and never merges same-typed blocks — interleaved
   thinking→text→thinking→text sequences survive verbatim. Any `usage` a
@@ -940,6 +967,11 @@ pub enum BlockDelta {
   parser folds provider partials into a running total before emitting (e.g.
   Anthropic's `message_start` input counts are cached and merged into every
   `message_delta` usage); the accumulator simply keeps the latest snapshot.
+  The first `MessageStop` is final: past it the accumulator silently ignores
+  every event except `Unknown` (the § 9 warning carrier — item warnings are
+  still folded), so post-terminator data can never append blocks or override
+  `stop_reason`/`usage`/`id`/`model`. This is defense in depth: the built-in
+  parsers already surface post-terminal input as `Unknown` with a warning.
   Provided because agents typically render deltas while also keeping the full
   message for history. A stream that errors before its terminal event — including a silent EOF
   that `StreamParser::finish` diagnoses as truncation — surfaces the error
@@ -952,7 +984,13 @@ pub enum BlockDelta {
   Known-but-unmodeled deltas that belong to a block (Anthropic
   `citations_delta` — part of the **current** protocol — Responses
   `output_text.annotation.added`, …) surface as `BlockDelta::Other` and are
-  folded into the finalized block at `BlockStop`; events the parser cannot
+  folded into the finalized block at `BlockStop`; on CC the folded payload
+  (unknown delta fields, legacy `function_call`) lands in the block's
+  format-namespace extra with delta merge conventions (strings concatenate,
+  arrays append, objects merge recursively, anything else last-wins) — the
+  non-streaming parser keeps the same fields in **message** extra, a
+  documented position difference (the event model has no message-level extra
+  channel); events the parser cannot
   attribute to a block at all fall back to `Unknown`. Chunks for candidate
   indexes beyond the first surface as `Unknown` — multi-candidate is
   unsupported (§ 8). Refusal content (CC `refusal` field/delta, Responses refusal parts)
@@ -1148,7 +1186,11 @@ pub enum Override<T> { Inherit, Set(T), Disable }
   user-supplied query with the same key is a `ConversionError`; otherwise
   later layers replace same-name keys (provider `extra_query`, then
   per-call); a `Base` URL's own query is decomposed and rebuilt, never
-  string-concatenated. Header precedence: format defaults (version,
+  string-concatenated. Key matching (protected check and same-name
+  replacement) percent-decodes the URL's raw keys once, byte-wise, before
+  comparing — mirroring the server's single decode, so an encoded spelling
+  (`%61lt`) cannot slip past the protected check — while the URL keeps its
+  original spelling on output. Header precedence: format defaults (version,
   content-type, betas) < provider `extra_headers` < endpoint `Set` (same-name
   override, other names add) < per-call < auth injection (applied last, not
   overridable by any header layer). Endpoint `Disable` drops the provider
@@ -1200,7 +1242,16 @@ pub enum Override<T> { Inherit, Set(T), Disable }
   with `Error::BodyTooLarge` (status/headers where available + the read
   prefix); an oversized **error** body still produces a full `Error::Api`
   with `truncated: true` and the prefix as `raw` (§ 14) — status, headers
-  and `retry_after` survive.
+  and `retry_after` survive. The caps bound accumulated/retained data, not
+  the instantaneous peak: bodies are processed one transport chunk at a
+  time, so peak memory additionally includes a small constant multiple of
+  the largest single chunk — at most `cap + 1` buffered bytes on the
+  capped-body paths (oversized chunks are sliced before copying) and one
+  whole-chunk parser buffer on the SSE path, on top of the transport's own
+  chunk allocation. Chunk granularity belongs to the `HttpClient`
+  implementation (its docs carry a chunk-sizing note); the default reqwest
+  transport yields network-buffer-sized chunks, typically well under a
+  megabyte.
 - Default auth header per format: `Authorization: Bearer` (OpenAI family),
   `x-api-key` + `anthropic-version` (Anthropic), `x-goog-api-key` (Google —
   header, not query, to keep keys out of logs).
@@ -1356,3 +1407,10 @@ pub enum ApiErrorKind { InvalidRequest, Auth, PermissionDenied, NotFound,
   today a giant non-data line that arrives complete within one transport
   chunk is consumed into parser state unchecked, bounded in practice by the
   transport's chunk size (see the trade-off note in `http/sse.rs`).
+- SSE input-slice parsing: `SseParser::push` still buffers the incoming
+  chunk whole before line scanning — the last library-side chunk-scale copy
+  (the data cap is checked before any copy into the joined data, and capped
+  body collection slices oversized chunks). Parsing complete lines straight
+  from the input slice and appending only the unfinished tail would remove
+  it; deferred — with bounded-chunk transports the win is small, and the
+  BOM/chunking-independence pins make the refactor delicate.

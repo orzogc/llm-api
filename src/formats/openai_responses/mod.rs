@@ -61,7 +61,13 @@
 //!   [`text_block_reserved_key`]: `id` / `status` / `phase` are
 //!   item-level fields, `item` nests unknown item-level fields, `refusal`
 //!   marks refusal parts; every other key (`annotations`, `logprobs`, …)
-//!   is part-level and merges back into the content part.
+//!   is part-level and merges back into the content part. On
+//!   serialization, consecutive blocks sharing an `id` re-group into one
+//!   `message` item (a later block's conflicting item-level value drops
+//!   with an `ExtraDropped` warning); id-less blocks re-group only when
+//!   `status` / `phase` / `item` all agree, so id-less items with
+//!   distinct metadata keep their boundaries and only metadata-free ones
+//!   merge (the documented normalization).
 //! - A thinking block is *native* here iff its `extra` carries this
 //!   namespace, or it has a `signature` and no namespace at all
 //!   (optimistic replay). Foreign thinking drops with a warning unless
@@ -115,13 +121,17 @@ pub(crate) const FORMAT: &str = ids::OPENAI_RESPONSES;
 /// containing `message` item, while all other keys are part-level.
 pub mod text_block_reserved_key {
     /// The containing item's `id`; blocks sharing it re-group into one
-    /// `message` item on serialization.
+    /// `message` item on serialization (the id alone is the item
+    /// identity when present).
     pub const ID: &str = "id";
-    /// The containing item's `status`.
+    /// The containing item's `status`. Part of the grouping key for
+    /// id-less blocks.
     pub const STATUS: &str = "status";
-    /// The containing item's `phase`.
+    /// The containing item's `phase`. Part of the grouping key for
+    /// id-less blocks.
     pub const PHASE: &str = "phase";
-    /// Unknown item-level fields, nested as an object.
+    /// Unknown item-level fields, nested as an object. Part of the
+    /// grouping key for id-less blocks.
     pub const ITEM: &str = "item";
     /// Marks the block as a `refusal` part (§ 9).
     pub const REFUSAL: &str = "refusal";

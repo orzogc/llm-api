@@ -8,11 +8,11 @@
 
 use serde_json::{Value, json};
 
-use llm_api::formats::openai_responses::OpenAiResponses;
+use llm_api::formats::openai_responses::{OpenAiResponses, request_from_ir};
 use llm_api::http::{SseEvent, SseParser};
 use llm_api::{
-    Accumulator, ApiFormat, BlockDelta, ContentBlock, ConversionWarning, Error, StopReason,
-    StreamEvent, StreamItem, WarningCode,
+    Accumulator, ApiFormat, BlockDelta, CallMode, ContentBlock, ConversionWarning, ConvertOptions,
+    Error, Request, StopReason, StreamEvent, StreamItem, WarningCode,
 };
 
 const F: &str = "openai_responses";
@@ -68,6 +68,33 @@ fn accumulate(events: &[StreamEvent]) -> llm_api::Response {
             .expect("accumulates");
     }
     acc.finish().expect("accumulation finishes")
+}
+
+/// Feeds hand-built JSON frames through a fresh stream parser; event
+/// parsing must succeed. Returns the unified events, warnings and the
+/// `finish` result.
+fn feed_frames(
+    frames: &[Value],
+) -> (
+    Vec<StreamEvent>,
+    Vec<ConversionWarning>,
+    llm_api::Result<Vec<StreamEvent>>,
+) {
+    let mut parser = OpenAiResponses.stream_parser();
+    let mut events = Vec::new();
+    let mut warnings = Vec::new();
+    for frame in frames {
+        let (evs, ws) = parser
+            .parse(&SseEvent::new(frame["type"].as_str(), frame.to_string()))
+            .expect("stream event parses");
+        events.extend(evs);
+        warnings.extend(ws);
+    }
+    let finish = parser.finish().map(|(evs, ws)| {
+        warnings.extend(ws);
+        evs
+    });
+    (events, warnings, finish)
 }
 
 #[test]
@@ -273,14 +300,24 @@ fn refusal_stream_accumulates_to_refusal_stop() {
 }
 
 #[test]
-fn incomplete_stream_closes_open_blocks_and_maps_reason() {
+fn incomplete_stream_finalizes_from_terminal_snapshot_and_maps_reason() {
     let (events, warnings, finish) = run_stream("stream_incomplete.sse");
     assert!(warnings.is_empty(), "{warnings:?}");
     assert!(finish.is_ok());
 
-    // No output_item.done was seen: the terminal event closes the block
-    // with `block: None` (the accumulated content stands).
-    assert_eq!(ev(&events[3]), json!({"type": "block_stop", "index": 0}));
+    // No output_item.done was seen, but the terminal event carries the
+    // final Response: the open block finalizes from its `output`
+    // snapshot exactly as `output_item.done` would have.
+    assert_eq!(
+        ev(&events[3]),
+        json!({
+            "type": "block_stop", "index": 0,
+            "block": {
+                "type": "text", "text": "Once upon a",
+                "extra": {F: {"id": "msg_s4", "status": "incomplete"}},
+            },
+        })
+    );
     let StreamEvent::MessageDelta {
         stop_reason, usage, ..
     } = &events[4]
@@ -294,6 +331,220 @@ fn incomplete_stream_closes_open_blocks_and_maps_reason() {
     let resp = accumulate(&events);
     assert_eq!(resp.stop_reason, Some(StopReason::MaxTokens));
     assert_eq!(resp.text(), "Once upon a");
+}
+
+#[test]
+fn terminal_snapshot_finalizes_unclosed_tool_item() {
+    // A built-in tool item announced as an in_progress skeleton and
+    // never `done`: the terminal snapshot's completed version (with the
+    // final `action`) finalizes the block.
+    let (events, warnings, finish) = feed_frames(&[
+        json!({"type": "response.created", "response":
+               {"id": "resp_t1", "model": "gpt-5.1", "status": "in_progress", "output": []}}),
+        json!({"type": "response.output_item.added", "output_index": 0,
+               "item": {"id": "ws_1", "type": "web_search_call", "status": "in_progress"}}),
+        json!({"type": "response.completed", "response":
+               {"id": "resp_t1", "status": "completed",
+                "output": [{"id": "ws_1", "type": "web_search_call", "status": "completed",
+                            "action": {"type": "search", "query": "weather paris"}}],
+                "usage": {"input_tokens": 5, "output_tokens": 7, "total_tokens": 12}}}),
+    ]);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(finish.is_ok());
+    assert_eq!(
+        ev(&events[2]),
+        json!({
+            "type": "block_stop", "index": 0,
+            "block": {"type": "opaque", "format": F, "value":
+                      {"id": "ws_1", "type": "web_search_call", "status": "completed",
+                       "action": {"type": "search", "query": "weather paris"}}},
+        })
+    );
+
+    let resp = accumulate(&events);
+    let ContentBlock::Opaque { value, .. } = &resp.message.content[0] else {
+        panic!("expected opaque block, got {:?}", resp.message.content);
+    };
+    assert_eq!(value["status"], json!("completed"));
+    assert_eq!(value["action"]["query"], json!("weather paris"));
+    assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
+    assert_eq!(resp.usage.as_ref().unwrap().output_tokens, 7);
+}
+
+#[test]
+fn terminal_snapshot_synthesizes_unannounced_items() {
+    // An item only the terminal snapshot ever carried synthesizes
+    // start/stop pairs (mirroring output_item.done without .added).
+    let (events, warnings, finish) = feed_frames(&[
+        json!({"type": "response.created", "response":
+               {"id": "resp_t2", "model": "gpt-5.1", "status": "in_progress", "output": []}}),
+        json!({"type": "response.completed", "response":
+               {"id": "resp_t2", "status": "completed",
+                "output": [{"id": "msg_u1", "type": "message", "role": "assistant",
+                            "status": "completed", "content":
+                            [{"type": "output_text", "text": "surprise", "annotations": []}]}],
+                "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}}}),
+    ]);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(finish.is_ok());
+    assert!(matches!(
+        &events[1],
+        StreamEvent::BlockStart { index: 0, block: ContentBlock::Text { text, .. }, .. }
+            if text == "surprise"
+    ));
+    assert!(matches!(
+        &events[2],
+        StreamEvent::BlockStop {
+            index: 0,
+            block: Some(_),
+            ..
+        }
+    ));
+
+    let resp = accumulate(&events);
+    assert_eq!(resp.text(), "surprise");
+    let extra = resp.message.content[0].extra().unwrap().get(F).unwrap();
+    assert_eq!(extra.get("id"), Some(&json!("msg_u1")));
+    assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
+}
+
+#[test]
+fn post_terminal_frames_are_gated() {
+    let mut parser = OpenAiResponses.stream_parser();
+    for frame in [
+        json!({"type": "response.created", "response":
+               {"id": "resp_t3", "model": "gpt-5.1", "status": "in_progress", "output": []}}),
+        json!({"type": "response.completed", "response":
+               {"id": "resp_t3", "status": "completed", "output": [],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}}),
+    ] {
+        parser
+            .parse(&SseEvent::new(frame["type"].as_str(), frame.to_string()))
+            .expect("stream event parses");
+    }
+    // Every post-terminal frame — including `response.failed` / `error`,
+    // which must not turn the complete response into an `Err` — surfaces
+    // as Unknown with a warning.
+    for frame in [
+        json!({"type": "response.output_text.delta", "item_id": "msg_x",
+               "output_index": 0, "content_index": 0, "delta": "late"}),
+        json!({"type": "response.failed", "response":
+               {"error": {"code": "server_error", "message": "too late"}}}),
+        json!({"type": "error", "code": "ERR", "message": "late error"}),
+    ] {
+        let (events, warnings) = parser
+            .parse(&SseEvent::new(frame["type"].as_str(), frame.to_string()))
+            .expect("post-terminal frames are not errors");
+        assert_eq!(events, vec![StreamEvent::Unknown]);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].code, WarningCode::UnknownStreamEvent);
+        assert_eq!(
+            warnings[0].message,
+            "chunk received after the stream terminated"
+        );
+    }
+    assert!(parser.finish().is_ok());
+}
+
+#[test]
+fn unknown_message_part_wraps_into_item_shell_and_replays() {
+    // An unmodeled content part becomes an Opaque wrapping the part in a
+    // minimal `message` item shell, so replaying the collected message
+    // re-emits a valid top-level item instead of a bare part.
+    let part = json!({"type": "output_audio", "audio": "QUJD", "format": "wav"});
+    let item = json!({"id": "msg_1", "type": "message", "role": "assistant",
+                      "status": "completed", "content": [part.clone()]});
+    let (events, warnings, finish) = feed_frames(&[
+        json!({"type": "response.created", "response":
+               {"id": "resp_w1", "model": "gpt-5.1", "status": "in_progress", "output": []}}),
+        json!({"type": "response.output_item.added", "output_index": 0,
+               "item": {"id": "msg_1", "type": "message", "role": "assistant",
+                        "status": "in_progress", "content": []}}),
+        json!({"type": "response.content_part.added", "item_id": "msg_1",
+               "output_index": 0, "content_index": 0, "part": part.clone()}),
+        json!({"type": "response.output_item.done", "output_index": 0, "item": item.clone()}),
+        json!({"type": "response.completed", "response":
+               {"id": "resp_w1", "status": "completed", "output": [item],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}}),
+    ]);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(finish.is_ok());
+
+    let shell = json!({"type": "message", "role": "assistant", "content": [part]});
+    let resp = accumulate(&events);
+    let ContentBlock::Opaque { value, .. } = &resp.message.content[0] else {
+        panic!("expected opaque block, got {:?}", resp.message.content);
+    };
+    assert_eq!(*value, shell);
+
+    let req = Request::with_messages(vec![resp.message.clone()]);
+    let (body, build_warnings) = request_from_ir(
+        &req,
+        Some("gpt-5.1"),
+        CallMode::Unary,
+        &ConvertOptions::default(),
+    )
+    .unwrap();
+    assert!(build_warnings.is_empty(), "{build_warnings:?}");
+    assert_eq!(body["input"], json!([shell]));
+}
+
+#[test]
+fn streamed_multi_part_item_rebuilds_as_one_item() {
+    // End-to-end: the parts of one streamed item carry identical item
+    // metadata, so the extended grouping key must not split them on
+    // re-serialization.
+    let item = json!({"id": "msg_m1", "type": "message", "role": "assistant",
+    "status": "completed", "content": [
+        {"type": "output_text", "text": "Hello ", "annotations": []},
+        {"type": "output_text", "text": "world", "annotations": []},
+    ]});
+    let (events, warnings, finish) = feed_frames(&[
+        json!({"type": "response.created", "response":
+               {"id": "resp_m1", "model": "gpt-5.1", "status": "in_progress", "output": []}}),
+        json!({"type": "response.output_item.added", "output_index": 0,
+               "item": {"id": "msg_m1", "type": "message", "role": "assistant",
+                        "status": "in_progress", "content": []}}),
+        json!({"type": "response.content_part.added", "item_id": "msg_m1",
+               "output_index": 0, "content_index": 0,
+               "part": {"type": "output_text", "text": "", "annotations": []}}),
+        json!({"type": "response.output_text.delta", "item_id": "msg_m1",
+               "output_index": 0, "content_index": 0, "delta": "Hello "}),
+        json!({"type": "response.content_part.added", "item_id": "msg_m1",
+               "output_index": 0, "content_index": 1,
+               "part": {"type": "output_text", "text": "", "annotations": []}}),
+        json!({"type": "response.output_text.delta", "item_id": "msg_m1",
+               "output_index": 0, "content_index": 1, "delta": "world"}),
+        json!({"type": "response.output_item.done", "output_index": 0, "item": item.clone()}),
+        json!({"type": "response.completed", "response":
+               {"id": "resp_m1", "status": "completed", "output": [item],
+                "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}}}),
+    ]);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(finish.is_ok());
+
+    let resp = accumulate(&events);
+    assert_eq!(resp.message.content.len(), 2);
+
+    let req = Request::with_messages(vec![resp.message.clone()]);
+    let (body, build_warnings) = request_from_ir(
+        &req,
+        Some("gpt-5.1"),
+        CallMode::Unary,
+        &ConvertOptions::default(),
+    )
+    .unwrap();
+    assert!(build_warnings.is_empty(), "{build_warnings:?}");
+    assert_eq!(
+        body["input"],
+        json!([{
+            "type": "message", "role": "assistant", "id": "msg_m1", "status": "completed",
+            "content": [
+                {"type": "output_text", "text": "Hello ", "annotations": []},
+                {"type": "output_text", "text": "world", "annotations": []},
+            ],
+        }])
+    );
 }
 
 #[test]

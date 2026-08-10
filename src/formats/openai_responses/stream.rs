@@ -9,10 +9,30 @@
 //! with `"\n\n"`), a `function_call` item one `ToolCall` block, and any
 //! unmodeled item one `Opaque` block whose sub-events surface as
 //! [`BlockDelta::Other`].
+//!
+//! An unmodeled *content part* of a `message` item becomes an `Opaque`
+//! block wrapping the part in a minimal assistant `message` item shell
+//! (no `id`/`status`), so replaying the collected message re-emits a
+//! valid top-level item. This is the stream-side counterpart of the
+//! non-streaming rule "an item with an unmodeled part stays whole as
+//! `Opaque`" — the stream may already have emitted sibling parts as
+//! `Text` blocks, so only the part itself can be kept, at the cost of
+//! the original item boundary.
+//!
+//! Terminal events (`response.completed` / `response.incomplete`) carry
+//! the full final Response. Items still open at that point reconcile
+//! against its `output` snapshot (finalized exactly as
+//! `output_item.done` would have); snapshot items the stream never
+//! announced synthesize start/stop pairs; only items absent from the
+//! snapshot close with `block: None` (the accumulated content stands).
+//! Compliant streams — every item already `done` — are unaffected. Any
+//! frame arriving after the terminal event (including `error` /
+//! `response.failed`) surfaces as [`StreamEvent::Unknown`] with an
+//! `UnknownStreamEvent` warning: the response is already complete.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::convert::{ConversionWarning, WarningCode};
 use crate::error::{Error, Result};
@@ -96,7 +116,26 @@ pub struct ResponsesStreamParser {
     terminal: bool,
     next_index: usize,
     items: BTreeMap<u64, ItemState>,
+    /// Every `output_index` any item event announced (added / part /
+    /// done) — the terminal reconcile uses it to tell announced snapshot
+    /// items from never-announced ones.
+    seen_items: BTreeSet<u64>,
+    /// Announced item ids by `output_index`, for terminal-snapshot
+    /// matching.
+    item_ids: BTreeMap<u64, String>,
     warned_unknown: BTreeSet<String>,
+}
+
+/// Wraps an unmodeled message content part into a minimal assistant
+/// `message` item shell so the resulting `Opaque` block re-serializes as
+/// a valid top-level input item (module docs). The shell carries no
+/// `id`/`status`: they belong to the original item, whose other parts
+/// may re-serialize as their own `message` item.
+fn wrap_unknown_part(part: &Value) -> ContentBlock {
+    ContentBlock::opaque(
+        FORMAT,
+        json!({"type": "message", "role": "assistant", "content": [part.clone()]}),
+    )
 }
 
 impl ResponsesStreamParser {
@@ -110,6 +149,14 @@ impl ResponsesStreamParser {
         let index = self.next_index;
         self.next_index += 1;
         index
+    }
+
+    /// Records an announced item (`output_index` plus its id, if any).
+    fn record_item(&mut self, idx: u64, id: Option<&str>) {
+        self.seen_items.insert(idx);
+        if let Some(id) = id {
+            self.item_ids.insert(idx, id.to_owned());
+        }
     }
 
     /// Emits a defensive `MessageStart` if the stream skipped
@@ -169,6 +216,7 @@ impl ResponsesStreamParser {
         };
         let item = payload.get("item").cloned().unwrap_or(Value::Null);
         self.ensure_started(events);
+        self.record_item(idx, item.get("id").and_then(Value::as_str));
         match item.get("type").and_then(Value::as_str) {
             Some("message") => {
                 self.items.insert(
@@ -254,6 +302,7 @@ impl ResponsesStreamParser {
             return;
         };
         self.ensure_started(events);
+        self.record_item(idx, payload.get("item_id").and_then(Value::as_str));
         let part = payload.get("part").cloned().unwrap_or(Value::Null);
         let mut ns = Map::new();
         if let Some(item_id) = payload.get("item_id").and_then(Value::as_str) {
@@ -281,7 +330,7 @@ impl ResponsesStreamParser {
                 cache: None,
                 extra: Extra::from_unknown(FORMAT, ns),
             },
-            _ => ContentBlock::opaque(FORMAT, part.clone()),
+            _ => wrap_unknown_part(&part),
         };
         let index = self.alloc_index();
         let state = self.items.entry(idx).or_insert_with(|| ItemState::Message {
@@ -529,25 +578,29 @@ impl ResponsesStreamParser {
         let item = payload.get("item").cloned().unwrap_or(Value::Null);
         let ptr = format!("/output/{idx}");
         self.ensure_started(events);
-        let Some(state) = self.items.remove(&idx) else {
+        self.record_item(idx, item.get("id").and_then(Value::as_str));
+        match self.items.remove(&idx) {
             // The stream never announced this item: synthesize start+stop
             // pairs from the final item.
-            for block in to_ir::assistant_item_to_blocks(&item, &ptr, warnings) {
-                let index = self.alloc_index();
-                events.push(StreamEvent::BlockStart {
-                    index,
-                    block: block.clone(),
-                });
-                events.push(StreamEvent::BlockStop {
-                    index,
-                    block: Some(block),
-                });
-            }
-            return;
-        };
+            None => self.synthesize_item(&item, &ptr, events, warnings),
+            Some(state) => self.finalize_item(state, &item, &ptr, events, warnings),
+        }
+    }
+
+    /// Emits the terminal `BlockStop`s (plus late `BlockStart`s for parts
+    /// the stream never opened) of an item from its final wire value —
+    /// shared by `output_item.done` and the terminal-snapshot reconcile.
+    fn finalize_item(
+        &mut self,
+        state: ItemState,
+        item: &Value,
+        ptr: &str,
+        events: &mut Vec<StreamEvent>,
+        warnings: &mut Vec<ConversionWarning>,
+    ) {
         match state {
             ItemState::Message { parts } => {
-                let (meta, final_parts) = to_ir::assistant_message_meta(&item);
+                let (meta, final_parts) = to_ir::assistant_message_meta(item);
                 for (ci, part_state) in &parts {
                     let source = usize::try_from(*ci)
                         .ok()
@@ -555,7 +608,7 @@ impl ResponsesStreamParser {
                         .or(part_state.final_part.as_ref());
                     let block = source.map(|p| {
                         let block = to_ir::assistant_text_block_from_part(p, &meta)
-                            .unwrap_or_else(|| ContentBlock::opaque(FORMAT, p.clone()));
+                            .unwrap_or_else(|| wrap_unknown_part(p));
                         fold_annotations(block, &part_state.annotations)
                     });
                     events.push(StreamEvent::BlockStop {
@@ -568,7 +621,7 @@ impl ResponsesStreamParser {
                         continue;
                     }
                     let block = to_ir::assistant_text_block_from_part(part, &meta)
-                        .unwrap_or_else(|| ContentBlock::opaque(FORMAT, part.clone()));
+                        .unwrap_or_else(|| wrap_unknown_part(part));
                     let index = self.alloc_index();
                     events.push(StreamEvent::BlockStart {
                         index,
@@ -581,14 +634,14 @@ impl ResponsesStreamParser {
                 }
             }
             ItemState::Reasoning { index, .. } => {
-                let block = to_ir::thinking_from_reasoning(&item, &ptr, warnings);
+                let block = to_ir::thinking_from_reasoning(item, ptr, warnings);
                 events.push(StreamEvent::BlockStop {
                     index,
                     block: Some(block),
                 });
             }
             ItemState::FunctionCall { index } => {
-                let block = to_ir::function_call_to_block(&item, &ptr, warnings);
+                let block = to_ir::function_call_to_block(item, ptr, warnings);
                 events.push(StreamEvent::BlockStop {
                     index,
                     block: Some(block),
@@ -597,25 +650,124 @@ impl ResponsesStreamParser {
             ItemState::Opaque { index } => {
                 events.push(StreamEvent::BlockStop {
                     index,
-                    block: Some(ContentBlock::opaque(FORMAT, item)),
+                    block: Some(ContentBlock::opaque(FORMAT, item.clone())),
                 });
             }
         }
     }
 
-    fn on_terminal(&mut self, payload: &Value, incomplete: bool, events: &mut Vec<StreamEvent>) {
+    /// Synthesizes `BlockStart` + `BlockStop` pairs for an item the
+    /// stream never announced (`output_item.done` without `.added`, or a
+    /// terminal-snapshot item no event ever carried).
+    fn synthesize_item(
+        &mut self,
+        item: &Value,
+        ptr: &str,
+        events: &mut Vec<StreamEvent>,
+        warnings: &mut Vec<ConversionWarning>,
+    ) {
+        for block in to_ir::assistant_item_to_blocks(item, ptr, warnings) {
+            let index = self.alloc_index();
+            events.push(StreamEvent::BlockStart {
+                index,
+                block: block.clone(),
+            });
+            events.push(StreamEvent::BlockStop {
+                index,
+                block: Some(block),
+            });
+        }
+    }
+
+    /// Finds the terminal-snapshot `output` entry of a still-open item:
+    /// by the announced item id first, then by `output_index` — the
+    /// fallback is rejected when both sides carry ids and they disagree.
+    fn snapshot_position(
+        &self,
+        snapshot: &[Value],
+        idx: u64,
+        consumed: &BTreeSet<usize>,
+    ) -> Option<usize> {
+        let want = self.item_ids.get(&idx).map(String::as_str);
+        if let Some(want) = want
+            && let Some(pos) = snapshot
+                .iter()
+                .position(|it| it.get("id").and_then(Value::as_str) == Some(want))
+            && !consumed.contains(&pos)
+        {
+            return Some(pos);
+        }
+        let pos = usize::try_from(idx).ok()?;
+        let item = snapshot.get(pos)?;
+        if consumed.contains(&pos) {
+            return None;
+        }
+        match (want, item.get("id").and_then(Value::as_str)) {
+            (Some(w), Some(h)) if w != h => None,
+            _ => Some(pos),
+        }
+    }
+
+    /// Whether the stream announced this snapshot entry (by position or
+    /// by item id).
+    fn announced(&self, pos: usize, item: &Value) -> bool {
+        if u64::try_from(pos).is_ok_and(|p| self.seen_items.contains(&p)) {
+            return true;
+        }
+        item.get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| self.item_ids.values().any(|v| v == id))
+    }
+
+    /// Handles `response.completed` / `response.incomplete` (module
+    /// docs): reconcile still-open items against the final snapshot,
+    /// close the unmatched ones with `block: None`, synthesize snapshot
+    /// items the stream never announced, then emit the stop reason and
+    /// usage taken from the snapshot.
+    fn on_terminal(
+        &mut self,
+        payload: &Value,
+        incomplete: bool,
+        events: &mut Vec<StreamEvent>,
+        warnings: &mut Vec<ConversionWarning>,
+    ) {
         self.ensure_started(events);
-        self.close_open_blocks(events);
         self.terminal = true;
         let resp = payload.get("response");
-        let has_function_call = resp
+        let snapshot: &[Value] = resp
             .and_then(|r| r.get("output"))
             .and_then(Value::as_array)
-            .is_some_and(|items| {
-                items
-                    .iter()
-                    .any(|i| i.get("type").and_then(Value::as_str) == Some("function_call"))
-            });
+            .map_or(&[], Vec::as_slice);
+
+        let open: Vec<u64> = self.items.keys().copied().collect();
+        let mut consumed: BTreeSet<usize> = BTreeSet::new();
+        for idx in open {
+            let Some(pos) = self.snapshot_position(snapshot, idx, &consumed) else {
+                continue;
+            };
+            consumed.insert(pos);
+            let state = self.items.remove(&idx).expect("open item has state");
+            self.finalize_item(
+                state,
+                &snapshot[pos],
+                &format!("/output/{idx}"),
+                events,
+                warnings,
+            );
+        }
+        // Open items absent from the snapshot: the accumulated content
+        // stands.
+        self.close_open_blocks(events);
+        for (pos, item) in snapshot.iter().enumerate() {
+            if consumed.contains(&pos) || self.announced(pos, item) {
+                continue;
+            }
+            self.synthesize_item(item, &format!("/output/{pos}"), events, warnings);
+        }
+
+        let has_function_call = snapshot
+            .iter()
+            .any(|i| i.get("type").and_then(Value::as_str) == Some("function_call"));
         let (status, reason) = if incomplete {
             (
                 Some("incomplete"),
@@ -679,6 +831,19 @@ impl StreamParser for ResponsesStreamParser {
     fn parse(&mut self, event: &SseEvent) -> Result<(Vec<StreamEvent>, Vec<ConversionWarning>)> {
         let mut events = Vec::new();
         let mut warnings = Vec::new();
+        if self.terminal {
+            // Data after the terminal event cannot be attributed — the
+            // response is already complete. This also shields late
+            // `error` / `response.failed` frames from turning a complete
+            // response into an `Err`.
+            warnings.push(warn(
+                WarningCode::UnknownStreamEvent,
+                "",
+                "chunk received after the stream terminated",
+            ));
+            events.push(StreamEvent::Unknown);
+            return Ok((events, warnings));
+        }
         let payload: Value = match serde_json::from_str(&event.data) {
             Ok(v) => v,
             Err(e) => {
@@ -735,8 +900,12 @@ impl StreamParser for ResponsesStreamParser {
             }
             "response.content_part.done" => self.on_part_done(&payload, &mut events, &mut warnings),
             "response.output_item.done" => self.on_item_done(&payload, &mut events, &mut warnings),
-            "response.completed" => self.on_terminal(&payload, false, &mut events),
-            "response.incomplete" => self.on_terminal(&payload, true, &mut events),
+            "response.completed" => {
+                self.on_terminal(&payload, false, &mut events, &mut warnings);
+            }
+            "response.incomplete" => {
+                self.on_terminal(&payload, true, &mut events, &mut warnings);
+            }
             "response.failed" => {
                 self.terminal = true;
                 let error = payload.pointer("/response/error");

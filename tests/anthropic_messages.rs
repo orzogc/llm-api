@@ -160,6 +160,42 @@ fn sampling_parameters_map_or_warn() {
 }
 
 #[test]
+fn non_finite_sampling_values_are_conversion_errors() {
+    // All four f64 fields are checked — including the penalties Anthropic
+    // would otherwise drop with a warning: non-finite is a caller bug. The
+    // check runs before the required-`max_tokens` gate.
+    type SetField = fn(&mut Request, f64);
+    let fields: [(SetField, &str); 4] = [
+        (|r, v| r.temperature = Some(v), "/temperature"),
+        (|r, v| r.top_p = Some(v), "/top_p"),
+        (|r, v| r.frequency_penalty = Some(v), "/frequency_penalty"),
+        (|r, v| r.presence_penalty = Some(v), "/presence_penalty"),
+    ];
+    for (set, expected) in fields {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut r = req(vec![Message::user_text("hi")]);
+            set(&mut r, bad);
+            let err = AnthropicMessages.build_request(&r, &ctx()).unwrap_err();
+            match err {
+                Error::Conversion(ConversionError::NonFiniteNumber { location, .. }) => {
+                    assert_eq!(location, expected);
+                }
+                other => panic!("expected NonFiniteNumber for {bad}, got {other:?}"),
+            }
+        }
+    }
+
+    // Finite values — zeroes and extremes — keep the existing behavior.
+    let mut r = req(vec![Message::user_text("hi")]);
+    r.temperature = Some(-0.0);
+    r.top_p = Some(f64::MAX);
+    let (body, warnings) = build(&r);
+    assert_eq!(body["temperature"], json!(-0.0));
+    assert_eq!(body["top_p"], json!(f64::MAX));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
 fn metadata_maps_only_user_id() {
     let mut r = req(vec![Message::user_text("hi")]);
     let mut meta = serde_json::Map::new();

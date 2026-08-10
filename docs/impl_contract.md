@@ -134,8 +134,15 @@ Round-trip metadata flows **parse-attach → serialize-consume**.
   messages. No meta.
 - Responses parse: consecutive assistant-side items (`reasoning`,
   assistant `message`, `function_call`) group into **one** IR assistant
-  message, blocks in item order; serialize explodes them again. Item ids
-  ride each block's `extra["openai_responses"]["id"]`.
+  message, blocks in item order; serialize explodes them again. Item-level
+  reserved keys (`id`, `status`, `phase`, `item`) ride each Text block's
+  `extra["openai_responses"]`. Serialize regroups adjacent Text blocks into
+  one `message` item by identity key: a block with an `id` groups by that
+  id alone (id is the item's identity; item-level fields follow the first
+  block, and a later conflicting value drops with `ExtraDropped`,
+  semantic); id-less blocks group only when `status`/`phase`/`item` are
+  all equal — identical-metadata id-less items merge warning-free (§ 1
+  tier 2), differing metadata keeps the item boundary.
 - CC parse keeps leading `system` messages in-array (no hoisting to
   `Request.system`); CC serialize inserts `Request.system` at the front
   as a `system` message. Anthropic/Google parse map the top-level
@@ -163,7 +170,35 @@ Round-trip metadata flows **parse-attach → serialize-consume**.
   ContentFilter }` + `MessageStop`.
 - Unknown stream events → `StreamEvent::Unknown` + `UnknownStreamEvent`
   (cosmetic) warning; known-ignorable protocol noise (Anthropic `ping`,
-  CC `[DONE]` handling, comment keep-alives) is silently consumed.
+  the first CC `[DONE]`, comment keep-alives) is silently consumed.
+  Post-terminal input — any frame after the protocol terminator, including
+  error frames and duplicate terminators — surfaces as `Unknown` +
+  `UnknownStreamEvent` ("chunk received after the stream terminated") on
+  all four formats: the response is already complete and must neither
+  mutate nor fail. Independently, `Accumulator::push` ignores
+  post-`MessageStop` events other than `Unknown` (first stop wins, no
+  extra warning, item warnings still folded).
+- Responses terminal events (`response.completed` / `response.incomplete`)
+  carry the full final response; it reconciles the stream: items that
+  never saw `output_item.done` finalize from the snapshot (matched by
+  recorded id, falling back to `output_index`; an id mismatch rejects the
+  positional match), items absent from the snapshot close with
+  `block: None` (accumulated content stands), snapshot-only
+  never-announced items synthesize start+stop. Usage/stop-reason handling
+  is unchanged; a compliant stream is unaffected.
+- Responses streamed unknown message content parts wrap in a minimal
+  assistant `message` shell (`{"type": "message", "role": "assistant",
+  "content": [<part>]}`, no id/status) as the block's Opaque value, so
+  replay emits a valid top-level item; the cost — the original item
+  boundary splits around the unknown part — is disclosed in the module
+  docs (non-streaming keeps the whole item as one Opaque).
+- CC streamed unknown delta fields (and legacy `function_call`) fold into
+  the open block's `extra["openai_chat_completions"]` at `BlockStop` with
+  delta merge conventions: strings concatenate, arrays append, objects
+  merge recursively, anything else last-wins; `BlockDelta::Other` still
+  surfaces each raw fragment in real time. Anthropic's unknown delta
+  *types* on a known block emit `Other` + `MalformedField` and nothing
+  folds at stop (nothing known to fold — disclosed, not silent).
 - Malformed tool payloads: a unified field (`id`, `name`, `arguments`,
   `tool_call_id`, `response`) missing or mangled — parsed with
   empty/`None` stand-ins, dropped, or kept verbatim in a state the
@@ -248,6 +283,35 @@ Unix seconds via `models::system_time_from_unix_seconds`, Anthropic RFC
 - Assistant-role `Image` blocks: native channel only on Google
   (`inlineData` part); CC/Responses/Anthropic drop them with
   `ImageSourceUnsupported` (semantic).
+- URL query comparisons percent-decode once, byte-wise, before matching:
+  protected-key checks and `extra_query` same-key replacement decode the
+  URL's own raw keys (`%XX` only; malformed sequences stay verbatim; `+`
+  is a literal — RFC 3986 query, not form encoding); the URL keeps its
+  original spelling, only values are replaced. `extra_query` keys are
+  logical values the library encodes itself (`%` → `%25`), so encoding
+  cannot smuggle a protected key past the check.
+- Anthropic `max_tokens`/`top_k` above `u32::MAX`: the IR field stays
+  unset + `MalformedField` (cosmetic — the original value mirrors into
+  `extra` and re-serializes verbatim); rebuilding such a request needs
+  `default_max_tokens` (the extra merge then restores the original value)
+  or fails `MissingRequired`. The other three formats' wire types are
+  `u32`, so the same input fails their whole parse — a documented
+  asymmetry.
+- Google requests accept proto3 snake_case aliases on multi-word modeled
+  fields, canonicalized to camelCase on re-serialization (§ 1 tier 2,
+  warning-free); both spellings in one payload are a hard duplicate-field
+  parse error (serde reports the primary camelCase name).
+- Non-finite sampling values (§ 4.6): `temperature` / `top_p` /
+  `frequency_penalty` / `presence_penalty` set to NaN or ±∞ fail every
+  build path (chat, typed `request_from_ir`, count-tokens) with
+  `ConversionError::NonFiniteNumber`, regardless of strict mode and even
+  on formats that would drop the field with a warning — JSON cannot
+  represent them, serde_json would silently write `null`, and there is no
+  faithful degrade. `location` is the field's pointer in the would-be
+  final body (`/temperature`, …; Google `/generationConfig/temperature`).
+  Parse-side entry is impossible (JSON has no non-finite literals;
+  `Value` is NaN-free), so the only entry is user-set IR fields; the IR's
+  own serde round-trip is not guarded (documented on the fields).
 - Do not implement `include_raw` in parsers — raw attachment is the
   client's job; `StreamParser` just returns events + warnings.
 

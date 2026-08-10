@@ -177,6 +177,43 @@ fn sampling_parameters_map_or_warn() {
 }
 
 #[test]
+fn non_finite_sampling_values_are_conversion_errors() {
+    // JSON has no NaN/±infinity (serde_json would write `null`), so the
+    // build fails loudly — regardless of strict mode (default is lenient).
+    type SetField = fn(&mut Request, f64);
+    let fields: [(SetField, &str); 4] = [
+        (|r, v| r.temperature = Some(v), "/temperature"),
+        (|r, v| r.top_p = Some(v), "/top_p"),
+        (|r, v| r.frequency_penalty = Some(v), "/frequency_penalty"),
+        (|r, v| r.presence_penalty = Some(v), "/presence_penalty"),
+    ];
+    for (set, expected) in fields {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut req = Request::with_messages(vec![Message::user_text("hi")]);
+            set(&mut req, bad);
+            match build_err(&req) {
+                Error::Conversion(ConversionError::NonFiniteNumber { location, .. }) => {
+                    assert_eq!(location, expected);
+                }
+                other => panic!("expected NonFiniteNumber for {bad}, got {other:?}"),
+            }
+        }
+    }
+
+    // Finite values — zeroes and extremes included — pass through verbatim.
+    let mut req = Request::with_messages(vec![Message::user_text("hi")]);
+    req.temperature = Some(0.0);
+    req.top_p = Some(-0.0);
+    req.frequency_penalty = Some(f64::MAX);
+    req.presence_penalty = Some(f64::MIN_POSITIVE);
+    let body = body_of(&build(&req));
+    assert_eq!(body["temperature"], json!(0.0));
+    assert_eq!(body["top_p"], json!(-0.0));
+    assert_eq!(body["frequency_penalty"], json!(f64::MAX));
+    assert_eq!(body["presence_penalty"], json!(f64::MIN_POSITIVE));
+}
+
+#[test]
 fn strict_mode_escalates_unless_overridden() {
     // A FileId image has no CC channel — a semantic loss.
     let mut req = Request::with_messages(vec![Message::user(vec![

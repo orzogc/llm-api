@@ -150,6 +150,72 @@ fn sampling_parameters_all_map_natively() {
 }
 
 #[test]
+fn non_finite_sampling_values_are_conversion_errors() {
+    // Google nests sampling under generationConfig; the error points at the
+    // final-body location.
+    type SetField = fn(&mut Request, f64);
+    let fields: [(SetField, &str); 4] = [
+        (
+            |r, v| r.temperature = Some(v),
+            "/generationConfig/temperature",
+        ),
+        (|r, v| r.top_p = Some(v), "/generationConfig/topP"),
+        (
+            |r, v| r.frequency_penalty = Some(v),
+            "/generationConfig/frequencyPenalty",
+        ),
+        (
+            |r, v| r.presence_penalty = Some(v),
+            "/generationConfig/presencePenalty",
+        ),
+    ];
+    for (set, expected) in fields {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut req = user_req("hi");
+            set(&mut req, bad);
+            let err = request_from_ir(&req, &ConvertOptions::default()).unwrap_err();
+            match err {
+                Error::Conversion(ConversionError::NonFiniteNumber { location, .. }) => {
+                    assert_eq!(location, expected);
+                }
+                other => panic!("expected NonFiniteNumber for {bad}, got {other:?}"),
+            }
+        }
+    }
+
+    // The count-tokens build shares the chat body pipeline and fails the
+    // same way.
+    let mut req = user_req("hi");
+    req.temperature = Some(f64::NAN);
+    let err = GoogleGenerateContent
+        .build_count_tokens_request(&req, &ctx(CallMode::Unary))
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        Error::Conversion(ConversionError::NonFiniteNumber { .. })
+    ));
+
+    // Finite values — zeroes and extremes — keep the existing behavior.
+    let mut req = user_req("hi");
+    req.temperature = Some(0.0);
+    req.top_p = Some(-0.0);
+    req.frequency_penalty = Some(f64::MAX);
+    req.presence_penalty = Some(f64::MIN_POSITIVE);
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(body["generationConfig"]["temperature"], json!(0.0));
+    assert_eq!(body["generationConfig"]["topP"], json!(-0.0));
+    assert_eq!(
+        body["generationConfig"]["frequencyPenalty"],
+        json!(f64::MAX)
+    );
+    assert_eq!(
+        body["generationConfig"]["presencePenalty"],
+        json!(f64::MIN_POSITIVE)
+    );
+}
+
+#[test]
 fn metadata_and_cache_key_drop_with_cosmetic_warnings() {
     let mut req = user_req("hi");
     let mut metadata = serde_json::Map::new();

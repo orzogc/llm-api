@@ -5,6 +5,11 @@
 //! fields on parse, so non-null unknown fields round-trip verbatim (design
 //! § 1). Only the fields the IR models are typed; everything else flows
 //! through `extra`.
+//!
+//! The API's proto3 JSON accepts both `camelCase` (canonical) and
+//! `snake_case` spellings, so every modeled multi-word request-side field
+//! carries a `snake_case` alias. Aliases affect deserialization only;
+//! serialization always emits `camelCase` (canonicalization).
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -22,13 +27,25 @@ pub struct GenerateContentRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Tool>>,
     /// Configuration for the tools in the request.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "tool_config"
+    )]
     pub tool_config: Option<ToolConfig>,
     /// Developer system instruction (text only upstream).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "system_instruction"
+    )]
     pub system_instruction: Option<Content>,
     /// Generation and output options.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "generation_config"
+    )]
     pub generation_config: Option<GenerationConfig>,
     /// Unknown fields (`safetySettings`, `cachedContent`, `serviceTier`, …).
     #[serde(flatten)]
@@ -61,23 +78,39 @@ pub struct Part {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     /// Inline media bytes (base64).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "inline_data"
+    )]
     pub inline_data: Option<Blob>,
     /// A model-predicted function call.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "function_call"
+    )]
     pub function_call: Option<FunctionCall>,
     /// The client-provided result of a `functionCall`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "function_response"
+    )]
     pub function_response: Option<FunctionResponse>,
     /// URI-based data (typically a Files API URI).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "file_data")]
     pub file_data: Option<FileData>,
     /// `true` if the part is a thought (reasoning summary) from the model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thought: Option<bool>,
     /// Opaque signature for the thought; echoed back in subsequent requests
     /// to preserve reasoning context.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "thought_signature"
+    )]
     pub thought_signature: Option<String>,
     /// Unknown fields (`executableCode`, `codeExecutionResult`,
     /// `videoMetadata`, `partMetadata`, …).
@@ -91,7 +124,7 @@ pub struct Part {
 #[serde(rename_all = "camelCase")]
 pub struct Blob {
     /// IANA MIME type of the data.
-    #[serde(default)]
+    #[serde(default, alias = "mime_type")]
     pub mime_type: String,
     /// Base64-encoded raw bytes.
     #[serde(default)]
@@ -107,10 +140,10 @@ pub struct Blob {
 #[serde(rename_all = "camelCase")]
 pub struct FileData {
     /// IANA MIME type of the source data.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "mime_type")]
     pub mime_type: Option<String>,
     /// URI of the file.
-    #[serde(default)]
+    #[serde(default, alias = "file_uri")]
     pub file_uri: String,
     /// Unknown fields.
     #[serde(flatten)]
@@ -167,7 +200,11 @@ pub struct FunctionResponse {
 #[serde(rename_all = "camelCase")]
 pub struct FunctionResponsePart {
     /// Inline media bytes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "inline_data"
+    )]
     pub inline_data: Option<Blob>,
     /// Unknown fields.
     #[serde(flatten)]
@@ -182,7 +219,11 @@ pub struct FunctionResponsePart {
 #[serde(rename_all = "camelCase")]
 pub struct Tool {
     /// Functions the model may call.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "function_declarations"
+    )]
     pub function_declarations: Option<Vec<FunctionDeclaration>>,
     /// Unknown fields (hosted tool members).
     #[serde(flatten)]
@@ -203,7 +244,11 @@ pub struct FunctionDeclaration {
     /// Parameters as raw JSON Schema (the library's passthrough channel;
     /// mutually exclusive with the OpenAPI-style `parameters`, which is kept
     /// in `extra` when parsed).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "parameters_json_schema"
+    )]
     pub parameters_json_schema: Option<Value>,
     /// Unknown fields (`parameters`, `response`, `behavior`, …).
     #[serde(flatten)]
@@ -216,7 +261,11 @@ pub struct FunctionDeclaration {
 #[serde(rename_all = "camelCase")]
 pub struct ToolConfig {
     /// Function calling behavior.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "function_calling_config"
+    )]
     pub function_calling_config: Option<FunctionCallingConfig>,
     /// Unknown fields (`retrievalConfig`, …).
     #[serde(flatten)]
@@ -232,7 +281,11 @@ pub struct FunctionCallingConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     /// Restricts which functions may be called (`ANY`/`VALIDATED` only).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "allowed_function_names"
+    )]
     pub allowed_function_names: Option<Vec<String>>,
     /// Unknown fields.
     #[serde(flatten)]
@@ -245,37 +298,65 @@ pub struct FunctionCallingConfig {
 #[serde(rename_all = "camelCase")]
 pub struct GenerationConfig {
     /// Stop sequences (up to 5 upstream).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "stop_sequences"
+    )]
     pub stop_sequences: Option<Vec<String>>,
     /// Output MIME type (`application/json` enables JSON mode).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "response_mime_type"
+    )]
     pub response_mime_type: Option<String>,
     /// Structured-output schema as raw JSON Schema.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "response_json_schema"
+    )]
     pub response_json_schema: Option<Value>,
     /// Maximum tokens per candidate.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "max_output_tokens"
+    )]
     pub max_output_tokens: Option<u32>,
     /// Sampling temperature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     /// Nucleus sampling cap.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "top_p")]
     pub top_p: Option<f64>,
     /// Top-k sampling cap.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "top_k")]
     pub top_k: Option<u32>,
     /// Decoding seed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<i64>,
     /// Presence penalty.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "presence_penalty"
+    )]
     pub presence_penalty: Option<f64>,
     /// Frequency penalty.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "frequency_penalty"
+    )]
     pub frequency_penalty: Option<f64>,
     /// Thinking configuration.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "thinking_config"
+    )]
     pub thinking_config: Option<ThinkingConfig>,
     /// Unknown fields (`candidateCount`, `responseModalities`,
     /// `responseSchema`, `speechConfig`, …).
@@ -289,10 +370,18 @@ pub struct GenerationConfig {
 #[serde(rename_all = "camelCase")]
 pub struct ThinkingConfig {
     /// Include thought-summary parts (`thought: true`) in the response.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "include_thoughts"
+    )]
     pub include_thoughts: Option<bool>,
     /// Depth of reasoning: `MINIMAL`, `LOW`, `MEDIUM` or `HIGH`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "thinking_level"
+    )]
     pub thinking_level: Option<String>,
     /// Unknown fields (`thinkingBudget`, …; deliberately not modeled,
     /// design § 4.7).

@@ -45,6 +45,12 @@ pub(crate) fn build_body(
     options: &ConvertOptions,
     format_options: &OpenAiChatCompletionsOptions,
 ) -> Result<BuiltBody> {
+    crate::convert::check_finite_sampling(&[
+        (req.temperature, "/temperature"),
+        (req.top_p, "/top_p"),
+        (req.frequency_penalty, "/frequency_penalty"),
+        (req.presence_penalty, "/presence_penalty"),
+    ])?;
     let mut warnings = Vec::new();
     let mut log = MergeLog::new();
     let messages = preprocess_messages(req, options, &mut warnings);
@@ -922,7 +928,8 @@ fn build_tool_messages(
                     warnings.push(warn(
                         WarningCode::IsErrorDropped,
                         ptr.clone(),
-                        "`is_error` is native to Anthropic only; the error marker was dropped",
+                        "`is_error` is native to Anthropic and Google; the error marker was \
+                         dropped",
                     ));
                 }
                 if cache.is_some() {

@@ -98,22 +98,34 @@ impl fmt::Debug for EndpointConfig {
 /// [`crate::error::Error::Api`] carrying `truncated: true` and the read
 /// prefix as `raw`.
 ///
+/// The caps bound what the library accumulates and retains, not the
+/// instantaneous peak: bodies are processed one transport chunk at a
+/// time, so peak memory additionally includes a small constant multiple
+/// of the largest single chunk. Chunk granularity belongs to the
+/// [`crate::http::HttpClient`] implementation (see its chunk-sizing
+/// note); the default `reqwest` transport yields network-buffer-sized
+/// chunks, typically well under a megabyte.
+///
 /// The defaults are generous and **may be tuned in minor versions** — the
 /// semver guarantee is the mechanism, not the numbers.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Cap on a 2xx response body (decompressed bytes, as delivered by the
-    /// transport). Default: 256 MiB.
+    /// transport); the collection buffer never grows beyond
+    /// `max_response_body + 1` bytes. Default: 256 MiB.
     pub max_response_body: usize,
-    /// Cap on a non-2xx response body; reading stops at the cap. Default:
-    /// 8 MiB.
+    /// Cap on a non-2xx response body; reading stops at the cap and the
+    /// collection buffer never grows beyond `max_error_body + 1` bytes.
+    /// Default: 8 MiB.
     pub max_error_body: usize,
     /// Cap on one complete logical SSE event (joined `data:` lines).
     /// Also bounds the current unfinished raw line as a flood guard, so a
     /// cap smaller than a line's raw length (field name and colon
     /// included) may reject byte-wise delivery that a single-chunk push
-    /// would parse whole. Default: 64 MiB.
+    /// would parse whole. Parser-retained data stays within the cap; the
+    /// chunk currently being pushed is additionally buffered whole.
+    /// Default: 64 MiB.
     pub max_sse_event: usize,
 }
 

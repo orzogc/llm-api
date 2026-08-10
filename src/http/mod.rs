@@ -119,6 +119,13 @@ impl AuthHeader {
 /// modification is injecting the provided [`AuthHeader`] at send time.
 /// Every other header is the format layer's job. The request carries the
 /// final URL — the client does no URL joining.
+///
+/// Chunk sizing: deliver the response body in moderately sized chunks
+/// (network-buffer granularity). The size caps
+/// ([`crate::client::Limits`]) bound the data the library accumulates,
+/// while its peak memory scales with the largest single chunk — a
+/// transport that yields a whole body as one chunk forfeits that
+/// bounding.
 pub trait HttpClient: Send + Sync {
     /// Sends the request, returning response head plus body stream.
     fn send(

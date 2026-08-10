@@ -412,6 +412,132 @@ fn text_only_system_instruction_stays_in_request_system() {
 }
 
 #[test]
+fn snake_case_request_spellings_parse_into_modeled_fields() {
+    // proto3 JSON accepts snake_case next to the canonical camelCase; every
+    // modeled multi-word request field is aliased. Minimal check: the field
+    // lands in the IR — no extra residue, no warnings.
+    let (ir, warnings) = request_to_ir(
+        &serde_json::to_vec(&json!({
+            "contents": [],
+            "generation_config": {"temperature": 0.3},
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(ir.temperature, Some(0.3));
+    assert!(ir.extra.is_empty());
+
+    // The same logical request in either spelling parses to the same IR and
+    // canonicalizes to the same camelCase body.
+    let camel = json!({
+        "systemInstruction": {"parts": [{"text": "sys"}]},
+        "contents": [
+            {"role": "user", "parts": [
+                {"text": "look"},
+                {"inlineData": {"mimeType": "image/png", "data": "AAAA"}},
+                {"fileData": {"mimeType": "image/png", "fileUri": "https://files/x"}},
+            ]},
+            {"role": "model", "parts": [
+                {"text": "t", "thought": true, "thoughtSignature": "sig"},
+                {"functionCall": {"id": "c1", "name": "f", "args": {"a": 1}}},
+            ]},
+            {"role": "user", "parts": [
+                {"functionResponse": {"id": "c1", "name": "f",
+                    "response": {"output": "ok"},
+                    "parts": [{"inlineData": {"mimeType": "image/png", "data": "BBBB"}}]}},
+            ]},
+        ],
+        "tools": [{"functionDeclarations": [
+            {"name": "f", "parametersJsonSchema": {"type": "object"}},
+        ]}],
+        "toolConfig": {"functionCallingConfig": {
+            "mode": "ANY", "allowedFunctionNames": ["f"],
+        }},
+        "generationConfig": {
+            "stopSequences": ["x"],
+            "responseMimeType": "application/json",
+            "responseJsonSchema": {"type": "object"},
+            "maxOutputTokens": 100,
+            "temperature": 0.3,
+            "topP": 0.9,
+            "topK": 40,
+            "seed": 7,
+            "presencePenalty": 0.1,
+            "frequencyPenalty": 0.2,
+            "thinkingConfig": {"includeThoughts": true, "thinkingLevel": "LOW"},
+        },
+    });
+    let snake = json!({
+        "system_instruction": {"parts": [{"text": "sys"}]},
+        "contents": [
+            {"role": "user", "parts": [
+                {"text": "look"},
+                {"inline_data": {"mime_type": "image/png", "data": "AAAA"}},
+                {"file_data": {"mime_type": "image/png", "file_uri": "https://files/x"}},
+            ]},
+            {"role": "model", "parts": [
+                {"text": "t", "thought": true, "thought_signature": "sig"},
+                {"function_call": {"id": "c1", "name": "f", "args": {"a": 1}}},
+            ]},
+            {"role": "user", "parts": [
+                {"function_response": {"id": "c1", "name": "f",
+                    "response": {"output": "ok"},
+                    "parts": [{"inline_data": {"mime_type": "image/png", "data": "BBBB"}}]}},
+            ]},
+        ],
+        "tools": [{"function_declarations": [
+            {"name": "f", "parameters_json_schema": {"type": "object"}},
+        ]}],
+        "tool_config": {"function_calling_config": {
+            "mode": "ANY", "allowed_function_names": ["f"],
+        }},
+        "generation_config": {
+            "stop_sequences": ["x"],
+            "response_mime_type": "application/json",
+            "response_json_schema": {"type": "object"},
+            "max_output_tokens": 100,
+            "temperature": 0.3,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 7,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.2,
+            "thinking_config": {"include_thoughts": true, "thinking_level": "LOW"},
+        },
+    });
+    let (ir_c, ws_c) = request_to_ir(&serde_json::to_vec(&camel).unwrap()).unwrap();
+    let (ir_s, ws_s) = request_to_ir(&serde_json::to_vec(&snake).unwrap()).unwrap();
+    assert_eq!(ir_s, ir_c);
+    assert_eq!(ws_s, ws_c);
+    let (out_c, _) = request_from_ir(&ir_c, &ConvertOptions::default()).unwrap();
+    let (out_s, _) = request_from_ir(&ir_s, &ConvertOptions::default()).unwrap();
+    assert_eq!(out_s, out_c);
+    // Serialization always emits the canonical camelCase spelling.
+    assert!(out_s.get("generationConfig").is_some());
+    assert!(out_s.get("generation_config").is_none());
+}
+
+#[test]
+fn duplicate_camel_and_snake_spellings_fail_the_parse() {
+    // Pinned current behavior: both spellings of one field in the same
+    // object hit serde's duplicate-field check — a loud parse error, not a
+    // silent pick of either value.
+    let body = json!({
+        "contents": [],
+        "generationConfig": {"temperature": 0.1},
+        "generation_config": {"temperature": 0.2},
+    });
+    let err = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap_err();
+    match err {
+        Error::Parse { message, .. } => {
+            assert!(message.contains("duplicate field"), "{message}");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
 fn system_instruction_with_non_text_parts_parses_as_leading_system_message() {
     // Request.system is Text-only, so an out-of-schema part forces the whole
     // instruction into a leading System message (Text + same-format Opaque,

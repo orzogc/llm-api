@@ -32,9 +32,13 @@ pub struct Request {
     pub max_output_tokens: Option<u32>,
     /// Sampling temperature, passed through verbatim (ranges differ per
     /// provider; out-of-range values are the upstream API's error).
+    /// Non-finite values (NaN, ±infinity) are rejected at build time with a
+    /// `ConversionError` — JSON cannot represent them; note the IR's own
+    /// serde round-trip cannot carry them either (`serde_json` writes `null`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
-    /// Nucleus sampling, verbatim.
+    /// Nucleus sampling, verbatim. Non-finite values are rejected at build
+    /// time with a `ConversionError`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f64>,
     /// Top-k sampling, verbatim (Anthropic/Google only; others warn).
@@ -46,10 +50,12 @@ pub struct Request {
     /// Sampling seed (OpenAI CC / Google; others warn).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<i64>,
-    /// Frequency penalty (OpenAI CC / Google; others warn).
+    /// Frequency penalty (OpenAI CC / Google; others warn). Non-finite
+    /// values are rejected at build time with a `ConversionError`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frequency_penalty: Option<f64>,
-    /// Presence penalty (OpenAI CC / Google; others warn).
+    /// Presence penalty (OpenAI CC / Google; others warn). Non-finite
+    /// values are rejected at build time with a `ConversionError`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<f64>,
     /// Request metadata (per-target mapping in § 4.6).

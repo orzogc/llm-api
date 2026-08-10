@@ -513,6 +513,273 @@ fn unknown_delta_fields_attach_to_open_block_or_unknown() {
 }
 
 #[test]
+fn unknown_delta_fields_fold_into_accumulated_block() {
+    // The Other deltas are real-time surfacing; the same fields also fold
+    // into the finalized block at close (§ 9), so accumulation keeps
+    // them: arrays append per item and strings concatenate across chunks.
+    let mut parser = OpenAiChatCompletions.stream_parser();
+    let chunks = [
+        json!({"id": "c", "model": "m", "choices": [{"index": 0,
+            "delta": {"role": "assistant", "content": "hi",
+                      "annotations": [{"type": "url_citation", "url_citation": {"url": "https://a"}}],
+                      "x_note": "he"},
+            "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"content": "!",
+                      "annotations": [{"type": "url_citation", "url_citation": {"url": "https://b"}}],
+                      "x_note": "llo"},
+            "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+    ];
+    let mut events = Vec::new();
+    for chunk in &chunks {
+        let (evs, ws) = parser.parse(&chunk_event(chunk)).unwrap();
+        assert!(ws.is_empty(), "{ws:?}");
+        events.extend(evs);
+    }
+    let (evs, ws) = parser.parse(&SseEvent::new(None, "[DONE]")).unwrap();
+    assert!(ws.is_empty(), "{ws:?}");
+    events.extend(evs);
+
+    // Real-time: one Other delta per carrying chunk, raw (unmerged).
+    let others = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                StreamEvent::BlockDelta {
+                    delta: BlockDelta::Other(_),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(others, 2);
+
+    // The stop hands the accumulator a finalized block with the merge.
+    let stop = events
+        .iter()
+        .find_map(|e| match e {
+            StreamEvent::BlockStop { block: Some(b), .. } => Some(b.clone()),
+            _ => None,
+        })
+        .expect("finalized text block");
+    let resp = accumulate(&events);
+    assert_eq!(resp.message.content.len(), 1);
+    assert_eq!(resp.message.content[0], stop);
+    let ContentBlock::Text { text, extra, .. } = &resp.message.content[0] else {
+        panic!("expected text block: {:?}", resp.message.content);
+    };
+    assert_eq!(text, "hi!");
+    assert_eq!(
+        Value::Object(extra.get(F).unwrap().clone()),
+        json!({
+            "annotations": [
+                {"type": "url_citation", "url_citation": {"url": "https://a"}},
+                {"type": "url_citation", "url_citation": {"url": "https://b"}},
+            ],
+            "x_note": "hello",
+        })
+    );
+    assert!(resp.warnings.is_empty(), "{:?}", resp.warnings);
+}
+
+#[test]
+fn legacy_function_call_delta_folds_verbatim() {
+    // The deprecated `function_call` delta is unmodeled; its object
+    // fragments merge recursively, so split `arguments` increments
+    // reassemble in the folded field.
+    let mut parser = OpenAiChatCompletions.stream_parser();
+    let chunks = [
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"role": "assistant", "content": "",
+                      "function_call": {"name": "legacy", "arguments": "{\"a\""}},
+            "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"function_call": {"arguments": ":1}"}},
+            "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+    ];
+    let mut events = Vec::new();
+    for chunk in &chunks {
+        let (evs, ws) = parser.parse(&chunk_event(chunk)).unwrap();
+        assert!(ws.is_empty(), "{ws:?}");
+        events.extend(evs);
+    }
+    let (evs, _) = parser.parse(&SseEvent::new(None, "[DONE]")).unwrap();
+    events.extend(evs);
+
+    let resp = accumulate(&events);
+    let ContentBlock::Text { text, extra, .. } = &resp.message.content[0] else {
+        panic!("expected text block: {:?}", resp.message.content);
+    };
+    assert_eq!(text, "");
+    assert_eq!(
+        extra.get(F).unwrap().get("function_call"),
+        Some(&json!({"name": "legacy", "arguments": "{\"a\":1}"}))
+    );
+}
+
+#[test]
+fn text_after_tool_call_merges_and_warns_block_order_lost() {
+    // The wire holds one `content` string per message: a text fragment
+    // arriving after a tool call opened merges into its earlier block —
+    // matching the non-streaming parse of the assembled message — and
+    // the fold is disclosed once per stream.
+    let mut parser = OpenAiChatCompletions.stream_parser();
+    let chunks = [
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"role": "assistant", "content": "a"}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "id": "call_1", "type": "function",
+             "function": {"name": "f", "arguments": "{}"}},
+        ]}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"content": "b"}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"content": "c"}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+    ];
+    let mut events = Vec::new();
+    let mut warnings = Vec::new();
+    for chunk in &chunks {
+        let (evs, ws) = parser.parse(&chunk_event(chunk)).unwrap();
+        events.extend(evs);
+        warnings.extend(ws);
+    }
+    let (evs, _) = parser.parse(&SseEvent::new(None, "[DONE]")).unwrap();
+    events.extend(evs);
+
+    let order: Vec<&ConversionWarning> = warnings
+        .iter()
+        .filter(|w| w.code == WarningCode::BlockOrderLost)
+        .collect();
+    assert_eq!(order.len(), 1, "once per stream: {warnings:?}");
+    assert_eq!(order[0].location, "/choices/0/delta/content");
+    assert_eq!(order[0].severity, WarningSeverity::Semantic);
+
+    // No third block: the later text reuses block 0.
+    let starts: Vec<usize> = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::BlockStart { index, .. } => Some(*index),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts, vec![0, 1]);
+    let resp = accumulate(&events);
+    assert_eq!(resp.message.content.len(), 2);
+    assert!(matches!(&resp.message.content[0],
+        ContentBlock::Text { text, .. } if text == "abc"));
+    assert!(matches!(&resp.message.content[1],
+        ContentBlock::ToolCall { name, .. } if name == "f"));
+}
+
+#[test]
+fn tool_then_text_arrival_order_survives_without_order_warning() {
+    // Tool call first, text later: the text opens a new, later block, so
+    // arrival order is kept in the accumulated message and nothing folds
+    // — no BlockOrderLost here (replaying that order to CC warns on the
+    // build side instead).
+    let mut parser = OpenAiChatCompletions.stream_parser();
+    let chunks = [
+        json!({"id": "c", "choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [
+            {"index": 0, "id": "call_1", "type": "function",
+             "function": {"name": "f", "arguments": "{}"}},
+        ]}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"content": "x"}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+    ];
+    let mut events = Vec::new();
+    let mut warnings = Vec::new();
+    for chunk in &chunks {
+        let (evs, ws) = parser.parse(&chunk_event(chunk)).unwrap();
+        events.extend(evs);
+        warnings.extend(ws);
+    }
+    let (evs, _) = parser.parse(&SseEvent::new(None, "[DONE]")).unwrap();
+    events.extend(evs);
+    assert!(
+        warnings
+            .iter()
+            .all(|w| w.code != WarningCode::BlockOrderLost),
+        "{warnings:?}"
+    );
+    let resp = accumulate(&events);
+    assert!(matches!(
+        &resp.message.content[0],
+        ContentBlock::ToolCall { .. }
+    ));
+    assert!(matches!(&resp.message.content[1],
+        ContentBlock::Text { text, .. } if text == "x"));
+}
+
+#[test]
+fn empty_content_along_tool_chunks_stays_silent() {
+    // Dialects ride `content: ""` on every chunk, including tool-call
+    // ones; empty fragments fold nothing, so no BlockOrderLost.
+    let mut parser = OpenAiChatCompletions.stream_parser();
+    let chunks = [
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"role": "assistant", "content": ""}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {"content": "", "tool_calls": [
+            {"index": 0, "id": "call_1", "type": "function",
+             "function": {"name": "f", "arguments": "{\"x\""}},
+        ]}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {"content": "", "tool_calls": [
+            {"index": 0, "function": {"arguments": ":1}"}},
+        ]}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+    ];
+    let mut events = Vec::new();
+    let mut warnings = Vec::new();
+    for chunk in &chunks {
+        let (evs, ws) = parser.parse(&chunk_event(chunk)).unwrap();
+        events.extend(evs);
+        warnings.extend(ws);
+    }
+    let (evs, _) = parser.parse(&SseEvent::new(None, "[DONE]")).unwrap();
+    events.extend(evs);
+    assert!(
+        warnings
+            .iter()
+            .all(|w| w.code != WarningCode::BlockOrderLost),
+        "{warnings:?}"
+    );
+    let resp = accumulate(&events);
+    assert!(matches!(&resp.message.content[1],
+        ContentBlock::ToolCall { arguments, .. } if arguments == "{\"x\":1}"));
+}
+
+#[test]
+fn post_terminal_chunks_surface_as_unknown() {
+    // After `[DONE]`, data chunks and repeated terminators alike cannot
+    // be attributed (mirrors the Google gate).
+    let mut parser = OpenAiChatCompletions.stream_parser();
+    let (events, warnings) = parser.parse(&SseEvent::new(None, "[DONE]")).unwrap();
+    assert!(warnings.is_empty());
+    assert!(matches!(events.last().unwrap(), StreamEvent::MessageStop));
+
+    let chunk = json!({"id": "c", "choices": [{"index": 0,
+        "delta": {"content": "late"}, "finish_reason": null}]});
+    let (events, warnings) = parser.parse(&chunk_event(&chunk)).unwrap();
+    assert_eq!(events, vec![StreamEvent::Unknown]);
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].code, WarningCode::UnknownStreamEvent);
+    assert!(
+        warnings[0].message.contains("after the stream terminated"),
+        "{warnings:?}"
+    );
+
+    // A repeated terminator takes the same gate — no second MessageStop.
+    let (events, warnings) = parser.parse(&SseEvent::new(None, "[DONE]")).unwrap();
+    assert_eq!(events, vec![StreamEvent::Unknown]);
+    assert_eq!(warnings[0].code, WarningCode::UnknownStreamEvent);
+    assert!(parser.finish().is_ok());
+}
+
+#[test]
 fn custom_tool_call_type_survives_streaming() {
     // Undocumented for deltas (chunk schemas only define `function`), but
     // dialects may stream custom calls; the payload maps like the

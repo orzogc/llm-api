@@ -215,8 +215,19 @@ impl Accumulator {
     }
 
     /// Folds one stream item, including its warnings.
+    ///
+    /// The first [`StreamEvent::MessageStop`] is final: past it, events
+    /// other than [`StreamEvent::Unknown`] are silently ignored — nothing
+    /// appends blocks or overrides `stop_reason`/`usage`/`id`/`model`
+    /// after the terminator (defense in depth against a parser that keeps
+    /// emitting; the built-in parsers already gate this themselves, so no
+    /// warning is added here). `Unknown` stays accepted as the § 9
+    /// warning carrier, and an ignored item's warnings are still folded.
     pub fn push(&mut self, item: &StreamItem) -> Result<(), Error> {
         self.warnings.extend(item.warnings.iter().cloned());
+        if self.stopped && !matches!(item.event, StreamEvent::Unknown) {
+            return Ok(());
+        }
         match &item.event {
             StreamEvent::MessageStart {
                 id, model, usage, ..
@@ -543,6 +554,125 @@ mod tests {
         }
         let resp = acc.finish().unwrap();
         assert_eq!(resp.usage.as_ref().unwrap().output_tokens, 7);
+    }
+
+    #[test]
+    fn post_stop_events_are_ignored_except_unknown() {
+        // A complete stream followed by post-terminator events: none may
+        // mutate the accumulated response — the first stop wins.
+        let mut acc = Accumulator::new();
+        for e in [
+            StreamEvent::MessageStart {
+                id: Some("m1".into()),
+                model: Some("x".into()),
+                usage: None,
+            },
+            StreamEvent::BlockStart {
+                index: 0,
+                block: ContentBlock::text(""),
+            },
+            StreamEvent::BlockDelta {
+                index: 0,
+                delta: BlockDelta::Text("hello".into()),
+            },
+            StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::EndTurn),
+                usage: Some(Usage {
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    ..Usage::default()
+                }),
+            },
+            StreamEvent::MessageStop,
+            // Post-stop: every mutating event is silently ignored.
+            StreamEvent::MessageStart {
+                id: Some("late-id".into()),
+                model: Some("late-model".into()),
+                usage: None,
+            },
+            StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::ContentFilter),
+                usage: Some(Usage {
+                    input_tokens: 9,
+                    output_tokens: 99,
+                    ..Usage::default()
+                }),
+            },
+            StreamEvent::BlockStart {
+                index: 1,
+                block: ContentBlock::text("junk"),
+            },
+            StreamEvent::MessageStop, // a repeated stop is idempotent
+            StreamEvent::Unknown,     // the § 9 warning carrier stays accepted
+        ] {
+            acc.push(&item(e)).unwrap();
+        }
+        let resp = acc.finish().unwrap();
+        assert_eq!(resp.id.as_deref(), Some("m1"));
+        assert_eq!(resp.model.as_deref(), Some("x"));
+        assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
+        assert_eq!(resp.usage.as_ref().unwrap().output_tokens, 2);
+        assert_eq!(resp.message.content.len(), 1);
+        assert_eq!(resp.text(), "hello");
+    }
+
+    #[test]
+    fn post_stop_deltas_neither_mutate_nor_fail() {
+        let mut acc = Accumulator::new();
+        for e in [
+            StreamEvent::BlockStart {
+                index: 0,
+                block: ContentBlock::text("hi"),
+            },
+            StreamEvent::MessageStop,
+        ] {
+            acc.push(&item(e)).unwrap();
+        }
+        // A post-stop delta to an existing block does not mutate it; one
+        // to an unknown index does not fail (pre-stop it would): ignored
+        // events are not validated.
+        acc.push(&item(StreamEvent::BlockDelta {
+            index: 0,
+            delta: BlockDelta::Text(" more".into()),
+        }))
+        .unwrap();
+        acc.push(&item(StreamEvent::BlockDelta {
+            index: 7,
+            delta: BlockDelta::Text("x".into()),
+        }))
+        .unwrap();
+        // A post-stop finalized replacement is ignored too.
+        acc.push(&item(StreamEvent::BlockStop {
+            index: 0,
+            block: Some(ContentBlock::text("replaced")),
+        }))
+        .unwrap();
+        let resp = acc.finish().unwrap();
+        assert_eq!(resp.text(), "hi");
+    }
+
+    #[test]
+    fn post_stop_item_warnings_still_fold() {
+        use crate::convert::WarningCode;
+        let warn = |message: &str| {
+            ConversionWarning::from_format(WarningCode::UnknownStreamEvent, "test", "", message)
+        };
+        let mut acc = Accumulator::new();
+        acc.push(&item(StreamEvent::MessageStop)).unwrap();
+        // Warnings ride into the response even when the event itself is
+        // ignored — and via the Unknown carrier as usual.
+        let mut ignored = item(StreamEvent::MessageDelta {
+            stop_reason: Some(StopReason::ContentFilter),
+            usage: None,
+        });
+        ignored.warnings.push(warn("on ignored event"));
+        acc.push(&ignored).unwrap();
+        let mut carrier = item(StreamEvent::Unknown);
+        carrier.warnings.push(warn("on carrier"));
+        acc.push(&carrier).unwrap();
+        let resp = acc.finish().unwrap();
+        assert_eq!(resp.warnings.len(), 2);
+        assert_eq!(resp.stop_reason, None);
     }
 
     #[test]

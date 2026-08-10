@@ -36,6 +36,24 @@ pub fn strict_gate(strict: bool, warnings: &[ConversionWarning]) -> Result<(), C
     }
 }
 
+/// Rejects non-finite sampling values before any JSON is built. § 4.6 pins
+/// verbatim passthrough, but JSON has no NaN/±infinity — `serde_json` would
+/// silently serialize `null` — so the build fails with
+/// [`ConversionError::NonFiniteNumber`] regardless of strict mode. Each
+/// entry pairs an IR value with its JSON pointer in the format's final body
+/// (the pointer the field would occupy even where the format drops it with
+/// a warning).
+pub(crate) fn check_finite_sampling(fields: &[(Option<f64>, &str)]) -> Result<(), ConversionError> {
+    for (value, location) in fields {
+        if let Some(v) = value
+            && !v.is_finite()
+        {
+            return Err(ConversionError::non_finite(*v, *location));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -199,7 +199,10 @@ pub enum ContentBlock {
         name: Option<String>,
         /// Result content (restricted union, § 4.3).
         content: Vec<ToolOutputBlock>,
-        /// Marks the result as an error (native to Anthropic only).
+        /// Marks the result as an error. Native to Anthropic (`is_error`)
+        /// and Google (the `{"error": …}` failure key in
+        /// `functionResponse.response`); the OpenAI formats drop it with a
+        /// semantic warning.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
         /// Optional cache breakpoint.

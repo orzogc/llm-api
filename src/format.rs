@@ -508,6 +508,39 @@ fn encode_query_component(s: &str) -> String {
     out
 }
 
+/// Percent-decodes a raw query key exactly once, byte-wise, for comparison
+/// only (mirrors the single decode a server applies). Malformed sequences
+/// (`%G1`, a truncated `%4` or trailing `%`) are kept verbatim, and `+`
+/// stays a literal plus — RFC 3986 queries have no space shorthand; that is
+/// form-urlencoding. Never used to rebuild the URL: raw spellings are
+/// preserved on output.
+fn decode_query_key(s: &str) -> Vec<u8> {
+    fn hex(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(hi) = bytes.get(i + 1).copied().and_then(hex)
+            && let Some(lo) = bytes.get(i + 2).copied().and_then(hex)
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Builds the final request URL per the § 12 rules.
 ///
 /// `capability_path` is the format's documented path template and may
@@ -517,7 +550,11 @@ fn encode_query_component(s: &str) -> String {
 /// `models/` prefix; Google `tunedModels/…` resource names return
 /// [`Error::NotSupported`]. `protected_query` keys are format-required —
 /// a user-supplied query with the same key is a `ConversionError`;
-/// `extra_query` entries replace same-name keys from the URL itself.
+/// `extra_query` entries replace same-name keys from the URL itself. Both
+/// comparisons percent-decode the URL's own raw keys once (byte-wise, `+`
+/// literal) so an encoding difference can neither smuggle a protected key
+/// nor duplicate a replaced one; the URL's raw spellings are preserved in
+/// the output.
 pub fn build_url(
     endpoint: &EndpointUrl,
     capability_path: &str,
@@ -575,9 +612,16 @@ pub fn build_url(
     };
 
     // Format-required keys are protected: a user-supplied same-name key —
-    // from the URL itself or from extra_query — is an error.
+    // from the URL itself or from extra_query — is an error. Raw URL keys
+    // are compared percent-decoded so an encoded spelling (`%61lt`) cannot
+    // smuggle a protected key past the check; extra_query keys are logical
+    // (the library encodes them itself, `%` included) and compare directly.
     for (key, value) in protected_query {
-        if query_pairs.iter().any(|(k, _)| k == key) || extra_query.iter().any(|(k, _)| k == key) {
+        if query_pairs
+            .iter()
+            .any(|(k, _)| decode_query_key(k) == key.as_bytes())
+            || extra_query.iter().any(|(k, _)| k == key)
+        {
             return Err(ConversionError::ProtectedQueryKey {
                 key: (*key).to_owned(),
             }
@@ -587,13 +631,18 @@ pub fn build_url(
     }
 
     // Later layers replace same-name keys (the caller passes provider-then-
-    // per-call entries already in order).
+    // per-call entries already in order). Matching percent-decodes the raw
+    // URL key so an encoding difference cannot leave a duplicate; a matched
+    // key keeps its original spelling, only the value is replaced.
     for (key, value) in extra_query {
-        let encoded = (encode_query_component(key), encode_query_component(value));
-        if let Some(existing) = query_pairs.iter_mut().find(|(k, _)| *k == encoded.0) {
-            existing.1 = encoded.1;
+        let encoded_value = encode_query_component(value);
+        if let Some(existing) = query_pairs
+            .iter_mut()
+            .find(|(k, _)| decode_query_key(k) == key.as_bytes())
+        {
+            existing.1 = encoded_value;
         } else {
-            query_pairs.push(encoded);
+            query_pairs.push((encode_query_component(key), encoded_value));
         }
     }
 
@@ -731,6 +780,68 @@ mod tests {
         // Protected key appended when no conflict.
         let ok = build_url(&base2, "p", "m", None, &[("alt", "sse")], &[]).unwrap();
         assert_eq!(ok.to_string(), "https://h/v1/p?alt=sse");
+    }
+
+    #[test]
+    fn protected_query_detects_percent_encoded_key() {
+        // An encoded spelling of a protected key is the same key after the
+        // server's decode and must conflict.
+        let base = EndpointUrl::base("https://h/v1?%61lt=json").unwrap();
+        let err = build_url(&base, "p", "m", None, &[("alt", "sse")], &[]).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Conversion(ConversionError::ProtectedQueryKey { .. })
+        ));
+
+        // Double-encoded is a different key: a single decode yields `%61lt`,
+        // not `alt` — no false positive, raw spelling preserved.
+        let base2 = EndpointUrl::base("https://h/v1?%2561lt=json").unwrap();
+        let url = build_url(&base2, "p", "m", None, &[("alt", "sse")], &[]).unwrap();
+        assert_eq!(url.to_string(), "https://h/v1/p?%2561lt=json&alt=sse");
+    }
+
+    #[test]
+    fn extra_query_replacement_is_percent_decode_aware() {
+        // A differently-encoded existing key is replaced, not duplicated;
+        // the URL's original spelling (lowercase hex) is kept.
+        let base = EndpointUrl::base("https://h/v1?a%2fb=1").unwrap();
+        let url = build_url(
+            &base,
+            "p",
+            "m",
+            None,
+            &[],
+            &[("a/b".to_owned(), "2".to_owned())],
+        )
+        .unwrap();
+        assert_eq!(url.to_string(), "https://h/v1/p?a%2fb=2");
+
+        // Pinned: `+` is a literal plus in an RFC 3986 query, not a space —
+        // extra key "a b" does not match raw "a+b" and appends `a%20b`.
+        let base2 = EndpointUrl::base("https://h/v1?a+b=1").unwrap();
+        let url2 = build_url(
+            &base2,
+            "p",
+            "m",
+            None,
+            &[],
+            &[("a b".to_owned(), "2".to_owned())],
+        )
+        .unwrap();
+        assert_eq!(url2.to_string(), "https://h/v1/p?a+b=1&a%20b=2");
+    }
+
+    #[test]
+    fn decode_query_key_is_single_pass_and_lenient() {
+        assert_eq!(decode_query_key("alt"), b"alt");
+        assert_eq!(decode_query_key("%61lt"), b"alt");
+        assert_eq!(decode_query_key("%2561lt"), b"%61lt");
+        assert_eq!(decode_query_key("a+b"), b"a+b");
+        assert_eq!(decode_query_key("%ff"), b"\xff");
+        // Malformed sequences stay verbatim.
+        assert_eq!(decode_query_key("%G1"), b"%G1");
+        assert_eq!(decode_query_key("%4"), b"%4");
+        assert_eq!(decode_query_key("abc%"), b"abc%");
     }
 
     #[test]

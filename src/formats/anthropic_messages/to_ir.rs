@@ -429,6 +429,34 @@ fn mirror_map(root: &mut Map<String, Value>, path: &[&str], map: Map<String, Val
     }
 }
 
+/// Maps an optional wire integer into the IR's `u32` range. A value above
+/// `u32::MAX` is not modeled: the IR field stays unset, the original number
+/// round-trips verbatim through the unknown-field mirror at `/{key}`, and a
+/// `MalformedField` warning discloses the degrade (no silent clamp).
+fn u32_or_mirror(
+    v: Option<u64>,
+    key: &str,
+    unknown_root: &mut Map<String, Value>,
+    warnings: &mut Vec<ConversionWarning>,
+) -> Option<u32> {
+    let v = v?;
+    match u32::try_from(v) {
+        Ok(n) => Some(n),
+        Err(_) => {
+            warnings.push(pwarn(
+                WarningCode::MalformedField,
+                format!("/{key}"),
+                format!(
+                    "`{key}` {v} exceeds the modeled u32 range; the IR field is unset \
+                     and the value re-serializes verbatim via `extra`"
+                ),
+            ));
+            mirror(unknown_root, &[key], Value::from(v));
+            None
+        }
+    }
+}
+
 /// Parses an Anthropic Messages request body into the IR (§ 11
 /// `parse_request`).
 pub(crate) fn parse_request_body(body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)> {
@@ -441,12 +469,15 @@ pub(crate) fn parse_request_body(body: &[u8]) -> Result<(Request, Vec<Conversion
 
     // `model` selects configuration, not IR state; `stream` is decided by
     // the call mode — both are dropped (canonicalization).
-    req.max_output_tokens = wire
-        .max_tokens
-        .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
+    req.max_output_tokens = u32_or_mirror(
+        wire.max_tokens,
+        "max_tokens",
+        &mut unknown_root,
+        &mut warnings,
+    );
     req.temperature = wire.temperature;
     req.top_p = wire.top_p;
-    req.top_k = wire.top_k.map(|v| u32::try_from(v).unwrap_or(u32::MAX));
+    req.top_k = u32_or_mirror(wire.top_k, "top_k", &mut unknown_root, &mut warnings);
     req.stop_sequences = wire.stop_sequences;
 
     if let Some(metadata) = wire.metadata {
