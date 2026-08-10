@@ -101,6 +101,11 @@ pub enum WarningCode {
     /// target's system channel is a plain string) — user-addressed data was
     /// lost.
     ExtraDropped,
+    /// A wire item's boundary could not be reconstructed on serialization:
+    /// an unknown-part shell whose recorded item identity no longer matches
+    /// its neighbours serializes as a separate item, splitting the original
+    /// item (sibling items may then repeat its wire `id`).
+    ItemBoundaryLost,
     /// Token counting: the count adapter dropped a field it did not
     /// generate (injected via `extra`, hooks or a dialect) — the result is
     /// no longer exact (§ 13).
@@ -179,6 +184,11 @@ pub enum WarningCode {
     /// `include_usage: true` (the only member configuration can rebuild)
     /// was consumed on parse; the build side will not reconstruct it.
     StreamOptionsDropped,
+    /// The transport or SSE layer failed **after** the protocol terminator;
+    /// the completed response stands and the trailing failure was
+    /// downgraded to this warning (§ 9: nothing after the terminator may
+    /// mutate or fail the response).
+    PostTerminalStreamFailure,
 }
 
 impl WarningCode {
@@ -208,6 +218,7 @@ impl WarningCode {
             | MissingThinkingWithToolCalls
             | MergeBlockedBySignature
             | ExtraDropped
+            | ItemBoundaryLost
             | CountTokensFieldDropped
             | CountTokensApproximate
             | MultipleCandidates
@@ -231,7 +242,8 @@ impl WarningCode {
             | MissingThinkingFilled
             | MalformedField
             | UnknownStreamEvent
-            | StreamOptionsDropped => WarningSeverity::Cosmetic,
+            | StreamOptionsDropped
+            | PostTerminalStreamFailure => WarningSeverity::Cosmetic,
         }
     }
 }

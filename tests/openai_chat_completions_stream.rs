@@ -16,8 +16,8 @@ use llm_api::formats::openai_chat_completions::{
 use llm_api::http::{SseEvent, SseParser};
 use llm_api::{
     Accumulator, ApiFormat, BlockDelta, CallMode, ContentBlock, ConversionWarning, ConvertOptions,
-    Error, Message, OpenAiChatCompletionsOptions, Request, StopReason, StreamEvent, StreamItem,
-    WarningCode, WarningSeverity,
+    Error, Extra, Message, OpenAiChatCompletionsOptions, Request, ResponseMeta, StopReason,
+    StreamEvent, StreamItem, WarningCode, WarningSeverity,
 };
 
 const F: &str = "openai_chat_completions";
@@ -77,6 +77,35 @@ fn accumulate(events: &[StreamEvent]) -> llm_api::Response {
 
 fn chunk_event(data: &Value) -> SseEvent {
     SseEvent::new(None, data.to_string())
+}
+
+/// Replays an assistant message as a unary CC request body.
+fn replay_message(msg: &Message) -> (Value, Vec<ConversionWarning>) {
+    let req = Request::with_messages(vec![msg.clone()]);
+    request_from_ir(
+        &req,
+        None,
+        CallMode::Unary,
+        &ConvertOptions::default(),
+        &OpenAiChatCompletionsOptions::default(),
+    )
+    .unwrap()
+}
+
+/// Runs the chunks plus `[DONE]` through a fresh parser; every parse call
+/// must succeed and stay warning-free. Returns the unified events.
+fn run_chunks_no_warnings(chunks: &[Value]) -> Vec<StreamEvent> {
+    let mut parser = OpenAiChatCompletions.stream_parser();
+    let mut events = Vec::new();
+    for chunk in chunks {
+        let (evs, ws) = parser.parse(&chunk_event(chunk)).unwrap();
+        assert!(ws.is_empty(), "{ws:?}");
+        events.extend(evs);
+    }
+    let (evs, ws) = parser.parse(&SseEvent::new(None, "[DONE]")).unwrap();
+    assert!(ws.is_empty(), "{ws:?}");
+    events.extend(evs);
+    events
 }
 
 /// The first finalized block carried by a `BlockStop` event.
@@ -571,15 +600,17 @@ fn unknown_delta_fields_fold_into_accumulated_block() {
         panic!("expected text block: {:?}", resp.message.content);
     };
     assert_eq!(text, "hi!");
+    // Message-level by origin (the delta object is message-shaped), so
+    // the fold nests under the `message` reserved key.
     assert_eq!(
         Value::Object(extra.get(F).unwrap().clone()),
-        json!({
+        json!({"message": {
             "annotations": [
                 {"type": "url_citation", "url_citation": {"url": "https://a"}},
                 {"type": "url_citation", "url_citation": {"url": "https://b"}},
             ],
             "x_note": "hello",
-        })
+        }})
     );
     assert!(resp.warnings.is_empty(), "{:?}", resp.warnings);
 }
@@ -587,10 +618,10 @@ fn unknown_delta_fields_fold_into_accumulated_block() {
 #[test]
 fn legacy_function_call_delta_folds_verbatim() {
     // The deprecated `function_call` delta is unmodeled; its object
-    // fragments merge recursively, so split `arguments` increments
-    // reassemble in the folded field.
-    let mut parser = OpenAiChatCompletions.stream_parser();
-    let chunks = [
+    // fragments merge recursively under the `message` reserved key, so
+    // split `arguments` increments reassemble and the field replays on
+    // the message level — not inside the content part.
+    let events = run_chunks_no_warnings(&[
         json!({"id": "c", "choices": [{"index": 0,
             "delta": {"role": "assistant", "content": "",
                       "function_call": {"name": "legacy", "arguments": "{\"a\""}},
@@ -599,25 +630,199 @@ fn legacy_function_call_delta_folds_verbatim() {
             "delta": {"function_call": {"arguments": ":1}"}},
             "finish_reason": null}]}),
         json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
-    ];
-    let mut events = Vec::new();
-    for chunk in &chunks {
-        let (evs, ws) = parser.parse(&chunk_event(chunk)).unwrap();
-        assert!(ws.is_empty(), "{ws:?}");
-        events.extend(evs);
-    }
-    let (evs, _) = parser.parse(&SseEvent::new(None, "[DONE]")).unwrap();
-    events.extend(evs);
-
+    ]);
     let resp = accumulate(&events);
     let ContentBlock::Text { text, extra, .. } = &resp.message.content[0] else {
         panic!("expected text block: {:?}", resp.message.content);
     };
     assert_eq!(text, "");
+    let call = json!({"name": "legacy", "arguments": "{\"a\":1}"});
     assert_eq!(
-        extra.get(F).unwrap().get("function_call"),
-        Some(&json!({"name": "legacy", "arguments": "{\"a\":1}"}))
+        extra.get(F).unwrap().get("message"),
+        Some(&json!({"function_call": call}))
     );
+
+    let (body, ws) = replay_message(&resp.message);
+    assert!(ws.is_empty(), "{ws:?}");
+    let msg = &body["messages"][0];
+    assert_eq!(msg["function_call"], call);
+    assert_eq!(msg["content"], json!([{"type": "text", "text": ""}]));
+}
+
+#[test]
+fn folded_fields_replay_matches_non_streaming_parse() {
+    // Parity target: replaying the accumulated streamed message equals
+    // replaying the non-streaming parse of the same terminal message —
+    // the folded fields land on the message level and the `content`
+    // string shorthand is preserved (the `message` reserved key holds no
+    // part-level data).
+    let annotations = json!([{"type": "url_citation", "url_citation": {"url": "https://a"}}]);
+    let events = run_chunks_no_warnings(&[
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"role": "assistant", "content": "hi", "annotations": annotations},
+            "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+    ]);
+    let streamed = accumulate(&events);
+    let (streamed_body, ws) = replay_message(&streamed.message);
+    assert!(ws.is_empty(), "{ws:?}");
+
+    let body = json!({"id": "c", "object": "chat.completion", "model": "m",
+        "choices": [{"index": 0,
+            "message": {"role": "assistant", "content": "hi", "annotations": annotations},
+            "finish_reason": "stop"}]});
+    let parsed = OpenAiChatCompletions
+        .parse_response(
+            &serde_json::to_vec(&body).unwrap(),
+            &ResponseMeta::new(200, http::HeaderMap::new()),
+        )
+        .unwrap();
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    let (unary_body, ws) = replay_message(&parsed.message);
+    assert!(ws.is_empty(), "{ws:?}");
+
+    assert_eq!(streamed_body, unary_body);
+    let msg = &streamed_body["messages"][0];
+    assert_eq!(msg["content"], json!("hi"));
+    assert_eq!(msg["annotations"], annotations);
+}
+
+#[test]
+fn folded_replay_round_trips_through_request_parse() {
+    // Closing the parity loop: the replayed wire parses back with the
+    // folded fields on `Message.extra` (their non-streaming home, blocks
+    // clean), and a second replay reproduces the same body.
+    let events = run_chunks_no_warnings(&[
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"role": "assistant", "content": "hi", "x_note": "n"},
+            "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+    ]);
+    let resp = accumulate(&events);
+    let (body, ws) = replay_message(&resp.message);
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(body["messages"][0]["x_note"], json!("n"));
+
+    let (req, ws) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
+    assert!(ws.is_empty(), "{ws:?}");
+    let msg = &req.messages[0];
+    assert_eq!(msg.extra.get(F).unwrap().get("x_note"), Some(&json!("n")));
+    assert!(
+        msg.content
+            .iter()
+            .all(|b| matches!(b, ContentBlock::Text { extra, .. } if extra.is_empty())),
+        "{:?}",
+        msg.content
+    );
+
+    let (body2, ws) = request_from_ir(
+        &req,
+        None,
+        CallMode::Unary,
+        &ConvertOptions::default(),
+        &OpenAiChatCompletionsOptions::default(),
+    )
+    .unwrap();
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(body2["messages"], body["messages"]);
+}
+
+#[test]
+fn multiple_blocks_merge_message_fields_in_block_order() {
+    // Several text blocks holding the `message` reserved key merge into
+    // the message in block order: later keys win (RFC 7396), disjoint
+    // keys accumulate.
+    let events = run_chunks_no_warnings(&[
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"role": "assistant", "content": "a",
+                      "x_note": "first", "only_first": "f"},
+            "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"refusal": "no"}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"content": "b", "x_note": "second"}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+    ]);
+    let resp = accumulate(&events);
+    assert_eq!(resp.message.content.len(), 3, "{:#?}", resp.message.content);
+
+    let (body, ws) = replay_message(&resp.message);
+    assert!(ws.is_empty(), "{ws:?}");
+    let msg = &body["messages"][0];
+    assert_eq!(msg["x_note"], json!("second"));
+    assert_eq!(msg["only_first"], json!("f"));
+    assert_eq!(
+        msg["content"],
+        json!([
+            {"type": "text", "text": "a"},
+            {"type": "refusal", "refusal": "no"},
+            {"type": "text", "text": "b"},
+        ])
+    );
+}
+
+#[test]
+fn message_extra_stays_authoritative_over_folded_fields() {
+    // The user's message-level extra merges after the hoisted fields and
+    // wins on conflicts (§ 6).
+    let events = run_chunks_no_warnings(&[
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"role": "assistant", "content": "hi", "x_note": "stream"},
+            "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+    ]);
+    let mut message = accumulate(&events).message;
+    let user_ns = json!({"x_note": "user"});
+    message.extra = Extra::from_unknown(F, user_ns.as_object().unwrap().clone());
+
+    let (body, ws) = replay_message(&message);
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(body["messages"][0]["x_note"], json!("user"));
+}
+
+#[test]
+fn refusal_channel_folded_fields_replay_on_message_level() {
+    // Fields folded while the refusal channel is open hoist to the
+    // message level too; the refusal part stays clean.
+    let events = run_chunks_no_warnings(&[
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"role": "assistant", "refusal": "no", "x_note": "n"},
+            "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+    ]);
+    let resp = accumulate(&events);
+    let (body, ws) = replay_message(&resp.message);
+    assert!(ws.is_empty(), "{ws:?}");
+    let msg = &body["messages"][0];
+    assert_eq!(
+        msg["content"],
+        json!([{"type": "refusal", "refusal": "no"}])
+    );
+    assert_eq!(msg["x_note"], json!("n"));
+}
+
+#[test]
+fn reasoning_channel_folded_fields_replay_on_message_level() {
+    // Fields folded while the reasoning channel is open stay top-level on
+    // the Thinking block extra, which already merges into the containing
+    // message on serialization.
+    let events = run_chunks_no_warnings(&[
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"role": "assistant", "reasoning_content": "think", "x_note": "n"},
+            "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+    ]);
+    let resp = accumulate(&events);
+    let ContentBlock::Thinking { extra, .. } = &resp.message.content[0] else {
+        panic!("expected thinking block: {:?}", resp.message.content);
+    };
+    assert_eq!(extra.get(F).unwrap().get("x_note"), Some(&json!("n")));
+
+    let (body, ws) = replay_message(&resp.message);
+    assert!(ws.is_empty(), "{ws:?}");
+    let msg = &body["messages"][0];
+    assert_eq!(msg["reasoning_content"], json!("think"));
+    assert_eq!(msg["x_note"], json!("n"));
 }
 
 #[test]

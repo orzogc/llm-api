@@ -12,7 +12,7 @@ use crate::ir::{
     Reasoning, Request, Role, Tool, ToolChoice, ToolOutputBlock,
 };
 
-use super::{FORMAT, tool_call_reserved_key};
+use super::{FORMAT, text_block_reserved_key, tool_call_reserved_key};
 
 /// Output of the build-side conversion, before
 /// [`crate::finalize_request`] runs.
@@ -741,7 +741,10 @@ fn build_assistant_message(
     }
 
     let mut item = json!({"role": "assistant"});
-    if let Some(content) = encode_assistant_content(&text_blocks, msg_ptr, warnings, log) {
+    let mut promoted: Vec<Map<String, Value>> = Vec::new();
+    if let Some(content) =
+        encode_assistant_content(&text_blocks, msg_ptr, &mut promoted, warnings, log)
+    {
         item["content"] = content;
     }
     if !thinking_texts.is_empty() {
@@ -756,28 +759,61 @@ fn build_assistant_message(
     for extra in thinking_extras {
         extra.merge_into(FORMAT, &mut item, msg_ptr, log);
     }
+    // Message-level fields hoisted from the text blocks' `message`
+    // reserved key merge next, in block order (later keys win, RFC 7396);
+    // the message's own `extra` merges last and stays authoritative.
+    for fields in &promoted {
+        crate::ir::merge_patch(&mut item, fields, msg_ptr, log);
+    }
     msg.extra.merge_into(FORMAT, &mut item, msg_ptr, log);
     Ok(item)
 }
 
+/// Splits a text-block namespace into the part-level patch and the
+/// message-level fields nested under the `message` reserved key
+/// ([`text_block_reserved_key::MESSAGE`]). A non-object reserved value
+/// stays part-level (defensive: only the object form is defined).
+fn split_message_fields(
+    mut ns: Map<String, Value>,
+) -> (Map<String, Value>, Option<Map<String, Value>>) {
+    match ns.remove(text_block_reserved_key::MESSAGE) {
+        Some(Value::Object(members)) => (ns, Some(members)),
+        Some(other) => {
+            ns.insert(text_block_reserved_key::MESSAGE.to_owned(), other);
+            (ns, None)
+        }
+        None => (ns, None),
+    }
+}
+
 /// Encodes assistant text/refusal/opaque blocks as `content`: string
 /// shorthand where eligible, part array otherwise, `None` (field omitted)
-/// when there are no content-channel blocks.
+/// when there are no content-channel blocks. Fields nested under the
+/// blocks' `message` reserved key never reach the parts: they collect
+/// into `promoted`, in block order, for the caller to merge into the
+/// containing message object.
 fn encode_assistant_content(
     blocks: &[&ContentBlock],
     msg_ptr: &str,
+    promoted: &mut Vec<Map<String, Value>>,
     warnings: &mut Vec<ConversionWarning>,
     log: &mut MergeLog,
 ) -> Option<Value> {
     if blocks.is_empty() {
         return None;
     }
+    // The `message` reserved key holds no part-level data, so it does not
+    // block the string shorthand.
     if let [ContentBlock::Text { text, cache, extra }] = blocks
         && cache.is_none()
         && !text.is_empty()
-        && extra.get(FORMAT).is_none_or(Map::is_empty)
     {
-        return Some(Value::from(text.as_str()));
+        let (patch, message_fields) =
+            split_message_fields(extra.get(FORMAT).cloned().unwrap_or_default());
+        if patch.is_empty() {
+            promoted.extend(message_fields);
+            return Some(Value::from(text.as_str()));
+        }
     }
     let mut parts: Vec<Value> = Vec::new();
     for block in blocks {
@@ -792,15 +828,19 @@ fn encode_assistant_content(
                          the hint was dropped",
                     ));
                 }
-                let ns = extra.get(FORMAT).cloned().unwrap_or_default();
-                let refusal = ns.get("refusal").and_then(Value::as_bool).unwrap_or(false);
+                let (mut patch, message_fields) =
+                    split_message_fields(extra.get(FORMAT).cloned().unwrap_or_default());
+                promoted.extend(message_fields);
+                let refusal = patch
+                    .get(text_block_reserved_key::REFUSAL)
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 let mut part = if refusal {
                     json!({"type": "refusal", "refusal": text})
                 } else {
                     json!({"type": "text", "text": text})
                 };
-                let mut patch = ns;
-                patch.remove("refusal");
+                patch.remove(text_block_reserved_key::REFUSAL);
                 crate::ir::merge_patch(&mut part, &patch, &part_ptr, log);
                 parts.push(part);
             }

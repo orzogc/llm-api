@@ -79,9 +79,16 @@
 //!   name/arguments to `custom.name` / `custom.input`; unknown kinds and
 //!   non-string `type` values mirror the whole entry). Unknown entry
 //!   fields sit at the top, `function` unknowns nest under `"function"`.
-//! - Refusal content (the `refusal` message field or `refusal` parts)
-//!   parses into `Text` blocks with `{"refusal": true}` (§ 9); such
-//!   blocks serialize back as `refusal` content parts.
+//! - Assistant `Text` blocks use the reserved keys of
+//!   [`text_block_reserved_key`]; all other keys are part-level and merge
+//!   into the serialized content part. `refusal` marks refusal content
+//!   (the `refusal` message field or `refusal` parts) parsed into `Text`
+//!   blocks with `{"refusal": true}` (§ 9); such blocks serialize back as
+//!   `refusal` content parts. `message` nests message-level fields the
+//!   streaming parser folded from unknown `delta` fields; serialization
+//!   merges the nested object into the containing wire message — several
+//!   holding blocks merge in block order (later keys win, RFC 7396), and
+//!   the message's own `extra` merges last, staying authoritative.
 //! - Unknown wire-message fields (`name`, `audio`, `annotations`, legacy
 //!   `function_call`, …) ride the message extra; on `tool` messages they
 //!   ride the `ToolResult` block extra (each wire message is its own IR
@@ -144,6 +151,21 @@ pub mod tool_call_reserved_key {
     /// `"custom"` rebuild a payload object, every other value re-emits
     /// via the mirrored namespace.
     pub const TYPE: &str = "type";
+}
+
+/// Reserved keys of the `openai_chat_completions` namespace on assistant
+/// `Text` blocks (see the module docs): they carry data of levels above
+/// the content part, while all other keys are part-level.
+pub mod text_block_reserved_key {
+    /// Marks the block as a `refusal` part (§ 9).
+    pub const REFUSAL: &str = "refusal";
+    /// Message-level fields, nested as an object. The streaming parser
+    /// folds unknown `delta` fields here (the `delta` object is
+    /// message-shaped); serialization merges the object into the
+    /// containing wire message — several holding blocks merge in block
+    /// order (later keys win, RFC 7396), and the message's own `extra`
+    /// merges last, staying authoritative.
+    pub const MESSAGE: &str = "message";
 }
 
 /// The OpenAI Chat Completions format (typed layer entry point and

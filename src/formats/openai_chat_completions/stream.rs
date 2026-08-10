@@ -44,10 +44,13 @@
 //!   silently; unknown `delta` fields (`annotations`, `audio`, the legacy
 //!   `function_call`, dialect fields) surface as [`BlockDelta::Other`] on
 //!   the current channel block when one is open **and** fold into that
-//!   block's extra when it closes, so they survive accumulation. Fields
-//!   repeating across chunks merge under Chat Completions delta
-//!   semantics: strings concatenate, arrays append, objects merge per key
-//!   recursively, anything else replaces (last wins).
+//!   block's extra when it closes — nested under the `message` reserved
+//!   key on content/refusal blocks, top-level on thinking blocks — so
+//!   they survive accumulation and re-serialize on the containing
+//!   message, the wire level they arrived at. Fields repeating across
+//!   chunks merge under Chat Completions delta semantics: strings
+//!   concatenate, arrays append, objects merge per key recursively,
+//!   anything else replaces (last wins).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -59,7 +62,7 @@ use crate::format::StreamParser;
 use crate::http::SseEvent;
 use crate::ir::{BlockDelta, ContentBlock, Extra, StreamEvent};
 
-use super::{FORMAT, to_ir, tool_call_reserved_key};
+use super::{FORMAT, text_block_reserved_key, to_ir, tool_call_reserved_key};
 
 /// Parse-side warning shorthand.
 fn warn(
@@ -138,12 +141,29 @@ fn merge_unknown_value(slot: &mut Value, value: Value) {
     }
 }
 
+/// Nests folded delta fields under the `message` reserved key of a text
+/// block namespace ([`text_block_reserved_key::MESSAGE`]): the wire
+/// `delta` object is message-shaped, so the fields belong to the
+/// containing message, not the content part, and serialization hoists
+/// them back to the message level.
+fn nest_message_fields(fields: Map<String, Value>) -> Map<String, Value> {
+    let mut ns = Map::new();
+    ns.insert(
+        text_block_reserved_key::MESSAGE.to_owned(),
+        Value::Object(fields),
+    );
+    ns
+}
+
 /// Folds an accumulated text channel into its `BlockStop` payload: with
 /// unknown delta fields attributed to the block the stop carries the
 /// parser-finalized block — accumulated text plus the folded fields in
 /// the format namespace, which the accumulator adopts wholesale (§ 9) —
 /// and without any it stays `block: None` (the accumulator's
-/// incrementally built block is already complete).
+/// incrementally built block is already complete). Content/refusal
+/// blocks nest the fields under the `message` reserved key; a thinking
+/// block's extra already merges into the containing message wholesale,
+/// so the reasoning channel keeps them at the top level.
 fn finalize_channel(state: ChannelState) -> (usize, Option<ContentBlock>) {
     if state.leftover.is_empty() {
         return (state.index, None);
@@ -152,7 +172,7 @@ fn finalize_channel(state: ChannelState) -> (usize, Option<ContentBlock>) {
         Channel::Content => ContentBlock::Text {
             text: state.text.unwrap_or_default(),
             cache: None,
-            extra: Extra::from_unknown(FORMAT, state.leftover),
+            extra: Extra::from_unknown(FORMAT, nest_message_fields(state.leftover)),
         },
         Channel::Reasoning => ContentBlock::Thinking {
             text: state.text,
@@ -160,8 +180,11 @@ fn finalize_channel(state: ChannelState) -> (usize, Option<ContentBlock>) {
             extra: Extra::from_unknown(FORMAT, state.leftover),
         },
         Channel::Refusal => {
-            let mut ns = state.leftover;
-            ns.insert("refusal".to_owned(), Value::from(true));
+            let mut ns = nest_message_fields(state.leftover);
+            ns.insert(
+                text_block_reserved_key::REFUSAL.to_owned(),
+                Value::from(true),
+            );
             ContentBlock::Text {
                 text: state.text.unwrap_or_default(),
                 cache: None,
@@ -553,7 +576,10 @@ impl ChatCompletionsStreamParser {
                 ),
                 Channel::Refusal => {
                     let mut ns = Map::new();
-                    ns.insert("refusal".to_owned(), Value::from(true));
+                    ns.insert(
+                        text_block_reserved_key::REFUSAL.to_owned(),
+                        Value::from(true),
+                    );
                     (
                         ContentBlock::Text {
                             text: String::new(),

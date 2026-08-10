@@ -554,7 +554,10 @@ fn decode_query_key(s: &str) -> Vec<u8> {
 /// comparisons percent-decode the URL's own raw keys once (byte-wise, `+`
 /// literal) so an encoding difference can neither smuggle a protected key
 /// nor duplicate a replaced one; the URL's raw spellings are preserved in
-/// the output.
+/// the output. A key `extra_query` sets appears exactly once in the final
+/// URL — the first occurrence's position and spelling, later logical
+/// duplicates dropped; duplicate keys the caller does not set are
+/// preserved verbatim.
 pub fn build_url(
     endpoint: &EndpointUrl,
     capability_path: &str,
@@ -632,16 +635,29 @@ pub fn build_url(
 
     // Later layers replace same-name keys (the caller passes provider-then-
     // per-call entries already in order). Matching percent-decodes the raw
-    // URL key so an encoding difference cannot leave a duplicate; a matched
-    // key keeps its original spelling, only the value is replaced.
+    // URL key so an encoding difference cannot leave a duplicate: the first
+    // logical match keeps its original spelling and position and only its
+    // value is replaced, and any further logical duplicates are dropped — a
+    // key extra_query sets appears exactly once in the final URL. Duplicate
+    // keys the caller does not set are preserved verbatim (base-query
+    // passthrough).
     for (key, value) in extra_query {
         let encoded_value = encode_query_component(value);
-        if let Some(existing) = query_pairs
-            .iter_mut()
-            .find(|(k, _)| decode_query_key(k) == key.as_bytes())
-        {
-            existing.1 = encoded_value;
-        } else {
+        let mut matched = false;
+        query_pairs.retain_mut(|(k, v)| {
+            if decode_query_key(k) != key.as_bytes() {
+                return true;
+            }
+            if matched {
+                // A later logical duplicate of a key extra_query set.
+                false
+            } else {
+                matched = true;
+                *v = encoded_value.clone();
+                true
+            }
+        });
+        if !matched {
             query_pairs.push((encode_query_component(key), encoded_value));
         }
     }
@@ -829,6 +845,70 @@ mod tests {
         )
         .unwrap();
         assert_eq!(url2.to_string(), "https://h/v1/p?a+b=1&a%20b=2");
+    }
+
+    #[test]
+    fn extra_query_collapses_logical_duplicates_it_sets() {
+        // Mixed-encoding duplicates collapse onto the first occurrence:
+        // original spelling and position kept, later duplicates dropped.
+        let base = EndpointUrl::base("https://h/v1?x=0&a=1&%61=2&y=9").unwrap();
+        let url = build_url(
+            &base,
+            "p",
+            "m",
+            None,
+            &[],
+            &[("a".to_owned(), "3".to_owned())],
+        )
+        .unwrap();
+        assert_eq!(url.to_string(), "https://h/v1/p?x=0&a=3&y=9");
+
+        // Literal duplicates collapse the same way.
+        let base2 = EndpointUrl::base("https://h/v1?a=1&a=2").unwrap();
+        let url2 = build_url(
+            &base2,
+            "p",
+            "m",
+            None,
+            &[],
+            &[("a".to_owned(), "3".to_owned())],
+        )
+        .unwrap();
+        assert_eq!(url2.to_string(), "https://h/v1/p?a=3");
+
+        // Later entries in the extra list still win after the collapse.
+        let url3 = build_url(
+            &base2,
+            "p",
+            "m",
+            None,
+            &[],
+            &[
+                ("a".to_owned(), "3".to_owned()),
+                ("a".to_owned(), "4".to_owned()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(url3.to_string(), "https://h/v1/p?a=4");
+    }
+
+    #[test]
+    fn untouched_base_duplicates_are_preserved() {
+        // Duplicate keys extra_query does not set stay verbatim (base-query
+        // passthrough); an unrelated extra key does not disturb them.
+        let base = EndpointUrl::base("https://h/v1?a=1&a=2").unwrap();
+        let url = build_url(&base, "p", "m", None, &[], &[]).unwrap();
+        assert_eq!(url.to_string(), "https://h/v1/p?a=1&a=2");
+        let url2 = build_url(
+            &base,
+            "p",
+            "m",
+            None,
+            &[],
+            &[("b".to_owned(), "9".to_owned())],
+        )
+        .unwrap();
+        assert_eq!(url2.to_string(), "https://h/v1/p?a=1&a=2&b=9");
     }
 
     #[test]

@@ -481,7 +481,141 @@ fn same_id_blocks_with_conflicting_item_fields_warn_first_wins() {
         .find(|w| w.code == WarningCode::ExtraDropped)
         .expect("conflicting phase warns");
     assert_eq!(w.severity, WarningSeverity::Semantic);
-    assert_eq!(w.location, "/input/0/content/1");
+    // The location is the item-level field that kept the leading value,
+    // so an `extra` override addressing it marks the warning overridden.
+    assert_eq!(w.location, "/input/0/phase");
+}
+
+#[test]
+fn conflicting_item_field_strict_override_via_item_pointer() {
+    let make = || {
+        Message::assistant(vec![
+            ContentBlock::text("a")
+                .with_extra(F, "id", "msg_1")
+                .with_extra(F, "phase", "commentary"),
+            ContentBlock::text("b")
+                .with_extra(F, "id", "msg_1")
+                .with_extra(F, "phase", "final_answer"),
+        ])
+    };
+    let mut strict_ctx = ctx(CallMode::Unary);
+    strict_ctx.convert.strict = true;
+
+    // Without an override, strict rejects the semantic conflict warning
+    // (the item-field restoration itself must not self-mark it).
+    let err = OpenAiResponses
+        .build_request(&Request::with_messages(vec![make()]), &strict_ctx)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        Error::Conversion(ConversionError::Strict { .. })
+    ));
+
+    // A message `extra` that takes over the item-level field lands at
+    // /input/0/phase and marks the warning overridden: strict passes.
+    let mut msg = make();
+    msg.extra.set(F, "phase", json!("final_answer"));
+    let built = OpenAiResponses
+        .build_request(&Request::with_messages(vec![msg]), &strict_ctx)
+        .unwrap();
+    let w = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::ExtraDropped)
+        .unwrap();
+    assert!(w.overridden);
+    assert_eq!(body_of(&built)["input"][0]["phase"], json!("final_answer"));
+}
+
+#[test]
+fn conflicting_unknown_item_fields_warn_per_field() {
+    // `item` (nested unknown item-level fields) conflicts warn one per
+    // field, located at that field on the item.
+    let msg = Message::assistant(vec![
+        ContentBlock::text("a")
+            .with_extra(F, "id", "msg_1")
+            .with_extra(
+                F,
+                "item",
+                json!({"caller": {"type": "direct"}, "namespace": "ns_1"}),
+            ),
+        ContentBlock::text("b")
+            .with_extra(F, "id", "msg_1")
+            .with_extra(
+                F,
+                "item",
+                json!({"caller": {"type": "program"}, "namespace": "ns_1"}),
+            ),
+    ]);
+    let built = build(&Request::with_messages(vec![msg]));
+    let conflicts: Vec<_> = built
+        .warnings
+        .iter()
+        .filter(|w| w.code == WarningCode::ExtraDropped)
+        .collect();
+    assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+    assert_eq!(conflicts[0].location, "/input/0/caller");
+    let body = body_of(&built);
+    assert_eq!(body["input"][0]["caller"], json!({"type": "direct"}));
+    assert_eq!(body["input"][0]["namespace"], json!("ns_1"));
+}
+
+#[test]
+fn mismatched_shell_splits_with_item_boundary_lost() {
+    // An unknown-part shell whose recorded identity matches neither
+    // neighbour serializes as its own item (marker stripped, identity
+    // restored) and warns.
+    let mut shell = json!({"type": "message", "role": "assistant",
+        "content": [{"type": "output_audio", "audio": "QUJD"}]});
+    shell[llm_api::formats::openai_responses::OPAQUE_SHELL_MARKER] = json!({"id": "msg_2"});
+    let msg = Message::assistant(vec![
+        ContentBlock::text("a").with_extra(F, "id", "msg_1"),
+        ContentBlock::opaque(F, shell),
+        ContentBlock::text("b").with_extra(F, "id", "msg_1"),
+    ]);
+    let built = build(&Request::with_messages(vec![msg]));
+    let body = body_of(&built);
+    let input = body["input"].as_array().unwrap();
+    assert_eq!(input.len(), 3, "{input:?}");
+    assert_eq!(input[0]["id"], json!("msg_1"));
+    assert_eq!(
+        input[1],
+        json!({"type": "message", "role": "assistant", "id": "msg_2",
+               "content": [{"type": "output_audio", "audio": "QUJD"}]})
+    );
+    assert_eq!(input[2]["id"], json!("msg_1"));
+    let w = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::ItemBoundaryLost)
+        .expect("mismatched shell warns");
+    assert_eq!(w.severity, WarningSeverity::Semantic);
+    assert_eq!(w.location, "/input/1");
+}
+
+#[test]
+fn marker_less_user_opaque_replays_verbatim_as_top_level_item() {
+    // A hand-built own-format Opaque without the internal marker keeps
+    // the verbatim contract: it flushes the group and serializes as a
+    // top-level item, never inlined.
+    let user_item = json!({"type": "message", "role": "assistant", "id": "msg_1",
+        "content": [{"type": "output_audio", "audio": "QUJD"}]});
+    let msg = Message::assistant(vec![
+        ContentBlock::text("a").with_extra(F, "id", "msg_1"),
+        ContentBlock::opaque(F, user_item.clone()),
+        ContentBlock::text("b").with_extra(F, "id", "msg_1"),
+    ]);
+    let built = build(&Request::with_messages(vec![msg]));
+    let body = body_of(&built);
+    let input = body["input"].as_array().unwrap();
+    assert_eq!(input.len(), 3, "{input:?}");
+    assert_eq!(input[1], user_item);
+    assert!(
+        !built
+            .warnings
+            .iter()
+            .any(|w| w.code == WarningCode::ItemBoundaryLost)
+    );
 }
 
 #[test]

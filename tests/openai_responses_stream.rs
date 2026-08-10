@@ -449,8 +449,9 @@ fn post_terminal_frames_are_gated() {
 #[test]
 fn unknown_message_part_wraps_into_item_shell_and_replays() {
     // An unmodeled content part becomes an Opaque wrapping the part in a
-    // minimal `message` item shell, so replaying the collected message
-    // re-emits a valid top-level item instead of a bare part.
+    // `message` item shell that records the item identity under the
+    // internal marker; replaying the collected message re-emits a valid
+    // item with the identity restored and the marker stripped.
     let part = json!({"type": "output_audio", "audio": "QUJD", "format": "wav"});
     let item = json!({"id": "msg_1", "type": "message", "role": "assistant",
                       "status": "completed", "content": [part.clone()]});
@@ -470,7 +471,9 @@ fn unknown_message_part_wraps_into_item_shell_and_replays() {
     assert!(warnings.is_empty(), "{warnings:?}");
     assert!(finish.is_ok());
 
-    let shell = json!({"type": "message", "role": "assistant", "content": [part]});
+    let mut shell = json!({"type": "message", "role": "assistant", "content": [part.clone()]});
+    shell[llm_api::formats::openai_responses::OPAQUE_SHELL_MARKER] =
+        json!({"id": "msg_1", "status": "completed"});
     let resp = accumulate(&events);
     let ContentBlock::Opaque { value, .. } = &resp.message.content[0] else {
         panic!("expected opaque block, got {:?}", resp.message.content);
@@ -486,7 +489,157 @@ fn unknown_message_part_wraps_into_item_shell_and_replays() {
     )
     .unwrap();
     assert!(build_warnings.is_empty(), "{build_warnings:?}");
-    assert_eq!(body["input"], json!([shell]));
+    // Identity restored onto the item; the internal marker never
+    // reaches the wire.
+    assert_eq!(
+        body["input"],
+        json!([{"type": "message", "role": "assistant", "id": "msg_1",
+                "status": "completed", "content": [part]}])
+    );
+}
+
+#[test]
+fn shell_between_same_item_texts_reinlines_into_one_item() {
+    // Text + unknown part + Text of one wire item: the shell's recorded
+    // identity matches the neighbouring blocks, so the parts re-inline
+    // and the original item comes back whole — no split, no duplicate
+    // ids, no warnings.
+    let done_item = json!({"id": "msg_1", "type": "message", "role": "assistant",
+    "status": "completed", "content": [
+        {"type": "output_text", "text": "a", "annotations": []},
+        {"type": "output_audio", "audio": "QUJD"},
+        {"type": "output_text", "text": "b", "annotations": []},
+    ]});
+    let (events, warnings, finish) = feed_frames(&[
+        json!({"type": "response.created", "response":
+               {"id": "resp_i1", "model": "gpt-5.1", "status": "in_progress", "output": []}}),
+        json!({"type": "response.output_item.added", "output_index": 0,
+               "item": {"id": "msg_1", "type": "message", "role": "assistant",
+                        "status": "in_progress", "content": []}}),
+        json!({"type": "response.content_part.added", "item_id": "msg_1", "output_index": 0,
+               "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": []}}),
+        json!({"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0,
+               "content_index": 0, "delta": "a"}),
+        json!({"type": "response.content_part.added", "item_id": "msg_1", "output_index": 0,
+               "content_index": 1, "part": {"type": "output_audio", "audio": "QUJD"}}),
+        json!({"type": "response.content_part.added", "item_id": "msg_1", "output_index": 0,
+               "content_index": 2, "part": {"type": "output_text", "text": "", "annotations": []}}),
+        json!({"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0,
+               "content_index": 2, "delta": "b"}),
+        json!({"type": "response.output_item.done", "output_index": 0, "item": done_item.clone()}),
+        json!({"type": "response.completed", "response":
+               {"id": "resp_i1", "status": "completed", "output": [done_item],
+                "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}}}),
+    ]);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(finish.is_ok());
+
+    let resp = accumulate(&events);
+    assert_eq!(resp.message.content.len(), 3);
+
+    let req = Request::with_messages(vec![resp.message.clone()]);
+    let (body, build_warnings) = request_from_ir(
+        &req,
+        Some("gpt-5.1"),
+        CallMode::Unary,
+        &ConvertOptions::default(),
+    )
+    .unwrap();
+    assert!(build_warnings.is_empty(), "{build_warnings:?}");
+    assert_eq!(
+        body["input"],
+        json!([{
+            "type": "message", "role": "assistant", "id": "msg_1", "status": "completed",
+            "content": [
+                {"type": "output_text", "text": "a", "annotations": []},
+                {"type": "output_audio", "audio": "QUJD"},
+                {"type": "output_text", "text": "b", "annotations": []},
+            ],
+        }])
+    );
+}
+
+#[test]
+fn id_less_stream_shell_inlines_with_id_less_texts() {
+    // Defensive id-less stream (no item id, no output_item.done): the
+    // shell records an empty identity and the Text blocks carry none —
+    // both group keys are empty, so the parts still form one item.
+    let (events, warnings, finish) = feed_frames(&[
+        json!({"type": "response.created", "response":
+               {"id": "resp_n1", "model": "gpt-5.1", "status": "in_progress", "output": []}}),
+        json!({"type": "response.output_item.added", "output_index": 0,
+               "item": {"type": "message", "role": "assistant", "content": []}}),
+        json!({"type": "response.content_part.added", "output_index": 0,
+               "content_index": 0, "part": {"type": "output_audio", "audio": "QUJD"}}),
+        json!({"type": "response.content_part.added", "output_index": 0,
+               "content_index": 1, "part": {"type": "output_text", "text": "", "annotations": []}}),
+        json!({"type": "response.output_text.delta", "output_index": 0,
+               "content_index": 1, "delta": "x"}),
+        json!({"type": "response.completed", "response":
+               {"id": "resp_n1", "status": "completed", "output": [],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}}),
+    ]);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(finish.is_ok());
+
+    let resp = accumulate(&events);
+    assert_eq!(resp.message.content.len(), 2);
+
+    let req = Request::with_messages(vec![resp.message.clone()]);
+    let (body, build_warnings) = request_from_ir(
+        &req,
+        Some("gpt-5.1"),
+        CallMode::Unary,
+        &ConvertOptions::default(),
+    )
+    .unwrap();
+    assert!(build_warnings.is_empty(), "{build_warnings:?}");
+    assert_eq!(
+        body["input"],
+        json!([{
+            "type": "message", "role": "assistant",
+            "content": [
+                {"type": "output_audio", "audio": "QUJD"},
+                {"type": "output_text", "text": "x", "annotations": []},
+            ],
+        }])
+    );
+}
+
+#[test]
+fn terminal_out_of_order_synthesis_warns_block_order_lost() {
+    // A snapshot-only item placed before already-streamed content can
+    // only be appended after it (block indices are final): one
+    // BlockOrderLost warning per terminal.
+    let done_item = json!({"id": "msg_b", "type": "message", "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "streamed", "annotations": []}]});
+    let missed_item = json!({"id": "msg_a", "type": "message", "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "first", "annotations": []}]});
+    let (events, warnings, finish) = feed_frames(&[
+        json!({"type": "response.created", "response":
+               {"id": "resp_o1", "model": "gpt-5.1", "status": "in_progress", "output": []}}),
+        json!({"type": "response.output_item.added", "output_index": 1,
+               "item": {"id": "msg_b", "type": "message", "role": "assistant",
+                        "status": "in_progress", "content": []}}),
+        json!({"type": "response.output_item.done", "output_index": 1, "item": done_item.clone()}),
+        json!({"type": "response.completed", "response":
+               {"id": "resp_o1", "status": "completed",
+                "output": [missed_item, done_item],
+                "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}}}),
+    ]);
+    assert!(finish.is_ok());
+    let order: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.code == WarningCode::BlockOrderLost)
+        .collect();
+    assert_eq!(order.len(), 1, "{warnings:?}");
+    assert_eq!(order[0].location, "/output/0");
+
+    // The synthesized item's text follows the streamed one.
+    let resp = accumulate(&events);
+    assert_eq!(resp.text(), "streamedfirst");
 }
 
 #[test]

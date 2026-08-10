@@ -12,12 +12,14 @@
 //!
 //! An unmodeled *content part* of a `message` item becomes an `Opaque`
 //! block wrapping the part in a minimal assistant `message` item shell
-//! (no `id`/`status`), so replaying the collected message re-emits a
-//! valid top-level item. This is the stream-side counterpart of the
-//! non-streaming rule "an item with an unmodeled part stays whole as
-//! `Opaque`" — the stream may already have emitted sibling parts as
-//! `Text` blocks, so only the part itself can be kept, at the cost of
-//! the original item boundary.
+//! that records the originating item's identity under the internal
+//! [`super::OPAQUE_SHELL_MARKER`] key. This is the stream-side
+//! counterpart of the non-streaming rule "an item with an unmodeled part
+//! stays whole as `Opaque`" — the stream may already have emitted
+//! sibling parts as `Text` blocks, so only the part itself can be kept.
+//! On serialization a shell whose identity matches the adjacent `Text`
+//! blocks re-inlines its parts into their `message` item, restoring the
+//! original item boundary; the marker itself never reaches the wire.
 //!
 //! Terminal events (`response.completed` / `response.incomplete`) carry
 //! the full final Response. Items still open at that point reconcile
@@ -127,15 +129,52 @@ pub struct ResponsesStreamParser {
 }
 
 /// Wraps an unmodeled message content part into a minimal assistant
-/// `message` item shell so the resulting `Opaque` block re-serializes as
-/// a valid top-level input item (module docs). The shell carries no
-/// `id`/`status`: they belong to the original item, whose other parts
-/// may re-serialize as their own `message` item.
-fn wrap_unknown_part(part: &Value) -> ContentBlock {
-    ContentBlock::opaque(
-        FORMAT,
-        json!({"type": "message", "role": "assistant", "content": [part.clone()]}),
-    )
+/// `message` item shell (module docs). `identity` is the originating
+/// item's identity — `id` / `status` / `phase` plus unknown item fields
+/// nested under `item`, mirroring the reserved-key layout of assistant
+/// `Text` blocks — recorded under the internal
+/// [`super::OPAQUE_SHELL_MARKER`] key so serialization can re-inline the
+/// part into its original item (the marker never reaches the wire).
+fn wrap_unknown_part(part: &Value, identity: Map<String, Value>) -> ContentBlock {
+    let mut shell = json!({"type": "message", "role": "assistant", "content": [part.clone()]});
+    shell[super::OPAQUE_SHELL_MARKER] = Value::Object(identity);
+    ContentBlock::opaque(FORMAT, shell)
+}
+
+/// Extracts the item identity recorded on unknown-part shells from a
+/// final `message` item value: `id` / `status` / `phase` directly,
+/// unknown item-level fields nested under `item` (null fields drop, § 1)
+/// — the same layout `AssistantItemMeta` gives the sibling `Text`
+/// blocks, so shell and blocks agree on the item identity.
+fn item_identity(item: &Value) -> Map<String, Value> {
+    let mut identity = Map::new();
+    let mut unknown = Map::new();
+    let Some(obj) = item.as_object() else {
+        return identity;
+    };
+    for (key, value) in obj {
+        if value.is_null() {
+            continue;
+        }
+        match key.as_str() {
+            "type" | "role" | "content" => {}
+            super::text_block_reserved_key::ID
+            | super::text_block_reserved_key::STATUS
+            | super::text_block_reserved_key::PHASE => {
+                identity.insert(key.clone(), value.clone());
+            }
+            _ => {
+                unknown.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    if !unknown.is_empty() {
+        identity.insert(
+            super::text_block_reserved_key::ITEM.to_owned(),
+            Value::Object(unknown),
+        );
+    }
+    identity
 }
 
 impl ResponsesStreamParser {
@@ -330,7 +369,10 @@ impl ResponsesStreamParser {
                 cache: None,
                 extra: Extra::from_unknown(FORMAT, ns),
             },
-            _ => wrap_unknown_part(&part),
+            // `ns` holds the announced item identity known so far (the
+            // item id); the finalized shell replaces it with the full
+            // identity at `output_item.done`.
+            _ => wrap_unknown_part(&part, ns),
         };
         let index = self.alloc_index();
         let state = self.items.entry(idx).or_insert_with(|| ItemState::Message {
@@ -608,7 +650,7 @@ impl ResponsesStreamParser {
                         .or(part_state.final_part.as_ref());
                     let block = source.map(|p| {
                         let block = to_ir::assistant_text_block_from_part(p, &meta)
-                            .unwrap_or_else(|| wrap_unknown_part(p));
+                            .unwrap_or_else(|| wrap_unknown_part(p, item_identity(item)));
                         fold_annotations(block, &part_state.annotations)
                     });
                     events.push(StreamEvent::BlockStop {
@@ -621,7 +663,7 @@ impl ResponsesStreamParser {
                         continue;
                     }
                     let block = to_ir::assistant_text_block_from_part(part, &meta)
-                        .unwrap_or_else(|| wrap_unknown_part(part));
+                        .unwrap_or_else(|| wrap_unknown_part(part, item_identity(item)));
                     let index = self.alloc_index();
                     events.push(StreamEvent::BlockStart {
                         index,
@@ -758,9 +800,23 @@ impl ResponsesStreamParser {
         // Open items absent from the snapshot: the accumulated content
         // stands.
         self.close_open_blocks(events);
+        let max_seen = self.seen_items.iter().next_back().copied();
+        let mut order_warned = false;
         for (pos, item) in snapshot.iter().enumerate() {
             if consumed.contains(&pos) || self.announced(pos, item) {
                 continue;
+            }
+            // Block indices are already allocated in arrival order, so an
+            // item the snapshot places before already-streamed content can
+            // only be appended after it.
+            if !order_warned && max_seen.is_some_and(|m| u64::try_from(pos).is_ok_and(|p| p < m)) {
+                order_warned = true;
+                warnings.push(warn(
+                    WarningCode::BlockOrderLost,
+                    format!("/output/{pos}"),
+                    "item synthesized from the terminal snapshot out of arrival order; \
+                     its blocks follow the already-streamed content",
+                ));
             }
             self.synthesize_item(item, &format!("/output/{pos}"), events, warnings);
         }

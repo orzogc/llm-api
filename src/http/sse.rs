@@ -44,7 +44,9 @@ impl SseEvent {
 /// data, the unfinished line) — not the instantaneous peak, which also
 /// spans the chunk currently being pushed: the caller chooses chunk
 /// granularity, and the transport's own allocation of that chunk is
-/// outside the parser's control.
+/// outside the parser's control. A cap error discards the buffered input
+/// and the half-built event (the error's `prefix` is the only retained
+/// copy); subsequent pushes start at a fresh line boundary.
 #[derive(Debug)]
 pub struct SseParser {
     max_event: usize,
@@ -72,8 +74,21 @@ impl SseParser {
         }
     }
 
-    /// Feeds bytes; returns the events completed by them.
+    /// Feeds bytes; returns the events completed by them. On error the
+    /// events already parsed from this push are dropped; the
+    /// crate-internal `SseParser::push_partial` keeps them.
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<SseEvent>, Error> {
+        match self.push_partial(bytes) {
+            (events, None) => Ok(events),
+            (_, Some(e)) => Err(e),
+        }
+    }
+
+    /// Like [`SseParser::push`], but also delivers the events parsed
+    /// before an error together with it — a protocol terminator fused
+    /// into the same chunk as an oversized frame must still reach the
+    /// stream parser (§ 9).
+    pub(crate) fn push_partial(&mut self, bytes: &[u8]) -> (Vec<SseEvent>, Option<Error>) {
         self.buf.extend_from_slice(bytes);
         // Strip a single leading UTF-8 BOM (spec: only at the very start of
         // the stream; a BOM anywhere else is content). Decided by prefix
@@ -111,21 +126,50 @@ impl SseParser {
         // delivery trips this guard before the line completes while a
         // single-chunk push parses it whole — conservative, and required
         // for flood protection.
-        let events = self.drain_lines(false)?;
-        self.check_cap()?;
-        Ok(events)
+        let (events, failed) = self.drain_lines(false);
+        if let Some(e) = failed {
+            return (events, Some(self.fail_reset(e)));
+        }
+        if let Err(e) = self.check_cap() {
+            return (events, Some(self.fail_reset(e)));
+        }
+        (events, None)
     }
 
     /// Signals end of stream. Complete trailing lines are processed; an
     /// unterminated partial line — and any half-built event — is discarded,
     /// per spec (protocol-level truncation detection is the stream parser's
-    /// job, § 11).
+    /// job, § 11). On error the events already parsed are dropped; the
+    /// crate-internal `SseParser::finish_partial` keeps them.
     pub fn finish(&mut self) -> Result<Vec<SseEvent>, Error> {
-        let events = self.drain_lines(true)?;
+        match self.finish_partial() {
+            (events, None) => Ok(events),
+            (_, Some(e)) => Err(e),
+        }
+    }
+
+    /// Like [`SseParser::finish`], but also delivers the events parsed
+    /// before an error together with it.
+    pub(crate) fn finish_partial(&mut self) -> (Vec<SseEvent>, Option<Error>) {
+        let (events, failed) = self.drain_lines(true);
+        if let Some(e) = failed {
+            return (events, Some(self.fail_reset(e)));
+        }
         self.buf.clear();
         self.data.clear();
         self.event = None;
-        Ok(events)
+        (events, None)
+    }
+
+    /// Applies the post-error contract: buffered input and the half-built
+    /// event are discarded — the error's `prefix` is the only retained
+    /// copy — so subsequent pushes start at a fresh line boundary. `id`
+    /// and `retry` persist, as they do across [`SseParser::finish`].
+    fn fail_reset(&mut self, error: Error) -> Error {
+        self.buf = Vec::new();
+        self.data = String::new();
+        self.event = None;
+        error
     }
 
     fn check_cap(&self) -> Result<(), Error> {
@@ -177,77 +221,57 @@ impl SseParser {
     /// The `BodyTooLarge` error for an over-cap `data:` line, built
     /// without materializing the oversized joined data: byte-for-byte
     /// what [`SseParser::check_cap`] would produce after the copy —
-    /// `prefix` carries at most `limit` bytes of the longer of the
-    /// prospective joined data and the unfinished raw line.
-    fn data_cap_error(&self, value: &str, tail: &[u8]) -> Error {
+    /// `prefix` carries the first `limit` bytes of the prospective joined
+    /// data (the pending trailing `\n` never enters:
+    /// `max_event < final_len` holds when this is called).
+    fn data_cap_error(&self, value: &str) -> Error {
         let final_len = self.data.len() + value.len();
-        let prefix = if final_len >= tail.len() {
-            // The first `max_event` bytes of `data + value`; the pending
-            // trailing `\n` never enters (`max_event < final_len` holds
-            // in this branch).
-            let end = self.max_event.min(final_len);
-            let from_data = end.min(self.data.len());
-            let mut prefix = Vec::with_capacity(end);
-            prefix.extend_from_slice(&self.data.as_bytes()[..from_data]);
-            prefix.extend_from_slice(&value.as_bytes()[..end - from_data]);
-            bytes::Bytes::from(prefix)
-        } else {
-            bytes::Bytes::copy_from_slice(&tail[..self.max_event.min(tail.len())])
-        };
+        let end = self.max_event.min(final_len);
+        let from_data = end.min(self.data.len());
+        let mut prefix = Vec::with_capacity(end);
+        prefix.extend_from_slice(&self.data.as_bytes()[..from_data]);
+        prefix.extend_from_slice(&value.as_bytes()[..end - from_data]);
         Error::BodyTooLarge {
             kind: BodyKind::SseEvent,
             limit: self.max_event,
             status: None,
             headers: None,
-            prefix,
+            prefix: bytes::Bytes::from(prefix),
         }
     }
 
-    fn drain_lines(&mut self, eof: bool) -> Result<Vec<SseEvent>, Error> {
-        // Locate the end of the complete-lines region first: the data
-        // arm's cap check must see exactly the unfinished tail that will
-        // remain in `buf` — never the bytes of lines still queued for
-        // processing — so one chunk carrying several small events cannot
-        // trip the cap.
-        let mut tail_start = 0;
-        while let Some((_, next)) = next_line(&self.buf, tail_start, eof) {
-            tail_start = next;
-        }
-        // Process lines straight out of the taken buffer: no staging
-        // copies (only an invalid-UTF-8 line allocates, for the lossy
-        // replacement). The buffer is moved back afterwards — on error
-        // too — with the processed region drained, leaving the tail.
+    fn drain_lines(&mut self, eof: bool) -> (Vec<SseEvent>, Option<Error>) {
+        // Process complete lines straight out of the taken buffer: no
+        // staging copies (only an invalid-UTF-8 line allocates, for the
+        // lossy replacement). On success the buffer is moved back with
+        // the processed region drained, leaving the unfinished tail; on
+        // error it is dropped — the events parsed so far are still
+        // returned, and the caller's `fail_reset` discards the rest.
         let owned = std::mem::take(&mut self.buf);
         let mut events = Vec::new();
         let mut failed = None;
-        {
-            let (head, tail) = owned.split_at(tail_start);
-            let mut pos = 0;
-            while let Some((range, next)) = next_line(head, pos, eof) {
-                pos = next;
-                let line = String::from_utf8_lossy(&head[range]);
-                match self.process_line(&line, tail) {
-                    Ok(Some(event)) => events.push(event),
-                    Ok(None) => {}
-                    Err(e) => {
-                        failed = Some(e);
-                        break;
-                    }
+        let mut pos = 0;
+        while let Some((range, next)) = next_line(&owned, pos, eof) {
+            pos = next;
+            let line = String::from_utf8_lossy(&owned[range]);
+            match self.process_line(&line) {
+                Ok(Some(event)) => events.push(event),
+                Ok(None) => {}
+                Err(e) => {
+                    failed = Some(e);
+                    break;
                 }
             }
         }
-        self.buf = owned;
-        self.buf.drain(..tail_start);
-        match failed {
-            Some(e) => Err(e),
-            None => Ok(events),
+        if failed.is_none() {
+            self.buf = owned;
+            self.buf.drain(..pos);
         }
+        (events, failed)
     }
 
-    /// Processes one complete line. `tail` is the unfinished raw line
-    /// that will remain buffered after this drain — the flood-guard half
-    /// of the data arm's cap check.
-    fn process_line(&mut self, line: &str, tail: &[u8]) -> Result<Option<SseEvent>, Error> {
+    /// Processes one complete line.
+    fn process_line(&mut self, line: &str) -> Result<Option<SseEvent>, Error> {
         if line.is_empty() {
             // Dispatch. Per spec: no dispatch when the data buffer is
             // empty; the event type buffer still resets.
@@ -281,9 +305,13 @@ impl SseParser {
                 // event would be `data.len() + value.len()` bytes.
                 // Checked *before* copying: an over-cap value never
                 // inflates `data`, and the error is byte-identical to the
-                // post-copy check it replaces.
-                if (self.data.len() + value.len()).max(tail.len()) > self.max_event {
-                    return Err(self.data_cap_error(value, tail));
+                // post-copy check it replaces. The unfinished tail is
+                // deliberately not consulted here — the flood guard at
+                // the end of the push covers it — so events completed by
+                // a chunk still parse ahead of a trailing flood and reach
+                // `push_partial` callers.
+                if self.data.len() + value.len() > self.max_event {
+                    return Err(self.data_cap_error(value));
                 }
                 self.data.push_str(value);
                 self.data.push('\n');
@@ -778,9 +806,9 @@ mod tests {
     #[test]
     fn size_cap_flood_tail_fails_push_despite_complete_events() {
         // A chunk carrying a small complete event followed by an over-cap
-        // unfinished line: the whole push fails (no partial event
-        // delivery) and the prefix comes from the raw tail — the longer
-        // of the two guarded buffers.
+        // unfinished line: the public `push` fails (its events are
+        // dropped; `push_partial` keeps them) and the prefix comes from
+        // the raw tail via the end-of-push flood guard.
         let mut p = SseParser::new(8);
         let mut input = b"data:a\n\n".to_vec();
         input.extend_from_slice(&[b'x'; 20]);
@@ -801,5 +829,115 @@ mod tests {
         let events = p.push(b"data: h\xFFi\n\n").unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "h\u{FFFD}i");
+    }
+
+    /// Asserts the post-error contract: nothing buffered remains (the
+    /// flood allocation is dropped, not merely truncated) and a clean
+    /// event parses from a fresh line boundary.
+    fn assert_reset_and_recovered(p: &mut SseParser) {
+        assert_eq!(p.buf.capacity(), 0, "buffered input must be discarded");
+        assert!(p.data.is_empty(), "half-built event data must be discarded");
+        assert!(p.event.is_none(), "half-built event type must be discarded");
+        let events = p
+            .push(b"data: ok\n\n")
+            .expect("clean push parses after reset");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "ok");
+    }
+
+    #[test]
+    fn cap_error_discards_flood_buffer_and_recovers() {
+        // Flood-guard path: a no-newline chunk far over the cap. The
+        // error's prefix is built before the reset and is unaffected.
+        let mut p = SseParser::new(8);
+        let err = p.push(&vec![b'a'; 100 * 1024]).unwrap_err();
+        match err {
+            Error::BodyTooLarge { prefix, limit, .. } => {
+                assert_eq!(limit, 8);
+                assert_eq!(&prefix[..], &[b'a'; 8]);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert_reset_and_recovered(&mut p);
+    }
+
+    #[test]
+    fn cap_error_discards_tail_flood_after_events_and_recovers() {
+        // Complete event + over-cap unfinished tail in one push: the
+        // flood guard trips at the end of the push; the retained state is
+        // discarded all the same.
+        let mut p = SseParser::new(8);
+        let mut input = b"data:a\n\n".to_vec();
+        input.extend_from_slice(&vec![b'x'; 50 * 1024]);
+        let err = p.push(&input).unwrap_err();
+        match err {
+            Error::BodyTooLarge { prefix, .. } => assert_eq!(&prefix[..], &[b'x'; 8]),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert_reset_and_recovered(&mut p);
+    }
+
+    #[test]
+    fn cap_error_discards_data_state_and_recovers() {
+        // Data pre-check path: a complete oversized `data:` line. The
+        // over-cap value never entered `data`; the reset still applies.
+        let mut p = SseParser::new(8);
+        let line = format!("data: {}\n\n", "b".repeat(64));
+        let err = p.push(line.as_bytes()).unwrap_err();
+        match err {
+            Error::BodyTooLarge { prefix, .. } => assert_eq!(&prefix[..], &[b'b'; 8]),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert_reset_and_recovered(&mut p);
+    }
+
+    #[test]
+    fn finish_cap_error_resets_too() {
+        // A trailing `\r` becomes a line terminator only at EOF, so the
+        // joined data first exceeds the cap inside `finish`: it fails and
+        // applies the same reset.
+        let mut p = SseParser::new(11);
+        assert!(p.push(b"data:abcdefgh\n").unwrap().is_empty());
+        assert!(p.push(b"data:abc\r").unwrap().is_empty());
+        let err = p.finish().unwrap_err();
+        assert!(matches!(
+            err,
+            Error::BodyTooLarge {
+                kind: BodyKind::SseEvent,
+                limit: 11,
+                ..
+            }
+        ));
+        assert_eq!(p.buf.capacity(), 0);
+        assert!(p.data.is_empty());
+    }
+
+    #[test]
+    fn push_partial_delivers_events_parsed_before_error() {
+        // A complete terminator-style event fused with a complete
+        // oversized frame: the parsed event rides alongside the error.
+        let mut p = SseParser::new(20);
+        let mut input = b"data: [DONE]\n\n".to_vec();
+        input.extend_from_slice(format!("data: {}\n\n", "y".repeat(64)).as_bytes());
+        let (events, err) = p.push_partial(&input);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "[DONE]");
+        assert!(matches!(err, Some(Error::BodyTooLarge { .. })));
+
+        // Fused with an over-cap unfinished flood instead: the complete
+        // event still parses ahead of the end-of-push flood guard.
+        let mut p = SseParser::new(20);
+        let mut input = b"data: [DONE]\n\n".to_vec();
+        input.extend_from_slice(&[b'x'; 64]);
+        let (events, err) = p.push_partial(&input);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "[DONE]");
+        assert!(matches!(err, Some(Error::BodyTooLarge { .. })));
+
+        // The public wrapper drops the events, unchanged.
+        let mut p = SseParser::new(20);
+        let mut input = b"data: [DONE]\n\n".to_vec();
+        input.extend_from_slice(&[b'x'; 64]);
+        assert!(p.push(&input).is_err());
     }
 }

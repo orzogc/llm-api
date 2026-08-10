@@ -10,7 +10,7 @@ use crate::error::{ConversionError, Result};
 use crate::format::{CallMode, to_data_url};
 use crate::ir::{
     CacheHint, ContentBlock, Effort, Extra, ImageSource, MergeLog, Message, OutputFormat,
-    Reasoning, Request, Role, Tool, ToolChoice, ToolOutputBlock, merge_patch,
+    Reasoning, Request, Role, Tool, ToolChoice, ToolOutputBlock, escape_pointer_token, merge_patch,
 };
 
 use super::FORMAT;
@@ -514,8 +514,17 @@ fn build_input_message_item(
 /// id-less items with differing metadata keep their boundaries, while
 /// metadata-free ones still merge (the documented normalization).
 fn item_group_key(extra: &Extra) -> [Option<Value>; 4] {
-    let ns = extra.get(FORMAT);
-    let get = |key: &str| ns.and_then(|ns| ns.get(key)).cloned();
+    match extra.get(FORMAT) {
+        Some(ns) => identity_group_key(ns),
+        None => Default::default(),
+    }
+}
+
+/// The grouping key of a reserved-key identity map (a block's format
+/// namespace, or a shell's recorded identity) — see [`item_group_key`]
+/// for the id-vs-metadata rule.
+fn identity_group_key(identity: &Map<String, Value>) -> [Option<Value>; 4] {
+    let get = |key: &str| identity.get(key).cloned();
     let id = get(text_block_reserved_key::ID);
     if id.is_some() {
         [id, None, None, None]
@@ -526,6 +535,59 @@ fn item_group_key(extra: &Extra) -> [Option<Value>; 4] {
             get(text_block_reserved_key::PHASE),
             get(text_block_reserved_key::ITEM),
         ]
+    }
+}
+
+/// One member of an assistant `message` item group.
+enum GroupEntry<'a> {
+    /// A `Text` block of the item.
+    Text(&'a ContentBlock),
+    /// An inlined unknown-part shell: its content parts re-serialize
+    /// verbatim, in place, inside the item.
+    Shell {
+        /// The shell's content parts.
+        parts: Vec<Value>,
+        /// The shell's recorded item identity (reserved-key layout).
+        identity: Map<String, Value>,
+    },
+}
+
+/// Splits an own-format `Opaque` value carrying the internal
+/// [`super::OPAQUE_SHELL_MARKER`] into its content parts and recorded
+/// item identity. Returns `None` for marker-less values — user-built
+/// opaques replay verbatim as top-level items. The marker is consumed
+/// here; it never reaches the wire.
+fn shell_parts_and_identity(value: &Value) -> Option<(Vec<Value>, Map<String, Value>)> {
+    let marker = value.get(super::OPAQUE_SHELL_MARKER)?;
+    let identity = marker.as_object().cloned().unwrap_or_default();
+    let parts = value
+        .get("content")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Some((parts, identity))
+}
+
+/// Writes a recorded item identity onto a wire item: `id` / `status` /
+/// `phase` directly, the `item` key expanding its nested unknown fields.
+/// Plain inserts — item-level fields are parse-side restoration, not
+/// user `extra`, so they must not enter the merge log (a conflict
+/// warning located at such a field would otherwise mark itself
+/// overridden).
+fn apply_identity(item: &mut Value, identity: &Map<String, Value>) {
+    let Some(obj) = item.as_object_mut() else {
+        return;
+    };
+    for (key, value) in identity {
+        if key == text_block_reserved_key::ITEM {
+            if let Value::Object(fields) = value {
+                for (field, fv) in fields {
+                    obj.insert(field.clone(), fv.clone());
+                }
+            }
+        } else {
+            obj.insert(key.clone(), value.clone());
+        }
     }
 }
 
@@ -541,12 +603,13 @@ fn build_assistant_items(
     log: &mut MergeLog,
 ) -> Result<()> {
     let first_item = items.len();
-    // Consecutive Text blocks with the same item-identity key (see
-    // `item_group_key`) group into one assistant `message` item.
-    let mut text_group: Vec<&ContentBlock> = Vec::new();
+    // Consecutive Text blocks (and inlined unknown-part shells) with the
+    // same item-identity key (see `item_group_key`) group into one
+    // assistant `message` item.
+    let mut text_group: Vec<GroupEntry> = Vec::new();
     let mut group_key: [Option<Value>; 4] = Default::default();
 
-    let flush = |group: &mut Vec<&ContentBlock>,
+    let flush = |group: &mut Vec<GroupEntry>,
                  items: &mut Vec<Value>,
                  pointers: &mut Vec<(String, Role)>,
                  warnings: &mut Vec<ConversionWarning>,
@@ -569,7 +632,7 @@ fn build_assistant_items(
                     flush(&mut text_group, items, pointers, warnings, log);
                 }
                 group_key = key;
-                text_group.push(block);
+                text_group.push(GroupEntry::Text(block));
             }
             ContentBlock::Thinking {
                 text,
@@ -634,17 +697,45 @@ fn build_assistant_items(
                 ));
             }
             ContentBlock::Opaque { format, value } => {
-                flush(&mut text_group, items, pointers, warnings, log);
-                if format == FORMAT {
-                    let ptr = format!("/input/{}", items.len());
-                    items.push(value.clone());
-                    pointers.push((ptr, Role::Assistant));
-                } else {
+                if format != FORMAT {
+                    flush(&mut text_group, items, pointers, warnings, log);
                     warnings.push(warn(
                         WarningCode::OpaqueDropped,
                         format!("/input/{}", items.len()),
                         format!("opaque block belongs to `{format}` and was dropped"),
                     ));
+                } else if let Some((parts, identity)) = shell_parts_and_identity(value) {
+                    let key = identity_group_key(&identity);
+                    if text_group.is_empty() || key == group_key {
+                        // The shell belongs to the current item (or
+                        // starts one): its parts re-inline in place,
+                        // restoring the original wire item.
+                        group_key = key;
+                        text_group.push(GroupEntry::Shell { parts, identity });
+                    } else {
+                        // Neighbour mismatch: the original boundary
+                        // cannot be restored — the shell becomes its own
+                        // item, marker stripped, identity written back.
+                        flush(&mut text_group, items, pointers, warnings, log);
+                        let ptr = format!("/input/{}", items.len());
+                        warnings.push(warn(
+                            WarningCode::ItemBoundaryLost,
+                            ptr.clone(),
+                            "the unknown-part shell's recorded item identity does not \
+                             match its neighbouring blocks; it serializes as a separate \
+                             item (sibling items may repeat its wire `id`)",
+                        ));
+                        let mut item =
+                            json!({"type": "message", "role": "assistant", "content": parts});
+                        apply_identity(&mut item, &identity);
+                        items.push(item);
+                        pointers.push((ptr, Role::Assistant));
+                    }
+                } else {
+                    flush(&mut text_group, items, pointers, warnings, log);
+                    let ptr = format!("/input/{}", items.len());
+                    items.push(value.clone());
+                    pointers.push((ptr, Role::Assistant));
                 }
             }
             ContentBlock::ToolResult { .. } => {
@@ -668,35 +759,104 @@ fn build_assistant_items(
     Ok(())
 }
 
-/// Builds an assistant `message` item from a run of `Text` blocks.
+/// The per-field `ExtraDropped` warning for a conflicting item-level
+/// value, located at the item-level field that kept the leading member's
+/// value (so an `extra` override addressing that field marks it
+/// overridden).
+fn item_field_dropped(item_ptr: &str, field: &str) -> ConversionWarning {
+    warn(
+        WarningCode::ExtraDropped,
+        format!("{item_ptr}/{}", escape_pointer_token(field)),
+        format!(
+            "item-level `{field}` on a non-leading member of this item conflicts \
+             with the leading member's value and was dropped"
+        ),
+    )
+}
+
+/// Inserts a leading group member's item-level field into the item patch
+/// (the `item` key expands its nested unknown fields).
+fn fill_item_patch(item_patch: &mut Map<String, Value>, key: &str, value: &Value) {
+    if key == text_block_reserved_key::ITEM {
+        if let Value::Object(fields) = value {
+            item_patch.extend(fields.clone());
+        }
+    } else {
+        item_patch.insert(key.to_owned(), value.clone());
+    }
+}
+
+/// Folds a non-leading group member's item-level field: silently equal
+/// to the leading member's, or dropped with a per-field warning (`item`
+/// compares its nested unknown fields one by one).
+fn fold_item_conflict(
+    key: &str,
+    value: &Value,
+    first_ns: &Map<String, Value>,
+    item_ptr: &str,
+    warnings: &mut Vec<ConversionWarning>,
+) {
+    if key == text_block_reserved_key::ITEM {
+        let empty = Map::new();
+        let first_item = first_ns
+            .get(text_block_reserved_key::ITEM)
+            .and_then(Value::as_object)
+            .unwrap_or(&empty);
+        if let Value::Object(fields) = value {
+            for (field, fv) in fields {
+                if first_item.get(field) != Some(fv) {
+                    warnings.push(item_field_dropped(item_ptr, field));
+                }
+            }
+        }
+    } else if first_ns.get(key) != Some(value) {
+        warnings.push(item_field_dropped(item_ptr, key));
+    }
+}
+
+/// Builds an assistant `message` item from a group of `Text` blocks and
+/// inlined unknown-part shells.
 ///
 /// Reserved keys of each block's format namespace (see the module docs)
 /// select the part shape (`refusal`) and restore item-level fields (`id`,
 /// `status`, `phase`, `item`); the remaining keys merge into the part.
-/// Item-level fields come from the first block; a later block's value
-/// that disagrees with it (possible only in id-keyed groups, i.e.
+/// Shell members contribute their content parts verbatim, in place.
+/// Item-level fields come from the leading member; a later member's
+/// value that disagrees with it (possible only in id-keyed groups, i.e.
 /// hand-built inconsistent metadata under one item id) is dropped with
-/// an `ExtraDropped` warning.
+/// an `ExtraDropped` warning located at the item-level field.
 fn build_assistant_message_item(
-    group: &[&ContentBlock],
+    group: &[GroupEntry],
     item_ptr: &str,
     warnings: &mut Vec<ConversionWarning>,
     log: &mut MergeLog,
 ) -> Value {
     let mut content: Vec<Value> = Vec::new();
     let mut item_patch = Map::new();
-    let first_ns = group
-        .first()
-        .and_then(|b| match b {
-            ContentBlock::Text { extra, .. } => extra.get(FORMAT).cloned(),
-            _ => None,
-        })
-        .unwrap_or_default();
-    for (pi, block) in group.iter().enumerate() {
-        let ContentBlock::Text { text, cache, extra } = block else {
-            continue;
+    let first_ns: Map<String, Value> = match group.first() {
+        Some(GroupEntry::Text(ContentBlock::Text { extra, .. })) => {
+            extra.get(FORMAT).cloned().unwrap_or_default()
+        }
+        Some(GroupEntry::Shell { identity, .. }) => identity.clone(),
+        _ => Map::new(),
+    };
+    for (gi, entry) in group.iter().enumerate() {
+        let (text, cache, extra) = match entry {
+            GroupEntry::Shell { parts, identity } => {
+                for (key, value) in identity {
+                    if gi == 0 {
+                        fill_item_patch(&mut item_patch, key, value);
+                    } else {
+                        fold_item_conflict(key, value, &first_ns, item_ptr, warnings);
+                    }
+                }
+                content.extend(parts.iter().cloned());
+                continue;
+            }
+            GroupEntry::Text(ContentBlock::Text { text, cache, extra }) => (text, cache, extra),
+            GroupEntry::Text(_) => continue,
         };
-        let part_ptr = format!("{item_ptr}/content/{pi}");
+        let part_ptr = format!("{item_ptr}/content/{}", content.len());
         let ns = extra.get(FORMAT).cloned().unwrap_or_default();
         if cache.is_some() {
             warnings.push(warn(
@@ -721,23 +881,10 @@ fn build_assistant_message_item(
                 | text_block_reserved_key::STATUS
                 | text_block_reserved_key::PHASE
                 | text_block_reserved_key::ITEM => {
-                    if pi == 0 {
-                        if key == text_block_reserved_key::ITEM {
-                            if let Value::Object(fields) = value {
-                                item_patch.extend(fields.clone());
-                            }
-                        } else {
-                            item_patch.insert(key.clone(), value.clone());
-                        }
-                    } else if first_ns.get(key) != Some(value) {
-                        warnings.push(warn(
-                            WarningCode::ExtraDropped,
-                            part_ptr.clone(),
-                            format!(
-                                "item-level `{key}` on a non-leading block of this item \
-                                 conflicts with the first block's value and was dropped"
-                            ),
-                        ));
+                    if gi == 0 {
+                        fill_item_patch(&mut item_patch, key, value);
+                    } else {
+                        fold_item_conflict(key, value, &first_ns, item_ptr, warnings);
                     }
                 }
                 text_block_reserved_key::REFUSAL => {}
@@ -750,7 +897,13 @@ fn build_assistant_message_item(
         content.push(part);
     }
     let mut item = json!({"type": "message", "role": "assistant", "content": content});
-    merge_patch(&mut item, &item_patch, item_ptr, log);
+    // Item-level fields are parse-side restoration, not user `extra`:
+    // plain inserts, outside the merge log (see `apply_identity`).
+    if let Some(obj) = item.as_object_mut() {
+        for (key, value) in &item_patch {
+            obj.insert(key.clone(), value.clone());
+        }
+    }
     item
 }
 

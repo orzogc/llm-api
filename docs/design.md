@@ -38,11 +38,14 @@ and pick the upstream API format at call time.
      `thought: false`), Google mixed-tool-entry grouping, Google snake_case
      request aliases re-emitting as camelCase, and id-less Responses
      assistant items whose item metadata is identical merging into one item
-     (differing metadata keeps the item boundary).
+     (differing metadata keeps the item boundary; upstream documents no
+     semantics for adjacent-item boundaries — equivalence is this library's
+     reading, to revisit if that changes).
   3. **Warned non-equivalent losses**: anything else that cannot be
      represented or rebuilt is dropped with a warning — each format module
      documents its cases (e.g. CC `stream_options` members, inexpressible
-     assistant block order).
+     assistant block order, a Responses unknown-part shell whose recorded
+     item identity no longer matches its neighbours — `ItemBoundaryLost`).
   Preserved verbatim: modeled fields, **non-null** unknown fields, unmodeled
   union members (`Opaque`, § 4.3) and message order. Nothing else is dropped
   silently.
@@ -952,11 +955,22 @@ pub enum BlockDelta {
   unsupported, § 8). After the terminator every further chunk — well-formed
   events, error frames, duplicate terminators alike — surfaces as `Unknown`
   + `UnknownStreamEvent` on all four formats (the response is already
-  complete, so nothing after the terminator may mutate or fail it).
+  complete, so nothing after the terminator may mutate or fail it —
+  including transport- and SSE-layer failures: past the parser's
+  `MessageStop` the stream handle downgrades them to one cosmetic
+  `PostTerminalStreamFailure` warning riding the end-of-stream carrier and
+  ends the stream complete; SSE events decoded before an in-chunk failure
+  are still delivered, so a terminator fused into the failing chunk still
+  counts).
   Responses terminal events carry the full final response; it is used to
   reconcile items that never saw `output_item.done` (matched by id, falling
   back to `output_index`) and to synthesize never-announced items — a
-  compliant stream is unaffected. CC text channels survive a tool call: a
+  compliant stream is unaffected, and a synthesized item whose snapshot
+  position precedes already-streamed content warns `BlockOrderLost` (its
+  blocks can only append at the end). A streamed unknown Responses content
+  part wraps in a marked assistant-message shell that serialization inlines
+  back into its original item when the recorded identity still matches
+  (`ItemBoundaryLost` when it does not, § 1 tier 3). CC text channels survive a tool call: a
   later same-channel fragment reuses the open block (matching the
   non-streaming parse of the same wire message) and warns `BlockOrderLost`
   (§ 7.5).
@@ -984,14 +998,22 @@ pub enum BlockDelta {
   Known-but-unmodeled deltas that belong to a block (Anthropic
   `citations_delta` — part of the **current** protocol — Responses
   `output_text.annotation.added`, …) surface as `BlockDelta::Other` and are
-  folded into the finalized block at `BlockStop`; on CC the folded payload
-  (unknown delta fields, legacy `function_call`) lands in the block's
-  format-namespace extra with delta merge conventions (strings concatenate,
-  arrays append, objects merge recursively, anything else last-wins) — the
-  non-streaming parser keeps the same fields in **message** extra, a
-  documented position difference (the event model has no message-level extra
-  channel); events the parser cannot
-  attribute to a block at all fall back to `Unknown`. Chunks for candidate
+  folded into the finalized block at `BlockStop`. CC unknown `delta` fields
+  (`annotations`, `audio`, the legacy `function_call`, dialect fields) fold
+  into the block's extra at close — nested under the `message` reserved key
+  on content/refusal blocks, top-level on thinking blocks (a thinking
+  block's extra already merges into the containing message on
+  serialization). Fields repeating across chunks merge under CC delta
+  semantics: strings concatenate, arrays append, objects merge per key
+  recursively, anything else replaces (last wins). Serialization hoists the
+  `message` key back onto the containing wire message — several holding
+  blocks merge in block order (later keys win, RFC 7396) before the
+  message's own `extra`, which stays authoritative — so replaying the
+  accumulated message equals replaying the non-streaming parse of the same
+  terminal message (wire parity; the IR homes still differ — streamed
+  fields live on block extra, non-streaming parses keep them on
+  `Message.extra` — and the first replay converges the two). Events the
+  parser cannot attribute to a block at all fall back to `Unknown`. Chunks for candidate
   indexes beyond the first surface as `Unknown` — multi-candidate is
   unsupported (§ 8). Refusal content (CC `refusal` field/delta, Responses refusal parts)
   parses into a `Text` block whose format namespace in `extra` records
@@ -1240,7 +1262,8 @@ pub enum Override<T> { Inherit, Set(T), Disable }
   the semver guarantee is the mechanism, not the numbers. Exceeding a cap
   keeps what was already read: a 2xx body or an SSE event over its cap fails
   with `Error::BodyTooLarge` (status/headers where available + the read
-  prefix); an oversized **error** body still produces a full `Error::Api`
+  prefix) — on a stream only before the protocol terminator; past it
+  stream-layer failures downgrade to a warning (§ 9); an oversized **error** body still produces a full `Error::Api`
   with `truncated: true` and the prefix as `raw` (§ 14) — status, headers
   and `retry_after` survive. The caps bound accumulated/retained data, not
   the instantaneous peak: bodies are processed one transport chunk at a

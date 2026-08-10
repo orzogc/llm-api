@@ -7,7 +7,7 @@ use std::task::{Context, Poll};
 
 use futures_core::Stream;
 
-use crate::convert::ConversionWarning;
+use crate::convert::{ConversionWarning, WarningCode};
 use crate::error::{Error, Result};
 use crate::format::StreamParser;
 use crate::http::{BodyStream, SseEvent, SseParser};
@@ -36,7 +36,12 @@ enum State {
 /// A transport error, an SSE event over
 /// [`super::Limits::max_sse_event`] (reported with the response status and
 /// headers filled in) or a parser failure is yielded as one `Err`, after
-/// which the stream terminates. Items produced by
+/// which the stream terminates — but only before the protocol terminator.
+/// Past the parser's [`StreamEvent::MessageStop`] the response is
+/// complete: such failures downgrade to one cosmetic
+/// [`WarningCode::PostTerminalStreamFailure`] warning riding the
+/// end-of-stream carrier and the stream ends cleanly; SSE events decoded
+/// before an in-chunk failure are still delivered. Items produced by
 /// [`StreamParser::finish`] — including the synthetic warning carrier —
 /// have `raw: None` (there is no source SSE event for them).
 pub struct StreamHandle {
@@ -49,6 +54,10 @@ pub struct StreamHandle {
     parser: Box<dyn StreamParser>,
     queue: VecDeque<Result<StreamItem>>,
     pending_warnings: Vec<ConversionWarning>,
+    /// The parser delivered its protocol terminator (`MessageStop`): the
+    /// response is complete, and later pump-level failures downgrade to
+    /// a warning instead of failing the stream.
+    protocol_terminal: bool,
     state: State,
 }
 
@@ -73,6 +82,7 @@ impl StreamHandle {
             parser,
             queue: VecDeque::new(),
             pending_warnings: Vec::new(),
+            protocol_terminal: false,
             state: State::Pumping,
         }
     }
@@ -148,17 +158,42 @@ impl StreamHandle {
         self.state = State::Draining;
     }
 
-    /// Feeds complete SSE events to the stream parser.
-    fn feed(&mut self, events: &[SseEvent]) {
+    /// Feeds complete SSE events to the stream parser; stops at and
+    /// returns the parser's first error, leaving later events unfed.
+    fn feed(&mut self, events: &[SseEvent]) -> Option<Error> {
         for event in events {
-            if self.state == State::Draining {
-                break;
-            }
             match self.parser.parse(event) {
                 Ok((parsed, warnings)) => self.emit(parsed, warnings, Some(event.data.as_str())),
-                Err(e) => self.fatal(e),
+                Err(e) => return Some(e),
             }
         }
+        None
+    }
+
+    /// Records a pump-level failure that arrived after the protocol
+    /// terminator: the completed response stands and the failure rides
+    /// the § 9 warning machinery instead (delivered by the end-of-stream
+    /// carrier when no later item picks it up).
+    fn post_terminal_warning(&mut self, error: &Error) {
+        self.pending_warnings.push(ConversionWarning::from_format(
+            WarningCode::PostTerminalStreamFailure,
+            "",
+            "",
+            format!("stream failure after the protocol terminator: {error}"),
+        ));
+    }
+
+    /// Routes a pump-level failure (transport, SSE decode or parser
+    /// error): fatal before the protocol terminator; past it the failure
+    /// downgrades to a [`WarningCode::PostTerminalStreamFailure`] warning
+    /// and the stream ends cleanly.
+    fn pump_failure(&mut self, error: Error) {
+        if !self.protocol_terminal {
+            self.fatal(error);
+            return;
+        }
+        self.post_terminal_warning(&error);
+        self.on_eof();
     }
 
     /// Queues the items of one parse call, applying the § 9 warning and raw
@@ -177,6 +212,9 @@ impl StreamHandle {
             return;
         }
         for event in events {
+            if matches!(event, StreamEvent::MessageStop) {
+                self.protocol_terminal = true;
+            }
             let raw = raw
                 .filter(|_| self.include_raw || matches!(event, StreamEvent::Unknown))
                 .map(str::to_owned);
@@ -191,16 +229,28 @@ impl StreamHandle {
 
     /// End of the byte stream: flush the SSE parser, finish the stream
     /// parser, and synthesize a carrier item for warnings that would
-    /// otherwise be lost.
+    /// otherwise be lost. Failures here are fatal before the protocol
+    /// terminator and downgrade to a warning past it.
     fn on_eof(&mut self) {
-        match self.sse.finish() {
-            Ok(events) => self.feed(&events),
-            Err(e) => self.fatal(e),
+        let (events, sse_err) = self.sse.finish_partial();
+        let parser_err = self.feed(&events);
+        if let Some(e) = parser_err.or(sse_err) {
+            if self.protocol_terminal {
+                self.post_terminal_warning(&e);
+            } else {
+                self.fatal(e);
+            }
         }
         if self.state != State::Draining {
             match self.parser.finish() {
                 Ok((events, warnings)) => self.emit(events, warnings, None),
-                Err(e) => self.fatal(e),
+                Err(e) => {
+                    if self.protocol_terminal {
+                        self.post_terminal_warning(&e);
+                    } else {
+                        self.fatal(e);
+                    }
+                }
             }
         }
         if self.state != State::Draining && !self.pending_warnings.is_empty() {
@@ -239,11 +289,19 @@ impl Stream for StreamHandle {
             }
             match this.body.as_mut().poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Some(Ok(bytes))) => match this.sse.push(&bytes) {
-                    Ok(events) => this.feed(&events),
-                    Err(e) => this.fatal(e),
-                },
-                Poll::Ready(Some(Err(e))) => this.fatal(Error::Transport(e)),
+                Poll::Ready(Some(Ok(bytes))) => {
+                    // Feed the events decoded before any in-chunk failure
+                    // first: a terminator fused into the same chunk must
+                    // count before the failure is routed. The parser's
+                    // error precedes the SSE one chronologically (it
+                    // struck an earlier event).
+                    let (events, sse_err) = this.sse.push_partial(&bytes);
+                    let parser_err = this.feed(&events);
+                    if let Some(e) = parser_err.or(sse_err) {
+                        this.pump_failure(e);
+                    }
+                }
+                Poll::Ready(Some(Err(e))) => this.pump_failure(Error::Transport(e)),
                 Poll::Ready(None) => this.on_eof(),
             }
         }

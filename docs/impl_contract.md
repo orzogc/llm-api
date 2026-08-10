@@ -140,9 +140,13 @@ Round-trip metadata flows **parse-attach → serialize-consume**.
   one `message` item by identity key: a block with an `id` groups by that
   id alone (id is the item's identity; item-level fields follow the first
   block, and a later conflicting value drops with `ExtraDropped`,
-  semantic); id-less blocks group only when `status`/`phase`/`item` are
-  all equal — identical-metadata id-less items merge warning-free (§ 1
-  tier 2), differing metadata keeps the item boundary.
+  semantic, located at the item-level field's pointer — `/input/N/phase`,
+  one warning per nested `item` field — so an explicit `extra` write to
+  that pointer marks it overridden and passes the strict gate; the
+  item-field restoration itself is parse-side backfill and does not enter
+  the merge log); id-less blocks group only when `status`/`phase`/`item`
+  are all equal — identical-metadata id-less items merge warning-free
+  (§ 1 tier 2), differing metadata keeps the item boundary.
 - CC parse keeps leading `system` messages in-array (no hoisting to
   `Request.system`); CC serialize inserts `Request.system` at the front
   as a `system` message. Anthropic/Google parse map the top-level
@@ -177,21 +181,43 @@ Round-trip metadata flows **parse-attach → serialize-consume**.
   all four formats: the response is already complete and must neither
   mutate nor fail. Independently, `Accumulator::push` ignores
   post-`MessageStop` events other than `Unknown` (first stop wins, no
-  extra warning, item warnings still folded).
+  extra warning, item warnings still folded). The stream handle mirrors
+  this past the parser's `MessageStop`: transport errors, SSE-level
+  failures (size cap, decode) and stream-parser errors downgrade to one
+  cosmetic `PostTerminalStreamFailure` warning delivered on the
+  end-of-stream carrier instead of failing the stream. SSE events parsed
+  before an in-chunk failure are delivered ahead of the failure (partial
+  push), so a terminator fused with the failing bytes in one transport
+  chunk still terminates the protocol. A cap error resets the SSE parser:
+  buffered input and the half-built event are discarded (the error's
+  `prefix` is the only retained copy), and subsequent pushes start at a
+  fresh line boundary.
 - Responses terminal events (`response.completed` / `response.incomplete`)
   carry the full final response; it reconciles the stream: items that
   never saw `output_item.done` finalize from the snapshot (matched by
   recorded id, falling back to `output_index`; an id mismatch rejects the
   positional match), items absent from the snapshot close with
   `block: None` (accumulated content stands), snapshot-only
-  never-announced items synthesize start+stop. Usage/stop-reason handling
-  is unchanged; a compliant stream is unaffected.
+  never-announced items synthesize start+stop — appended after all
+  streamed blocks, so a synthesized item whose snapshot position precedes
+  already-announced content warns `BlockOrderLost` (semantic, at most one
+  per termination). Usage/stop-reason handling is unchanged; a compliant
+  stream is unaffected.
 - Responses streamed unknown message content parts wrap in a minimal
   assistant `message` shell (`{"type": "message", "role": "assistant",
-  "content": [<part>]}`, no id/status) as the block's Opaque value, so
-  replay emits a valid top-level item; the cost — the original item
-  boundary splits around the unknown part — is disclosed in the module
-  docs (non-streaming keeps the whole item as one Opaque).
+  "content": [<part>]}`) as the block's Opaque value; the shell carries
+  the original item identity (id/status/phase + unknown item fields under
+  `item`) in the internal `__llm_api_item` marker key — the known
+  `item_id` at BlockStart, replaced by the full identity when
+  `output_item.done` / terminal reconciliation finalizes it. The marker
+  never reaches the wire. On serialization a marked shell whose identity
+  key (same rules as `item_group_key`) matches the current Text group —
+  or opens an empty one — inlines its parts into that item, fully
+  restoring the original item boundary with no warning; a mismatched
+  identity serializes the shell as its own item (marker stripped,
+  identity fields written back) + `ItemBoundaryLost` (semantic).
+  Marker-less own-format Opaques stay verbatim top-level items (the user
+  Opaque contract). Non-streaming keeps the whole item as one Opaque.
 - CC streamed unknown delta fields (and legacy `function_call`) fold into
   the open block's `extra["openai_chat_completions"]` at `BlockStop` with
   delta merge conventions: strings concatenate, arrays append, objects
@@ -199,6 +225,19 @@ Round-trip metadata flows **parse-attach → serialize-consume**.
   surfaces each raw fragment in real time. Anthropic's unknown delta
   *types* on a known block emit `Other` + `MalformedField` and nothing
   folds at stop (nothing known to fold — disclosed, not silent).
+- CC assistant `Text` blocks reserve two namespace keys
+  (`text_block_reserved_key`): `refusal` marks a refusal part (§ 9);
+  `message` nests an object of message-level fields — the streaming
+  parser folds unknown delta fields there, and serialization merges the
+  object into the containing wire message in block order (later keys win)
+  before `Message.extra`. All other Text-block namespace keys are
+  part-level; a lone `message` key does not block the single-block
+  `content` string shorthand.
+- CC `Thinking` block extras have no dedicated wire object
+  (`reasoning_content` is a plain string field) and merge wholesale into
+  the containing assistant message on serialization; streamed unknown
+  delta fields folded on the reasoning channel therefore stay top-level
+  on the Thinking extra.
 - Malformed tool payloads: a unified field (`id`, `name`, `arguments`,
   `tool_call_id`, `response`) missing or mangled — parsed with
   empty/`None` stand-ins, dropped, or kept verbatim in a state the
@@ -289,7 +328,13 @@ Unix seconds via `models::system_time_from_unix_seconds`, Anthropic RFC
   is a literal — RFC 3986 query, not form encoding); the URL keeps its
   original spelling, only values are replaced. `extra_query` keys are
   logical values the library encodes itself (`%` → `%25`), so encoding
-  cannot smuggle a protected key past the check.
+  cannot smuggle a protected key past the check. A key `extra_query` sets
+  appears **exactly once** in the final URL: the first logical occurrence
+  (percent-decode comparison) keeps its original spelling and position
+  and receives the new value; all later logical duplicates of that key
+  are dropped. Duplicate query keys the caller does **not** set are
+  preserved verbatim (base-query passthrough). Within one merged
+  `extra_query` list, later same-name entries still win.
 - Anthropic `max_tokens`/`top_k` above `u32::MAX`: the IR field stays
   unset + `MalformedField` (cosmetic — the original value mirrors into
   `extra` and re-serializes verbatim); rebuilding such a request needs

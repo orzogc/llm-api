@@ -1341,6 +1341,150 @@ async fn stream_transport_error_mid_stream_terminates() {
     assert!(matches!(&items[1], Err(Error::Transport(e)) if e.kind == HttpErrorKind::Body));
 }
 
+/// Counts `PostTerminalStreamFailure` warnings on a response.
+fn post_terminal_warnings(response: &Response) -> usize {
+    response
+        .warnings
+        .iter()
+        .filter(|w| w.code == WarningCode::PostTerminalStreamFailure)
+        .count()
+}
+
+#[tokio::test]
+async fn stream_post_terminal_transport_error_downgrades_to_warning() {
+    let script = || {
+        vec![Scripted::Respond {
+            status: 200,
+            headers: vec![("content-type", "text/event-stream")],
+            chunks: vec![
+                sse_chunk(&json!({"k": "start", "id": "m1"})),
+                sse_chunk(&json!({"k": "text", "i": 0, "t": "hello"})),
+                sse_chunk(&json!({"k": "stop"})),
+                Err(HttpError::new(HttpErrorKind::Body)),
+            ],
+        }]
+    };
+
+    // Item view: no `Err` item; the failure rides the end-of-stream
+    // carrier as one cosmetic warning.
+    let (client, _) = scripted(script());
+    let handle = client
+        .stream(&mock_provider(), &user_request(), &CallOptions::new())
+        .await
+        .unwrap();
+    let items = drain(handle).await;
+    assert!(items.iter().all(Result::is_ok), "no item may be an error");
+    assert!(
+        items
+            .iter()
+            .any(|i| matches!(&i.as_ref().unwrap().event, StreamEvent::MessageStop))
+    );
+    let carrier = ok_item(&items, items.len() - 1);
+    assert!(matches!(carrier.event, StreamEvent::Unknown));
+    assert!(carrier.raw.is_none());
+    assert_eq!(
+        carrier.warnings[0].code,
+        WarningCode::PostTerminalStreamFailure
+    );
+
+    // collect() view: the completed response stands, warning attached.
+    let (client, _) = scripted(script());
+    let handle = client
+        .stream(&mock_provider(), &user_request(), &CallOptions::new())
+        .await
+        .unwrap();
+    let response = handle.collect().await.expect("response is complete");
+    assert_eq!(response.text(), "hello");
+    assert!(response.stop_reason.is_some());
+    assert_eq!(response.usage.as_ref().unwrap().output_tokens, 5);
+    assert_eq!(post_terminal_warnings(&response), 1);
+}
+
+#[tokio::test]
+async fn stream_post_terminal_sse_cap_error_downgrades_to_warning() {
+    let giant = json!({"k": "text", "i": 0, "t": "X".repeat(200)});
+    let (client, _) = scripted(vec![respond_sse(&[
+        json!({"k": "start"}),
+        json!({"k": "text", "i": 0, "t": "hi"}),
+        json!({"k": "stop"}),
+        giant,
+    ])]);
+    let mut provider = mock_provider();
+    provider.limits = Limits::new().with_max_sse_event(60);
+
+    let handle = client
+        .stream(&provider, &user_request(), &CallOptions::new())
+        .await
+        .unwrap();
+    let response = handle.collect().await.expect("response is complete");
+    assert_eq!(response.text(), "hi");
+    assert_eq!(post_terminal_warnings(&response), 1);
+}
+
+#[tokio::test]
+async fn stream_post_terminal_parser_error_downgrades_to_warning() {
+    let (client, _) = scripted(vec![respond_sse(&[
+        json!({"k": "start"}),
+        json!({"k": "stop"}),
+        json!({"k": "bad"}),
+    ])]);
+    let handle = client
+        .stream(&mock_provider(), &user_request(), &CallOptions::new())
+        .await
+        .unwrap();
+    let response = handle.collect().await.expect("response is complete");
+    assert_eq!(post_terminal_warnings(&response), 1);
+}
+
+#[tokio::test]
+async fn stream_terminator_fused_with_failure_in_one_chunk_downgrades() {
+    // The terminator and a complete oversized frame arrive in ONE
+    // transport chunk: the events decoded before the failure still count
+    // (`push_partial`), so the failure is post-terminal and downgrades.
+    let mut fused = Vec::new();
+    fused.extend_from_slice(format!("data: {}\n\n", json!({"k": "start"})).as_bytes());
+    fused.extend_from_slice(format!("data: {}\n\n", json!({"k": "stop"})).as_bytes());
+    fused.extend_from_slice(
+        format!(
+            "data: {}\n\n",
+            json!({"k": "text", "i": 0, "t": "X".repeat(200)})
+        )
+        .as_bytes(),
+    );
+    let (client, _) = scripted(vec![Scripted::Respond {
+        status: 200,
+        headers: vec![("content-type", "text/event-stream")],
+        chunks: vec![Ok(Bytes::from(fused))],
+    }]);
+    let mut provider = mock_provider();
+    provider.limits = Limits::new().with_max_sse_event(60);
+    let handle = client
+        .stream(&provider, &user_request(), &CallOptions::new())
+        .await
+        .unwrap();
+    let response = handle.collect().await.expect("response is complete");
+    assert!(response.stop_reason.is_some());
+    assert_eq!(post_terminal_warnings(&response), 1);
+
+    // Same with an over-cap unfinished flood fused after the terminator.
+    let mut fused = Vec::new();
+    fused.extend_from_slice(format!("data: {}\n\n", json!({"k": "stop"})).as_bytes());
+    fused.extend_from_slice(&[b'x'; 200]);
+    let (client, _) = scripted(vec![Scripted::Respond {
+        status: 200,
+        headers: vec![("content-type", "text/event-stream")],
+        chunks: vec![sse_chunk(&json!({"k": "start"})), Ok(Bytes::from(fused))],
+    }]);
+    let mut provider = mock_provider();
+    provider.limits = Limits::new().with_max_sse_event(60);
+    let handle = client
+        .stream(&provider, &user_request(), &CallOptions::new())
+        .await
+        .unwrap();
+    let response = handle.collect().await.expect("response is complete");
+    assert_eq!(post_terminal_warnings(&response), 1);
+}
+
 #[tokio::test]
 async fn stream_parser_error_terminates() {
     let (client, _) = scripted(vec![respond_sse(&[

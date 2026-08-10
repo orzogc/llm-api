@@ -63,11 +63,15 @@
 //!   marks refusal parts; every other key (`annotations`, `logprobs`, …)
 //!   is part-level and merges back into the content part. On
 //!   serialization, consecutive blocks sharing an `id` re-group into one
-//!   `message` item (a later block's conflicting item-level value drops
-//!   with an `ExtraDropped` warning); id-less blocks re-group only when
-//!   `status` / `phase` / `item` all agree, so id-less items with
-//!   distinct metadata keep their boundaries and only metadata-free ones
-//!   merge (the documented normalization).
+//!   `message` item (a later member's conflicting item-level value drops
+//!   with an `ExtraDropped` warning located at the item-level field);
+//!   id-less blocks re-group only when `status` / `phase` / `item` all
+//!   agree, so id-less items with distinct metadata keep their
+//!   boundaries and only metadata-free ones merge (the documented
+//!   normalization). An unknown-part shell (see
+//!   [`OPAQUE_SHELL_MARKER`]) whose recorded identity matches the group
+//!   re-inlines its parts into the item; a mismatched shell serializes
+//!   as its own item with an `ItemBoundaryLost` warning.
 //! - A thinking block is *native* here iff its `extra` carries this
 //!   namespace, or it has a `signature` and no namespace at all
 //!   (optimistic replay). Foreign thinking drops with a warning unless
@@ -115,6 +119,21 @@ pub use to_ir::{request_to_ir, response_to_ir};
 
 /// This format's canonical id (`extra` namespace key).
 pub(crate) const FORMAT: &str = ids::OPENAI_RESPONSES;
+
+/// Internal marker key of unknown-part shells (library-internal protocol).
+///
+/// The stream parser wraps an unmodeled `message` content part into a
+/// minimal assistant `message` item shell and records the originating
+/// item's identity (`id` / `status` / `phase` plus unknown item fields
+/// under `item`) beneath this key. On serialization the marker is always
+/// stripped — it never reaches the wire: a shell whose identity matches
+/// the adjacent `Text` blocks' item re-inlines its parts into that item
+/// (restoring the original boundary); a mismatched shell serializes as
+/// its own item with an `ItemBoundaryLost` warning. The double-underscore
+/// prefix cannot collide with official Responses fields. Hand-building an
+/// `Opaque` value that carries this key opts into this internal protocol;
+/// marker-less opaques always replay verbatim as top-level items.
+pub const OPAQUE_SHELL_MARKER: &str = "__llm_api_item";
 
 /// Reserved keys of the `openai_responses` namespace on assistant `Text`
 /// blocks (see the module docs): they carry item-level data of the

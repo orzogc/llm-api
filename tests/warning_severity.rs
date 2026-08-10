@@ -32,6 +32,7 @@ fn severity_table_is_pinned() {
         (MissingThinkingWithToolCalls, Semantic),
         (MergeBlockedBySignature, Semantic),
         (ExtraDropped, Semantic),
+        (ItemBoundaryLost, Semantic),
         (CountTokensFieldDropped, Semantic),
         (CountTokensApproximate, Semantic),
         // Build side, cosmetic: tuning lost, or an opt-in policy executed
@@ -59,6 +60,7 @@ fn severity_table_is_pinned() {
         (MalformedToolResult, Semantic),
         (UnknownStreamEvent, Cosmetic),
         (StreamOptionsDropped, Cosmetic),
+        (PostTerminalStreamFailure, Cosmetic),
     ];
     for (code, expected) in table {
         assert_eq!(code.severity(), expected, "severity drifted for {code:?}");
