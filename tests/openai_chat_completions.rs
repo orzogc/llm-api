@@ -1911,6 +1911,87 @@ fn typeless_custom_entry_infers_custom_kind() {
     assert_eq!(ns.get("custom"), Some(&json!({"name": "x", "input": "y"})));
 }
 
+#[test]
+fn non_string_tool_call_type_mirrors_verbatim() {
+    // A non-string, non-`null` `type` would fail the typed entry parse
+    // wholesale; instead the entry mirrors verbatim like unknown kinds —
+    // the mirror re-serializes, so the warning stays cosmetic — and the
+    // rebuilt entry is exact, without a fabricated `function` payload.
+    let parse = |entry: Value| {
+        let body = json!({"messages": [{"role": "assistant", "tool_calls": [entry]}]});
+        request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap()
+    };
+    let entry = json!({"id": "c", "type": 5,
+                       "function": {"name": "f", "arguments": "{}"}, "vendor": 1});
+    let (req, warnings) = parse(entry.clone());
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedField);
+    assert_eq!(warnings[0].severity, WarningSeverity::Cosmetic);
+    assert_eq!(warnings[0].location, "/messages/0/tool_calls/0");
+    let ContentBlock::ToolCall {
+        id,
+        name,
+        arguments,
+        extra,
+        ..
+    } = &req.messages[0].content[0]
+    else {
+        panic!("expected tool call");
+    };
+    assert_eq!(id.as_deref(), Some("c"));
+    assert!(name.is_empty());
+    assert!(arguments.is_empty());
+    let ns = extra.get(F).unwrap();
+    assert_eq!(ns.get("type"), Some(&json!(5)));
+    assert_eq!(
+        ns.get("function"),
+        Some(&json!({"name": "f", "arguments": "{}"}))
+    );
+    assert_eq!(ns.get("vendor"), Some(&json!(1)));
+
+    // Round trip: verbatim.
+    let (body, ws) = from_ir_unary(&req);
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(body["messages"][0]["tool_calls"][0], entry);
+
+    // Object / array `type` values behave the same; a missing `id` adds
+    // the usual semantic id warning, and the mirror branch tolerates the
+    // rebuild without one.
+    let entry = json!({"type": {"a": 1}, "custom": {"name": "x", "input": "y"}});
+    let (req, warnings) = parse(entry.clone());
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedToolCall);
+    assert_eq!(warnings[0].location, "/messages/0/tool_calls/0/id");
+    assert_eq!(warnings[1].code, WarningCode::MalformedField);
+    let (body, ws) = from_ir_unary(&req);
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(body["messages"][0]["tool_calls"][0], entry);
+
+    // Other typed-parse failures (an object `arguments` under a string
+    // type) still skip the entry wholesale with a semantic warning.
+    let (req, warnings) = parse(json!({"id": "c", "type": "function",
+        "function": {"name": "f", "arguments": {"x": 1}}}));
+    assert!(req.messages[0].content.is_empty());
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedToolCall);
+    assert_eq!(warnings[0].severity, WarningSeverity::Semantic);
+}
+
+#[test]
+fn non_string_reserved_type_rebuilds_without_payload() {
+    // Build side: a non-string reserved `type` in the namespace selects
+    // the verbatim mirror branch — no payload object is fabricated
+    // around it.
+    let call = ContentBlock::tool_call_with_id("c", "", "").with_extra(F, "type", json!(5));
+    let req = Request::with_messages(vec![Message::assistant(vec![call])]);
+    let (body, ws) = from_ir_unary(&req);
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(
+        body["messages"][0]["tool_calls"][0],
+        json!({"id": "c", "type": 5})
+    );
+}
+
 // ---------------------------------------------------------------- responses
 
 #[test]

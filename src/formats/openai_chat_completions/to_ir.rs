@@ -430,8 +430,8 @@ fn call_member_or_empty(
 }
 
 /// Parses one `tool_calls[]` entry into a `ToolCall` block. `function`
-/// entries map directly; `custom` entries and unknown kinds use the
-/// reserved `type` key of the format namespace (see
+/// entries map directly; `custom` entries, unknown kinds and non-string
+/// `type` values use the reserved `type` key of the format namespace (see
 /// [`super::tool_call_reserved_key`]). A typeless entry carrying only a
 /// `custom` payload counts as custom (silent § 1 canonicalization).
 /// Returns `None` (entry skipped, with a warning) for non-object entries.
@@ -443,6 +443,45 @@ pub(crate) fn tool_call_entry_to_block(
     ptr: &str,
     warnings: &mut Vec<ConversionWarning>,
 ) -> Option<ContentBlock> {
+    // A non-string, non-`null` `type` would fail the typed parse
+    // wholesale; mirroring the entry verbatim (the unknown-kind
+    // treatment) loses strictly less, and the mirror re-serializes, so
+    // the warning stays cosmetic. `null` is the absent canonical form
+    // and takes the typed path.
+    if entry
+        .get("type")
+        .is_some_and(|t| !t.is_string() && !t.is_null())
+    {
+        let id = entry.get("id").and_then(Value::as_str).map(str::to_owned);
+        if id.is_none() {
+            warnings.push(warn(
+                WarningCode::MalformedToolCall,
+                format!("{ptr}/id"),
+                "tool call entry has no `id`; the IR keeps `id: None`, and formats that \
+                 require tool call ids will fail to rebuild the call",
+            ));
+        }
+        warnings.push(warn(
+            WarningCode::MalformedField,
+            ptr.to_owned(),
+            "non-string tool call `type`; the entry was mirrored verbatim",
+        ));
+        let mut ns = Map::new();
+        if let Value::Object(fields) = entry {
+            for (key, value) in fields {
+                if key != "id" {
+                    ns.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        return Some(ContentBlock::ToolCall {
+            id,
+            name: String::new(),
+            arguments: String::new(),
+            cache: None,
+            extra: Extra::from_unknown(FORMAT, ns),
+        });
+    }
     let wire: types::ToolCallEntry = match serde_json::from_value(entry.clone()) {
         Ok(e) => e,
         Err(e) => {

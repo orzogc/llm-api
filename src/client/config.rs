@@ -110,7 +110,10 @@ pub struct Limits {
     /// 8 MiB.
     pub max_error_body: usize,
     /// Cap on one complete logical SSE event (joined `data:` lines).
-    /// Default: 64 MiB.
+    /// Also bounds the current unfinished raw line as a flood guard, so a
+    /// cap smaller than a line's raw length (field name and colon
+    /// included) may reject byte-wise delivery that a single-chunk push
+    /// would parse whole. Default: 64 MiB.
     pub max_sse_event: usize,
 }
 

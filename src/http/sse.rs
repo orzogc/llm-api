@@ -34,7 +34,11 @@ impl SseEvent {
 /// [`SseParser::finish`] exactly once at end of stream.
 ///
 /// Enforces the `max_sse_event` size cap (§ 12): one logical event larger
-/// than the cap fails with [`Error::BodyTooLarge`].
+/// than the cap fails with [`Error::BodyTooLarge`]. The cap also bounds
+/// the current unfinished raw line (flood guard against a stream that
+/// never sends a newline), so a cap smaller than a line's raw length —
+/// protocol overhead included — is chunking-sensitive: byte-wise delivery
+/// can trip the guard on a line that a single-chunk push parses whole.
 #[derive(Debug)]
 pub struct SseParser {
     max_event: usize,
@@ -586,6 +590,28 @@ mod tests {
         let mut p = SseParser::new(8);
         assert!(p.push(b"01234").is_ok());
         assert!(p.push(b"56789").is_err());
+    }
+
+    #[test]
+    fn size_cap_below_raw_line_length_is_chunking_sensitive() {
+        // Pinned trade-off (see `push` and the struct doc): a cap smaller
+        // than a line's raw length rejects byte-wise delivery — the flood
+        // guard must bound the unfinished line before it completes — while
+        // a single-chunk push parses the same bytes whole.
+        let mut whole = SseParser::new(1);
+        let events = whole.push(b"data:a\n\n").unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "a");
+
+        let mut bytewise = SseParser::new(1);
+        let mut tripped = false;
+        for byte in b"data:a\n\n" {
+            if bytewise.push(&[*byte]).is_err() {
+                tripped = true;
+                break;
+            }
+        }
+        assert!(tripped, "byte-wise delivery must trip the flood guard");
     }
 
     #[test]

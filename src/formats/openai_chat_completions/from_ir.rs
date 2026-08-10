@@ -832,7 +832,10 @@ fn is_native_thinking(extra: &Extra) -> bool {
 
 /// Builds one `tool_calls[]` entry. The reserved `type` key of the block's
 /// format namespace selects the payload shape (see
-/// [`super::tool_call_reserved_key`]).
+/// [`super::tool_call_reserved_key`]): only the strings `"function"` /
+/// `"custom"` (or an absent / explicit-`null` key — the canonical
+/// `function` default) rebuild a payload object from the unified fields;
+/// every other value takes the verbatim mirror path.
 fn build_tool_call_entry(
     id: Option<&str>,
     name: &str,
@@ -844,9 +847,10 @@ fn build_tool_call_entry(
     let call_type = extra
         .get(FORMAT)
         .and_then(|ns| ns.get(tool_call_reserved_key::TYPE))
-        .and_then(Value::as_str);
-    let mut entry = match call_type {
-        None | Some("function") => {
+        // An explicit `null` counts as absent (the canonical form).
+        .filter(|t| !t.is_null());
+    let mut entry = match call_type.map(Value::as_str) {
+        None | Some(Some("function")) => {
             let id = require_call_id(id, name, ptr)?;
             json!({
                 "id": id,
@@ -854,7 +858,7 @@ fn build_tool_call_entry(
                 "function": {"name": name, "arguments": arguments},
             })
         }
-        Some("custom") => {
+        Some(Some("custom")) => {
             let id = require_call_id(id, name, ptr)?;
             json!({
                 "id": id,
@@ -862,9 +866,10 @@ fn build_tool_call_entry(
                 "custom": {"name": name, "input": arguments},
             })
         }
-        // Unknown call kinds were mirrored wholesale into the namespace at
-        // parse time; the merge below restores them (`id` included, when
-        // one existed).
+        // Unknown call kinds and non-string `type` values were mirrored
+        // wholesale into the namespace at parse time; the merge below
+        // restores them (`id` included, when one existed) without
+        // fabricating a payload object.
         Some(_) => match id {
             Some(id) => json!({"id": id}),
             None => json!({}),

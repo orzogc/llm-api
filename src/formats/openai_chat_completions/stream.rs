@@ -15,10 +15,12 @@
 //!   with the accumulated id/name/arguments plus mirrored unknown
 //!   fragment fields. Finalization warns `MalformedToolCall` for a
 //!   missing `id` and for payload members the stream never delivered,
-//!   matching the non-streaming entry parse; a call declaring an unknown
-//!   `type` switches to mirror mode — its payloads accumulate silently
-//!   and fold verbatim into the block extra, like the non-streaming
-//!   unknown-kind entry mirror.
+//!   matching the non-streaming entry parse. The first explicitly
+//!   declared `type` is authoritative: it overrides payload-shape
+//!   inference, later conflicting declarations warn and are ignored,
+//!   and an unknown or non-string declared `type` switches the call to
+//!   mirror mode — its payloads accumulate silently and fold verbatim
+//!   into the block extra, like the non-streaming verbatim entry mirror.
 //! - A choice `finish_reason` closes all open blocks and emits
 //!   `MessageDelta { stop_reason }`; a non-null chunk `usage` (the
 //!   `include_usage` final chunk, or dialects that attach usage to the
@@ -113,14 +115,20 @@ struct ToolCallState {
     /// Whether an argument-channel member (`arguments` / `input`) was
     /// ever delivered; same rules as [`Self::saw_name`].
     saw_arguments: bool,
-    /// The entry `type`, when not `function`.
-    call_type: Option<String>,
-    /// The payload kind locked by the declared `type` or by the first
-    /// payload object; a conflicting later payload cannot be spliced and
-    /// mirrors into `extra` instead.
+    /// The first explicitly declared entry `type` (any non-`null` JSON
+    /// value). It alone drives the kind/mirror routing and the reserved
+    /// `type` key at finalization: later conflicting declarations warn
+    /// and are ignored (first wins), and payload-shape inference applies
+    /// only when no declaration ever arrives.
+    declared_type: Option<Value>,
+    /// The payload kind locked by the declared `type` or, absent one, by
+    /// the first payload object (a late first declaration re-locks it);
+    /// a conflicting payload cannot be spliced and mirrors into `extra`
+    /// instead.
     kind: Option<PayloadKind>,
-    /// Mirror mode (unknown declared `type`): payloads accumulate here
-    /// for the finalize-time verbatim fold instead of the unified fields.
+    /// Mirror mode (unknown or non-string declared `type`): payloads
+    /// accumulate here for the finalize-time verbatim fold instead of
+    /// the unified fields.
     mirror: Option<MirrorState>,
     /// Unknown entry-level fragment fields, mirrored into the finalized
     /// block extra (`function` / `custom` unknowns nested under their
@@ -129,10 +137,10 @@ struct ToolCallState {
 }
 
 /// Mirror-mode accumulation of a streamed tool call whose declared `type`
-/// is unknown: the unified name/arguments channels stay empty (the
-/// non-streaming parse mirrors such entries verbatim into the format
-/// namespace), so each payload object accumulates here and folds into the
-/// finalized block extra.
+/// is unknown or non-string: the unified name/arguments channels stay
+/// empty (the non-streaming parse mirrors such entries verbatim into the
+/// format namespace), so each payload object accumulates here and folds
+/// into the finalized block extra.
 #[derive(Debug, Default)]
 struct MirrorState {
     /// The `function` payload accumulation.
@@ -214,11 +222,11 @@ impl MirrorPayload {
 }
 
 /// Switches a tool call to mirror mode when a fragment declares an
-/// unknown `type`. Payload state accumulated before the switch (the
-/// pathological order: payloads first, the unknown `type` late) moves
-/// into the mirror accumulators so the finalize-time fold still produces
-/// complete payload objects; argument deltas already emitted are
-/// superseded by the authoritative `BlockStop` block (§ 9).
+/// unknown or non-string `type`. Payload state accumulated before the
+/// switch (the pathological order: payloads first, the declaration late)
+/// moves into the mirror accumulators so the finalize-time fold still
+/// produces complete payload objects; argument deltas already emitted
+/// are superseded by the authoritative `BlockStop` block (§ 9).
 fn enter_mirror(state: &mut ToolCallState) {
     let mut mirror = MirrorState::default();
     for kind in [PayloadKind::Function, PayloadKind::Custom] {
@@ -247,6 +255,87 @@ fn enter_mirror(state: &mut ToolCallState) {
         }
     }
     state.mirror = Some(mirror);
+}
+
+/// Applies the first explicitly declared `type` of a streamed tool call:
+/// `function` / `custom` lock (or re-lock) the payload kind, an unknown
+/// string switches the call to mirror mode (warned at finalization, like
+/// the non-streaming verbatim entry mirror), and a non-string value also
+/// mirrors — verbatim and rebuildable, so it warns `MalformedField`
+/// (cosmetic) here rather than at finalization.
+fn apply_declared_type(
+    declared: &Value,
+    wire_index: u64,
+    state: &mut ToolCallState,
+    warnings: &mut Vec<ConversionWarning>,
+) {
+    match declared.as_str() {
+        Some("function") => relock_kind(state, PayloadKind::Function),
+        Some("custom") => relock_kind(state, PayloadKind::Custom),
+        Some(_) => enter_mirror(state),
+        None => {
+            warnings.push(warn(
+                WarningCode::MalformedField,
+                "/choices/0/delta/tool_calls",
+                format!(
+                    "tool call index {wire_index} declares a non-string `type`; the entry \
+                     was mirrored verbatim"
+                ),
+            ));
+            enter_mirror(state);
+        }
+    }
+}
+
+/// Locks the payload kind from a declared known `type`. When payload
+/// inference already locked the conflicting kind, the declaration wins
+/// (matching the non-streaming parse of the assembled entry): the
+/// accumulated payload moves verbatim into the state extra under its key
+/// — like the mixed-payload conflict path — the unified channels reset,
+/// and finalization then reports the declared kind's missing members
+/// exactly as the non-streaming parse would. Argument deltas already
+/// emitted are superseded by the authoritative `BlockStop` block (§ 9).
+fn relock_kind(state: &mut ToolCallState, declared: PayloadKind) {
+    let inferred = match state.kind {
+        None => {
+            state.kind = Some(declared);
+            return;
+        }
+        Some(kind) if kind == declared => return,
+        Some(kind) => kind,
+    };
+    let mut members = match state.extra.remove(inferred.key()) {
+        Some(Value::Object(members)) => members,
+        Some(other) => {
+            // Defensive: a non-object mirror cannot merge; keep it.
+            state.extra.insert(inferred.key().to_owned(), other);
+            Map::new()
+        }
+        None => Map::new(),
+    };
+    if state.saw_name {
+        members.insert(
+            "name".to_owned(),
+            Value::from(std::mem::take(&mut state.name)),
+        );
+    }
+    if state.saw_arguments {
+        members.insert(
+            inferred.args_key().to_owned(),
+            Value::from(std::mem::take(&mut state.arguments)),
+        );
+    }
+    if state.saw_payload || !members.is_empty() {
+        state
+            .extra
+            .insert(inferred.key().to_owned(), Value::Object(members));
+    }
+    state.name.clear();
+    state.arguments.clear();
+    state.saw_payload = false;
+    state.saw_name = false;
+    state.saw_arguments = false;
+    state.kind = Some(declared);
 }
 
 /// Stateful stream parser for `openai_chat_completions` (one instance per
@@ -401,19 +490,29 @@ impl ChatCompletionsStreamParser {
                 none => *none = Some(id.to_owned()),
             }
         }
-        // An explicit `type` locks the payload kind up front (it appears
-        // only on a call's first fragment), so a lone conflicting payload
-        // object is mirrored, not spliced, like on the non-streaming side.
-        // An unknown declared type switches the call to mirror mode
-        // instead, matching the non-streaming verbatim entry mirror; the
-        // type string itself is recorded by `collect_fragment_extras`.
-        match fragment.get("type").and_then(Value::as_str) {
-            Some("function") if state.kind.is_none() => state.kind = Some(PayloadKind::Function),
-            Some("custom") if state.kind.is_none() => state.kind = Some(PayloadKind::Custom),
-            Some(t) if t != "function" && t != "custom" && state.mirror.is_none() => {
-                enter_mirror(state);
-            }
-            _ => {}
+        // Payload-kind authority order: the first explicitly declared
+        // `type` > later declarations (first wins; a conflicting one
+        // warns and is ignored) > payload-shape inference. `null` is the
+        // absent canonical form, like every fragment field.
+        match fragment.get("type") {
+            None | Some(Value::Null) => {}
+            Some(declared) => match &state.declared_type {
+                None => {
+                    state.declared_type = Some(declared.clone());
+                    apply_declared_type(declared, index, state, warnings);
+                }
+                Some(first) if first == declared => {}
+                Some(_) => {
+                    warnings.push(warn(
+                        WarningCode::MalformedToolCall,
+                        "/choices/0/delta/tool_calls",
+                        format!(
+                            "tool call index {index} declares conflicting `type` values; \
+                             the first declaration wins and this one was ignored"
+                        ),
+                    ));
+                }
+            },
         }
         // Continuation fragments omit `type`; route by the payload object
         // the fragment actually carries.
@@ -516,8 +615,8 @@ impl ChatCompletionsStreamParser {
 /// non-streaming entry parse. A payload of the conflicting kind cannot be
 /// spliced into the accumulated name/arguments and mirrors verbatim into
 /// the state extra with a `MalformedToolCall` warning. In mirror mode
-/// (unknown declared `type`) every payload accumulates silently for the
-/// finalize-time fold and emits no argument deltas.
+/// (unknown or non-string declared `type`) every payload accumulates
+/// silently for the finalize-time fold and emits no argument deltas.
 fn route_payload(
     kind: PayloadKind,
     payload: &Value,
@@ -619,22 +718,15 @@ fn extend_nested_extra(state: &mut ToolCallState, key: &str, members: Map<String
 }
 
 /// Copies unmodeled entry-level fragment fields into the tool-call state;
-/// payload objects are handled by [`route_payload`] and non-`function`
-/// `type`s are recorded for the reserved key.
+/// `id`, `type` and the payload objects have dedicated handling
+/// (`declared_type` and [`route_payload`]).
 fn collect_fragment_extras(fragment: &Value, state: &mut ToolCallState) {
     let Some(obj) = fragment.as_object() else {
         return;
     };
     for (key, value) in obj {
         match key.as_str() {
-            "index" | "id" | "function" | "custom" => {}
-            "type" => {
-                if let Some(t) = value.as_str()
-                    && t != "function"
-                {
-                    state.call_type = Some(t.to_owned());
-                }
-            }
+            "index" | "id" | "type" | "function" | "custom" => {}
             _ if value.is_null() => {}
             _ => {
                 state.extra.insert(key.clone(), value.clone());
@@ -649,8 +741,9 @@ fn collect_fragment_extras(fragment: &Value, state: &mut ToolCallState) {
 /// payload members the stream never delivered (an explicit empty string is
 /// a legitimate delivery and stays silent). A call in mirror mode folds
 /// its accumulated payloads verbatim into the format namespace instead —
-/// empty unified `name` / `arguments`, one cosmetic `MalformedField` —
-/// matching the non-streaming unknown-kind entry mirror.
+/// empty unified `name` / `arguments`, one cosmetic `MalformedField`
+/// (emitted here for unknown strings, at the declaring fragment for
+/// non-string values) — matching the non-streaming verbatim entry mirror.
 fn finalize_tool_call(
     state: ToolCallState,
     wire_index: u64,
@@ -668,19 +761,21 @@ fn finalize_tool_call(
     }
     let mut ns = state.extra;
     if let Some(mirror) = state.mirror {
-        // Unknown declared kind: fold each accumulated payload into one
-        // complete object under its key and keep the unified fields
-        // empty, exactly like the non-streaming verbatim entry mirror.
-        // `call_type` was recorded when mirror mode was entered.
-        let call_type = state.call_type.unwrap_or_default();
-        warnings.push(warn(
-            WarningCode::MalformedField,
-            "/choices/0/delta/tool_calls",
-            format!(
-                "tool call index {wire_index} has unknown tool call type `{call_type}`; \
-                 the entry was mirrored verbatim"
-            ),
-        ));
+        // Unknown or non-string declared kind: fold each accumulated
+        // payload into one complete object under its key and keep the
+        // unified fields empty, exactly like the non-streaming verbatim
+        // entry mirror. A non-string declaration already warned when its
+        // fragment arrived.
+        if let Some(Value::String(declared)) = &state.declared_type {
+            warnings.push(warn(
+                WarningCode::MalformedField,
+                "/choices/0/delta/tool_calls",
+                format!(
+                    "tool call index {wire_index} has unknown tool call type `{declared}`; \
+                     the entry was mirrored verbatim"
+                ),
+            ));
+        }
         for (kind, payload) in [
             (PayloadKind::Function, mirror.function),
             (PayloadKind::Custom, mirror.custom),
@@ -689,10 +784,9 @@ fn finalize_tool_call(
                 ns.insert(kind.key().to_owned(), folded);
             }
         }
-        ns.insert(
-            tool_call_reserved_key::TYPE.to_owned(),
-            Value::from(call_type),
-        );
+        if let Some(declared) = state.declared_type {
+            ns.insert(tool_call_reserved_key::TYPE.to_owned(), declared);
+        }
         return ContentBlock::ToolCall {
             id: state.id,
             name: String::new(),
@@ -735,24 +829,27 @@ fn finalize_tool_call(
             ),
         ));
     }
-    match state.call_type {
-        Some(t) => {
-            ns.insert(tool_call_reserved_key::TYPE.to_owned(), Value::from(t));
+    // The reserved `type` key is a pure serialization rule computed from
+    // the declared type or, absent one, the inferred kind.
+    if let Some(declared) = state.declared_type {
+        // The canonical `function` declaration needs no reserved key;
+        // in this non-mirror path the only other declaration is the
+        // string `"custom"`.
+        if declared.as_str() != Some("function") {
+            ns.insert(tool_call_reserved_key::TYPE.to_owned(), declared);
         }
+    } else if kind == PayloadKind::Custom {
         // A typeless call that streamed only a `custom` payload is
         // inferred as custom, like the non-streaming parse — silent
         // canonicalization (§ 1): the rebuilt entry gains
         // `type: "custom"`. (Extreme cross-fragment order — `custom`
-        // payload first, `function` later — keeps the locked custom kind,
-        // whereas the non-streaming parse of the assembled entry would
-        // prefer `function`.)
-        None if kind == PayloadKind::Custom => {
-            ns.insert(
-                tool_call_reserved_key::TYPE.to_owned(),
-                Value::from("custom"),
-            );
-        }
-        None => {}
+        // payload first, `function` payload later — keeps the locked
+        // custom kind, whereas the non-streaming parse of the assembled
+        // entry would prefer `function`.)
+        ns.insert(
+            tool_call_reserved_key::TYPE.to_owned(),
+            Value::from("custom"),
+        );
     }
     ContentBlock::ToolCall {
         id: state.id,

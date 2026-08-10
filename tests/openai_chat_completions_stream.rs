@@ -17,7 +17,7 @@ use llm_api::http::{SseEvent, SseParser};
 use llm_api::{
     Accumulator, ApiFormat, BlockDelta, CallMode, ContentBlock, ConversionWarning, ConvertOptions,
     Error, Message, OpenAiChatCompletionsOptions, Request, StopReason, StreamEvent, StreamItem,
-    WarningCode,
+    WarningCode, WarningSeverity,
 };
 
 const F: &str = "openai_chat_completions";
@@ -671,6 +671,45 @@ fn non_streaming_entry(entry: &Value) -> (ContentBlock, Vec<ConversionWarning>) 
     (req.messages[0].content[0].clone(), ws)
 }
 
+/// Streams one `tool_calls` fragment array per chunk, then the finish
+/// chunk and `[DONE]`; returns the unified events and warnings.
+fn stream_tool_call_chunks(
+    fragment_chunks: &[Value],
+) -> (Vec<StreamEvent>, Vec<ConversionWarning>) {
+    let mut parser = OpenAiChatCompletions.stream_parser();
+    let mut events = Vec::new();
+    let mut warnings = Vec::new();
+    for fragments in fragment_chunks {
+        let chunk = json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"tool_calls": fragments}, "finish_reason": null}]});
+        let (evs, ws) = parser.parse(&chunk_event(&chunk)).unwrap();
+        events.extend(evs);
+        warnings.extend(ws);
+    }
+    for terminal in [
+        chunk_event(
+            &json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+        ),
+        SseEvent::new(None, "[DONE]"),
+    ] {
+        let (evs, ws) = parser.parse(&terminal).unwrap();
+        events.extend(evs);
+        warnings.extend(ws);
+    }
+    (events, warnings)
+}
+
+/// `code:severity` fingerprints, sorted, for streaming ↔ non-streaming
+/// warning-parity assertions.
+fn warning_fingerprints(warnings: &[ConversionWarning]) -> Vec<String> {
+    let mut out: Vec<String> = warnings
+        .iter()
+        .map(|w| format!("{:?}:{:?}", w.code, w.severity))
+        .collect();
+    out.sort();
+    out
+}
+
 #[test]
 fn unknown_call_type_streams_in_mirror_mode() {
     // An unknown declared `type` cannot use the unified name/arguments
@@ -884,6 +923,271 @@ fn typeless_custom_payload_infers_custom_kind() {
         json!({"id": "call_c", "type": "custom",
                "custom": {"name": "run_sql", "input": "SELECT 1"}})
     );
+}
+
+#[test]
+fn late_function_declaration_overrides_inferred_custom() {
+    // Payload inference locked `custom`, then the first explicit
+    // declaration disagrees. The declaration is authoritative, matching
+    // the non-streaming parse of the assembled entry: the accumulated
+    // custom payload mirrors into the namespace and the call finalizes
+    // as a `function` call missing its whole payload (three semantic
+    // warnings); argument deltas already emitted are superseded by the
+    // authoritative BlockStop block (§ 9).
+    let (events, warnings) = stream_tool_call_chunks(&[
+        json!([{"index": 0, "id": "x", "custom": {"name": "run_sql", "input": "SELECT 1"}}]),
+        json!([{"index": 0, "type": "function"}]),
+    ]);
+    let entry = json!({"id": "x", "type": "function",
+                       "custom": {"name": "run_sql", "input": "SELECT 1"}});
+    let (block, expected) = non_streaming_entry(&entry);
+    assert_eq!(expected.len(), 3, "{expected:?}");
+    assert_eq!(finalized_block(&events), block);
+    assert_eq!(
+        warning_fingerprints(&warnings),
+        warning_fingerprints(&expected)
+    );
+
+    // Accumulation adopts the authoritative fold: the pre-switch name
+    // and argument deltas do not survive into the unified fields.
+    let resp = accumulate(&events);
+    let ContentBlock::ToolCall {
+        name, arguments, ..
+    } = &resp.message.content[0]
+    else {
+        panic!("expected tool call");
+    };
+    assert!(name.is_empty());
+    assert!(arguments.is_empty());
+}
+
+#[test]
+fn late_custom_declaration_overrides_inferred_function() {
+    let (events, warnings) = stream_tool_call_chunks(&[
+        json!([{"index": 0, "id": "x", "function": {"name": "f", "arguments": "{}"}}]),
+        json!([{"index": 0, "type": "custom"}]),
+    ]);
+    let entry = json!({"id": "x", "type": "custom",
+                       "function": {"name": "f", "arguments": "{}"}});
+    let (block, expected) = non_streaming_entry(&entry);
+    assert_eq!(finalized_block(&events), block);
+    assert_eq!(
+        warning_fingerprints(&warnings),
+        warning_fingerprints(&expected)
+    );
+    // The namespace keeps the declared kind and the mirrored payload.
+    let ContentBlock::ToolCall { extra, .. } = finalized_block(&events) else {
+        panic!("expected tool call");
+    };
+    let ns = extra.get(F).unwrap();
+    assert_eq!(ns.get("type"), Some(&json!("custom")));
+    assert_eq!(
+        ns.get("function"),
+        Some(&json!({"name": "f", "arguments": "{}"}))
+    );
+}
+
+#[test]
+fn late_declaration_matching_inference_is_silent() {
+    // A late declaration that agrees with the inferred kind changes
+    // nothing and warns nothing.
+    let (events, warnings) = stream_tool_call_chunks(&[
+        json!([{"index": 0, "id": "x", "custom": {"name": "run_sql", "input": "SELECT 1"}}]),
+        json!([{"index": 0, "type": "custom"}]),
+    ]);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let entry = json!({"id": "x", "type": "custom",
+                       "custom": {"name": "run_sql", "input": "SELECT 1"}});
+    let (block, ws) = non_streaming_entry(&entry);
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(finalized_block(&events), block);
+
+    // Same for the `function` default (no reserved key written).
+    let (events, warnings) = stream_tool_call_chunks(&[
+        json!([{"index": 0, "id": "x", "function": {"name": "f", "arguments": "{}"}}]),
+        json!([{"index": 0, "type": "function"}]),
+    ]);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let (block, _) = non_streaming_entry(&json!({"id": "x", "type": "function",
+        "function": {"name": "f", "arguments": "{}"}}));
+    assert_eq!(finalized_block(&events), block);
+}
+
+#[test]
+fn conflicting_type_declarations_first_wins() {
+    // A later declaration that differs from the first is ignored with
+    // one semantic warning — adopting it could silently change the call
+    // shape mid-stream.
+    let base = json!([{"index": 0, "id": "x", "type": "function",
+                       "function": {"name": "f", "arguments": "{}"}}]);
+    let (function_block, ws) = non_streaming_entry(&json!({"id": "x", "type": "function",
+        "function": {"name": "f", "arguments": "{}"}}));
+    assert!(ws.is_empty(), "{ws:?}");
+    for later in [json!("custom"), json!("dialect_call"), json!(5)] {
+        let (events, warnings) =
+            stream_tool_call_chunks(&[base.clone(), json!([{"index": 0, "type": later.clone()}])]);
+        assert_eq!(warnings.len(), 1, "{later}: {warnings:?}");
+        assert_eq!(warnings[0].code, WarningCode::MalformedToolCall);
+        assert_eq!(warnings[0].severity, WarningSeverity::Semantic);
+        assert!(
+            warnings[0].message.contains("first declaration wins"),
+            "{warnings:?}"
+        );
+        // The declared function shape stays untouched (no mirror switch).
+        assert_eq!(finalized_block(&events), function_block, "{later}");
+    }
+
+    // Repeating the same declaration is a consistent no-op.
+    let (events, warnings) =
+        stream_tool_call_chunks(&[base.clone(), json!([{"index": 0, "type": "function"}])]);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(finalized_block(&events), function_block);
+
+    // The reverse direction warns identically: a declared custom call
+    // ignores a later `function` declaration instead of dropping it
+    // silently.
+    let (events, warnings) = stream_tool_call_chunks(&[
+        json!([{"index": 0, "id": "x", "type": "custom",
+                "custom": {"name": "run_sql", "input": "SELECT 1"}}]),
+        json!([{"index": 0, "type": "function"}]),
+    ]);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedToolCall);
+    let (custom_block, ws) = non_streaming_entry(&json!({"id": "x", "type": "custom",
+        "custom": {"name": "run_sql", "input": "SELECT 1"}}));
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(finalized_block(&events), custom_block);
+
+    // First wins also protects a mirror-mode call: a late known
+    // declaration cannot un-mirror it.
+    let (events, warnings) = stream_tool_call_chunks(&[
+        json!([{"index": 0, "id": "x", "type": "dialect_call",
+                "function": {"name": "f", "arguments": "{}"}}]),
+        json!([{"index": 0, "type": "function"}]),
+    ]);
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedToolCall);
+    assert_eq!(warnings[1].code, WarningCode::MalformedField);
+    let (mirror_block, _) = non_streaming_entry(&json!({"id": "x", "type": "dialect_call",
+        "function": {"name": "f", "arguments": "{}"}}));
+    assert_eq!(finalized_block(&events), mirror_block);
+}
+
+#[test]
+fn non_string_type_parity_with_non_streaming() {
+    // A non-string, non-`null` `type` mirrors the call verbatim on both
+    // sides: same block, one cosmetic `MalformedField` each (the mirror
+    // re-serializes, so nothing is lost).
+    for ty in [json!(5), json!({"a": 1}), json!([1, 2])] {
+        for payload in [
+            Some(("function", json!({"name": "f", "arguments": "{}", "x": 1}))),
+            Some(("custom", json!({"name": "run_sql", "input": "SELECT 1"}))),
+            None,
+        ] {
+            let mut entry = json!({"id": "call_t", "type": ty.clone()});
+            if let Some((key, value)) = &payload {
+                entry[*key] = value.clone();
+            }
+            let mut fragment = entry.clone();
+            fragment["index"] = json!(0);
+            let (events, ws_stream) = stream_tool_call_chunks(&[json!([fragment])]);
+            // Mirror mode: no argument deltas.
+            assert!(
+                !events.iter().any(|e| matches!(
+                    e,
+                    StreamEvent::BlockDelta {
+                        delta: BlockDelta::ToolArguments(_),
+                        ..
+                    }
+                )),
+                "{entry}: {events:#?}"
+            );
+            assert_eq!(ws_stream.len(), 1, "{entry}: {ws_stream:?}");
+            assert_eq!(ws_stream[0].code, WarningCode::MalformedField);
+            assert_eq!(ws_stream[0].severity, WarningSeverity::Cosmetic);
+            assert!(ws_stream[0].message.contains("non-string"), "{ws_stream:?}");
+
+            let (block, ws_plain) = non_streaming_entry(&entry);
+            assert_eq!(finalized_block(&events), block, "{entry}");
+            assert_eq!(
+                warning_fingerprints(&ws_stream),
+                warning_fingerprints(&ws_plain),
+                "{entry}"
+            );
+        }
+    }
+}
+
+#[test]
+fn non_string_type_round_trips_verbatim() {
+    // The rebuilt entry restores the non-string `type` and its payload
+    // verbatim — no fabricated `function` object.
+    let entry = json!({"id": "call_t", "type": 5,
+                       "function": {"name": "f", "arguments": "{}"}});
+    let mut fragment = entry.clone();
+    fragment["index"] = json!(0);
+    let (events, _) = stream_tool_call_chunks(&[json!([fragment])]);
+    let req = Request::with_messages(vec![Message::assistant(vec![finalized_block(&events)])]);
+    let (body, ws) = request_from_ir(
+        &req,
+        None,
+        CallMode::Unary,
+        &ConvertOptions::default(),
+        &OpenAiChatCompletionsOptions::default(),
+    )
+    .unwrap();
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(body["messages"][0]["tool_calls"][0], entry);
+}
+
+#[test]
+fn late_non_string_type_switches_to_mirror() {
+    // Payload inference locked `function`, then the first declaration is
+    // non-string: the call switches to mirror mode (one cosmetic warning
+    // at the declaring fragment), later payload pieces keep accumulating
+    // there, and the fold matches the non-streaming parse of the
+    // assembled entry. The pre-switch argument delta is superseded by
+    // the authoritative BlockStop block (§ 9).
+    let (events, warnings) = stream_tool_call_chunks(&[
+        json!([{"index": 0, "id": "x", "function": {"name": "f", "arguments": "{\"a\":"}}]),
+        json!([{"index": 0, "type": 5, "function": {"arguments": "1}"}}]),
+    ]);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedField);
+    assert_eq!(warnings[0].severity, WarningSeverity::Cosmetic);
+
+    let entry = json!({"id": "x", "type": 5,
+                       "function": {"name": "f", "arguments": "{\"a\":1}"}});
+    let (block, ws) = non_streaming_entry(&entry);
+    assert_eq!(warning_fingerprints(&warnings), warning_fingerprints(&ws));
+    assert_eq!(finalized_block(&events), block);
+
+    let resp = accumulate(&events);
+    let ContentBlock::ToolCall { arguments, .. } = &resp.message.content[0] else {
+        panic!("expected tool call");
+    };
+    assert!(arguments.is_empty());
+}
+
+#[test]
+fn null_type_stays_absent() {
+    // `type: null` canonicalizes to absent on both sides — payload
+    // inference applies as if no declaration ever arrived.
+    let entry = json!({"id": "c", "type": null,
+                       "custom": {"name": "run_sql", "input": "SELECT 1"}});
+    let mut fragment = entry.clone();
+    fragment["index"] = json!(0);
+    let (events, warnings) = stream_tool_call_chunks(&[json!([fragment])]);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let (block, ws) = non_streaming_entry(&entry);
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(finalized_block(&events), block);
+    // Inference still runs: the lone custom payload wrote the reserved
+    // key on both sides.
+    let ContentBlock::ToolCall { extra, .. } = finalized_block(&events) else {
+        panic!("expected tool call");
+    };
+    assert_eq!(extra.get(F).unwrap().get("type"), Some(&json!("custom")));
 }
 
 #[test]

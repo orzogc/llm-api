@@ -72,13 +72,13 @@
 //!
 //! Parsing stores provider structure in each node's
 //! `extra["openai_chat_completions"]` namespace so same-format round-trips
-//! are lossless:
+//! reconstruct the wire shape faithfully:
 //!
 //! - `ToolCall` blocks use the reserved key of [`tool_call_reserved_key`]:
 //!   `type` records a non-`function` call kind (`custom` calls map
-//!   name/arguments to `custom.name` / `custom.input`; unknown kinds
-//!   mirror the whole entry). Unknown entry fields sit at the top,
-//!   `function` unknowns nest under `"function"`.
+//!   name/arguments to `custom.name` / `custom.input`; unknown kinds and
+//!   non-string `type` values mirror the whole entry). Unknown entry
+//!   fields sit at the top, `function` unknowns nest under `"function"`.
 //! - Refusal content (the `refusal` message field or `refusal` parts)
 //!   parses into `Text` blocks with `{"refusal": true}` (§ 9); such
 //!   blocks serialize back as `refusal` content parts.
@@ -139,7 +139,10 @@ pub(crate) const FORMAT: &str = ids::OPENAI_CHAT_COMPLETIONS;
 /// blocks (see the module docs).
 pub mod tool_call_reserved_key {
     /// The `tool_calls[]` entry `type` when it is not `function`
-    /// (`custom`, dialect kinds); selects the serialized payload shape.
+    /// (`custom`, dialect kinds, non-string values kept verbatim);
+    /// selects the serialized payload shape — only `"function"` /
+    /// `"custom"` rebuild a payload object, every other value re-emits
+    /// via the mirrored namespace.
     pub const TYPE: &str = "type";
 }
 
