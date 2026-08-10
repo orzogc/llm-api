@@ -121,6 +121,17 @@ pub(crate) fn parse_assistant_block(
         },
         Some("tool_use") => match typed_or_opaque::<ToolUseBlock>(value, loc, warnings) {
             Ok(t) => {
+                if !t.input.is_object() {
+                    // Semantic: the value is preserved verbatim, but
+                    // `input` requires an object, so even the source
+                    // format cannot re-serialize the resulting call.
+                    warnings.push(pwarn(
+                        WarningCode::MalformedToolCall,
+                        format!("{loc}/input"),
+                        "tool_use.input is not a JSON object; kept verbatim in \
+                         `arguments`, so rebuilding this call for Anthropic will fail",
+                    ));
+                }
                 let mut rest = t.extra;
                 let cache = split_cache_control(t.cache_control, &mut rest);
                 ContentBlock::ToolCall {

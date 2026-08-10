@@ -432,10 +432,12 @@ fn call_member_or_empty(
 /// Parses one `tool_calls[]` entry into a `ToolCall` block. `function`
 /// entries map directly; `custom` entries and unknown kinds use the
 /// reserved `type` key of the format namespace (see
-/// [`super::tool_call_reserved_key`]). Returns `None` (entry skipped, with
-/// a warning) for non-object entries. Upstream-required fields that are
-/// absent parse leniently — `id` as `None`, payload strings as `""` — and
-/// each missing one warns `MalformedToolCall` at its field path.
+/// [`super::tool_call_reserved_key`]). A typeless entry carrying only a
+/// `custom` payload counts as custom (silent § 1 canonicalization).
+/// Returns `None` (entry skipped, with a warning) for non-object entries.
+/// Upstream-required fields that are absent parse leniently — `id` as
+/// `None`, payload strings as `""` — and each missing one warns
+/// `MalformedToolCall` at its field path.
 pub(crate) fn tool_call_entry_to_block(
     entry: &Value,
     ptr: &str,
@@ -461,7 +463,17 @@ pub(crate) fn tool_call_entry_to_block(
         ));
     }
     let mut ns = Map::new();
-    let (name, arguments) = match wire.call_type.as_deref() {
+    // The declared `type` selects the payload shape; a typeless entry
+    // carrying only a `custom` payload is inferred as custom — silent
+    // canonicalization (§ 1): re-serialization emits `type: "custom"`,
+    // the same way typeless `function` entries regain their `type`. With
+    // both payloads present, `function` wins (matching the streaming
+    // parser's within-fragment routing order).
+    let call_type = match wire.call_type.as_deref() {
+        None if wire.function.is_none() && wire.custom.is_some() => Some("custom"),
+        declared => declared,
+    };
+    let (name, arguments) = match call_type {
         None | Some("function") => {
             if wire.function.is_none() {
                 warnings.push(warn(

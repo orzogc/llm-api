@@ -173,6 +173,24 @@ impl AnthropicStreamParser {
             Some("tool_use") => {
                 match serde_json::from_value::<ToolUseBlock>(content_block.clone()) {
                     Ok(t) => {
+                        // `input` arrives whole here (not incrementally), so
+                        // a non-object value is wire data of the same shape
+                        // as in the non-streaming response — warn now, at
+                        // the event that carried it. Invalid JSON later
+                        // *accumulated* from `input_json_delta` fragments
+                        // stays silent by design (§ 4.5 preserves invalid
+                        // JSON the model produced; truncation already shows
+                        // in the stop reason).
+                        if !t.input.is_object() {
+                            warnings.push(pwarn(
+                                WarningCode::MalformedToolCall,
+                                &format!("{loc}/input"),
+                                "tool_use.input is not a JSON object; unless \
+                                 input_json_delta fragments replace it, the finalized \
+                                 call keeps it verbatim in `arguments` and rebuilding \
+                                 for Anthropic will fail",
+                            ));
+                        }
                         let mut rest = t.extra;
                         let cache = super::to_ir::split_cache_control(t.cache_control, &mut rest);
                         let start = ContentBlock::ToolCall {
@@ -361,6 +379,11 @@ impl AnthropicStreamParser {
                 extra,
                 cache,
             } => {
+                // Deliberately no validation here: accumulated
+                // `input_json_delta` fragments are the model's own output
+                // and invalid JSON is preserved verbatim (§ 4.5); a
+                // non-object `start_input` already warned at
+                // `content_block_start`.
                 let arguments = if json.is_empty() {
                     serde_json::to_string(&start_input).unwrap_or_else(|_| "{}".to_owned())
                 } else {

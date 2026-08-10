@@ -437,7 +437,10 @@ fn tool_call_without_id_or_name_warns_at_finalize() {
             .all(|w| w.code == WarningCode::MalformedToolCall)
     );
     assert!(warnings[0].message.contains("no `id`"), "{warnings:?}");
-    assert!(warnings[1].message.contains("empty `name`"), "{warnings:?}");
+    assert!(
+        warnings[1].message.contains("`function.name` is missing"),
+        "{warnings:?}"
+    );
 }
 
 #[test]
@@ -514,7 +517,9 @@ fn custom_tool_call_type_survives_streaming() {
     // Undocumented for deltas (chunk schemas only define `function`), but
     // dialects may stream custom calls; the payload maps like the
     // non-streaming parse — `custom.name` → name, `custom.input` →
-    // arguments — and the reserved `type` key keeps the kind.
+    // arguments — and the reserved `type` key keeps the kind. The stream
+    // never delivers `custom.input`, which warns at finalization like the
+    // non-streaming parse of the same entry.
     let mut parser = OpenAiChatCompletions.stream_parser();
     let chunks = [
         json!({"id": "c", "choices": [{"index": 0, "delta": {"tool_calls": [
@@ -523,11 +528,18 @@ fn custom_tool_call_type_survives_streaming() {
         json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
     ];
     let mut events = Vec::new();
+    let mut warnings = Vec::new();
     for chunk in &chunks {
         let (evs, ws) = parser.parse(&chunk_event(chunk)).unwrap();
-        assert!(ws.is_empty(), "{ws:?}");
+        warnings.extend(ws);
         events.extend(evs);
     }
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedToolCall);
+    assert!(
+        warnings[0].message.contains("`custom.input` is missing"),
+        "{warnings:?}"
+    );
     // The opening block already carries the custom name.
     assert_eq!(
         ev(&events[1]),
@@ -649,6 +661,313 @@ fn streamed_custom_call_matches_non_streaming_parse() {
     let (req, ws) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
     assert!(ws.is_empty(), "{ws:?}");
     assert_eq!(streamed, req.messages[0].content[0]);
+}
+
+/// Parses a full assistant `tool_calls` entry through the non-streaming
+/// request parser, returning the block and the warnings.
+fn non_streaming_entry(entry: &Value) -> (ContentBlock, Vec<ConversionWarning>) {
+    let body = json!({"messages": [{"role": "assistant", "tool_calls": [entry]}]});
+    let (req, ws) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
+    (req.messages[0].content[0].clone(), ws)
+}
+
+#[test]
+fn unknown_call_type_streams_in_mirror_mode() {
+    // An unknown declared `type` cannot use the unified name/arguments
+    // channels; the accumulated payload folds verbatim into the block
+    // extra at finalization — the same block the non-streaming parse
+    // produces for the complete entry — and rebuilds verbatim.
+    let entry = json!({"id": "x", "type": "dialect_call",
+                       "function": {"name": "f", "arguments": "{}", "x": 1}});
+    let mut fragment = entry.clone();
+    fragment["index"] = json!(0);
+    let mut parser = OpenAiChatCompletions.stream_parser();
+    let mut events = Vec::new();
+    let mut warnings = Vec::new();
+    for chunk in [
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"tool_calls": [fragment]}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+    ] {
+        let (evs, ws) = parser.parse(&chunk_event(&chunk)).unwrap();
+        events.extend(evs);
+        warnings.extend(ws);
+    }
+    // Mirror mode streams no argument deltas.
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            StreamEvent::BlockDelta {
+                delta: BlockDelta::ToolArguments(_),
+                ..
+            }
+        )),
+        "{events:#?}"
+    );
+    // One cosmetic mirror warning, like the non-streaming parse.
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedField);
+    assert!(
+        warnings[0].message.contains("mirrored verbatim"),
+        "{warnings:?}"
+    );
+
+    let streamed = finalized_block(&events);
+    let ContentBlock::ToolCall {
+        id,
+        name,
+        arguments,
+        extra,
+        ..
+    } = &streamed
+    else {
+        panic!("expected tool call");
+    };
+    assert_eq!(id.as_deref(), Some("x"));
+    assert!(name.is_empty());
+    assert!(arguments.is_empty());
+    let ns = extra.get(F).unwrap();
+    assert_eq!(ns.get("type"), Some(&json!("dialect_call")));
+    assert_eq!(
+        ns.get("function"),
+        Some(&json!({"name": "f", "arguments": "{}", "x": 1}))
+    );
+
+    // Invariant: identical to the non-streaming parse of the entry.
+    let (block, ws) = non_streaming_entry(&entry);
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert_eq!(ws[0].code, WarningCode::MalformedField);
+    assert_eq!(streamed, block);
+
+    // Round trip: the block rebuilds the wire entry verbatim, including
+    // the payload `name` / `arguments` members.
+    let req = Request::with_messages(vec![Message::assistant(vec![streamed])]);
+    let (body, ws) = request_from_ir(
+        &req,
+        None,
+        CallMode::Unary,
+        &ConvertOptions::default(),
+        &OpenAiChatCompletionsOptions::default(),
+    )
+    .unwrap();
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(body["messages"][0]["tool_calls"][0], entry);
+}
+
+#[test]
+fn unknown_call_type_fragments_fold_across_chunks() {
+    // Mirror-mode accumulation: modeled string members concatenate across
+    // fragments and fold once at finalization (a piecewise extra merge
+    // would drop earlier pieces).
+    let mut parser = OpenAiChatCompletions.stream_parser();
+    let chunks = [
+        json!({"id": "c", "choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "id": "x", "type": "dialect_call",
+             "function": {"name": "f", "arguments": "{\"a\":"}},
+        ]}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": "1}", "x": 1}},
+        ]}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+    ];
+    let mut events = Vec::new();
+    let mut warnings = Vec::new();
+    for chunk in &chunks {
+        let (evs, ws) = parser.parse(&chunk_event(chunk)).unwrap();
+        events.extend(evs);
+        warnings.extend(ws);
+    }
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedField);
+
+    // Equals the non-streaming parse of the assembled entry.
+    let entry = json!({"id": "x", "type": "dialect_call",
+                       "function": {"name": "f", "arguments": "{\"a\":1}", "x": 1}});
+    let (block, _) = non_streaming_entry(&entry);
+    assert_eq!(finalized_block(&events), block);
+}
+
+#[test]
+fn late_unknown_type_switches_to_mirror() {
+    // Pathological order: payloads lock `function` first, the unknown
+    // `type` arrives later. The call still folds into mirror form, and
+    // the argument deltas already emitted are superseded by the
+    // authoritative BlockStop block (§ 9).
+    let mut parser = OpenAiChatCompletions.stream_parser();
+    let chunks = [
+        json!({"id": "c", "choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "id": "x", "function": {"name": "f", "arguments": "{}"}},
+        ]}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "type": "dialect_call", "function": {"x": 1}},
+        ]}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+    ];
+    let mut events = Vec::new();
+    let mut warnings = Vec::new();
+    for chunk in &chunks {
+        let (evs, ws) = parser.parse(&chunk_event(chunk)).unwrap();
+        events.extend(evs);
+        warnings.extend(ws);
+    }
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedField);
+
+    let entry = json!({"id": "x", "type": "dialect_call",
+                       "function": {"name": "f", "arguments": "{}", "x": 1}});
+    let (block, _) = non_streaming_entry(&entry);
+    assert_eq!(finalized_block(&events), block);
+
+    // Accumulation adopts the authoritative fold: the pre-switch argument
+    // delta does not survive into the unified field.
+    let (evs, _) = parser.parse(&SseEvent::new(None, "[DONE]")).unwrap();
+    events.extend(evs);
+    let resp = accumulate(&events);
+    let ContentBlock::ToolCall { arguments, .. } = &resp.message.content[0] else {
+        panic!("expected tool call");
+    };
+    assert!(arguments.is_empty());
+}
+
+#[test]
+fn typeless_custom_payload_infers_custom_kind() {
+    // A typeless call streaming only a `custom` payload is inferred as
+    // custom (silent § 1 canonicalization): the reserved `type` key is
+    // written so the rebuilt entry declares `type: "custom"`, and the
+    // block matches the non-streaming parse of the same entry.
+    let entry = json!({"id": "call_c", "custom": {"name": "run_sql", "input": "SELECT 1"}});
+    let mut fragment = entry.clone();
+    fragment["index"] = json!(0);
+    let mut parser = OpenAiChatCompletions.stream_parser();
+    let mut events = Vec::new();
+    for chunk in [
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"tool_calls": [fragment]}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+    ] {
+        let (evs, ws) = parser.parse(&chunk_event(&chunk)).unwrap();
+        assert!(ws.is_empty(), "{ws:?}");
+        events.extend(evs);
+    }
+    let streamed = finalized_block(&events);
+    let ContentBlock::ToolCall {
+        name,
+        arguments,
+        extra,
+        ..
+    } = &streamed
+    else {
+        panic!("expected tool call");
+    };
+    assert_eq!(name, "run_sql");
+    assert_eq!(arguments, "SELECT 1");
+    assert_eq!(extra.get(F).unwrap().get("type"), Some(&json!("custom")));
+
+    // Invariant: matches the non-streaming parse of the typeless entry.
+    let (block, ws) = non_streaming_entry(&entry);
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(streamed, block);
+
+    // The rebuilt entry carries the inferred type.
+    let req = Request::with_messages(vec![Message::assistant(vec![streamed])]);
+    let (body, ws) = request_from_ir(
+        &req,
+        None,
+        CallMode::Unary,
+        &ConvertOptions::default(),
+        &OpenAiChatCompletionsOptions::default(),
+    )
+    .unwrap();
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(
+        body["messages"][0]["tool_calls"][0],
+        json!({"id": "call_c", "type": "custom",
+               "custom": {"name": "run_sql", "input": "SELECT 1"}})
+    );
+}
+
+#[test]
+fn never_delivered_payload_members_warn_at_finalize() {
+    // Warning parity with the non-streaming lenient parse: each payload
+    // member the stream never delivered warns `MalformedToolCall` once;
+    // explicit empty strings are legitimate deliveries and stay silent.
+    let run = |fragments: Value| -> Vec<ConversionWarning> {
+        let mut parser = OpenAiChatCompletions.stream_parser();
+        let mut warnings = Vec::new();
+        for chunk in [
+            json!({"id": "c", "choices": [{"index": 0,
+                "delta": {"tool_calls": fragments}, "finish_reason": null}]}),
+            json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+        ] {
+            let (_, ws) = parser.parse(&chunk_event(&chunk)).unwrap();
+            warnings.extend(ws);
+        }
+        warnings
+    };
+
+    // Missing arguments: one warning, same code as the non-streaming
+    // parse of the same entry.
+    let ws = run(json!([{"index": 0, "id": "c1", "function": {"name": "f"}}]));
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert_eq!(ws[0].code, WarningCode::MalformedToolCall);
+    assert!(
+        ws[0].message.contains("`function.arguments` is missing"),
+        "{ws:?}"
+    );
+
+    // Missing name: one warning.
+    let ws = run(json!([{"index": 0, "id": "c1", "function": {"arguments": "{}"}}]));
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(
+        ws[0].message.contains("`function.name` is missing"),
+        "{ws:?}"
+    );
+
+    // Explicit empty strings are complete deliveries: silent.
+    let ws = run(json!([{"index": 0, "id": "c1", "function": {"name": "", "arguments": ""}}]));
+    assert!(ws.is_empty(), "{ws:?}");
+
+    // `null` members do not count as delivered (the non-streaming parse
+    // treats them as missing too).
+    let ws = run(json!([
+        {"index": 0, "id": "c1", "function": {"name": "f", "arguments": null}},
+    ]));
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(
+        ws[0].message.contains("`function.arguments` is missing"),
+        "{ws:?}"
+    );
+
+    // A non-string member warns at the routing site only — finalization
+    // does not report the same member a second time.
+    let ws = run(json!([
+        {"index": 0, "id": "c1", "function": {"name": "f", "arguments": 5}},
+    ]));
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(ws[0].message.contains("non-string"), "{ws:?}");
+
+    // Custom calls name their own argument channel.
+    let ws = run(json!([{"index": 0, "id": "c1", "type": "custom", "custom": {"name": "x"}}]));
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(
+        ws[0].message.contains("`custom.input` is missing"),
+        "{ws:?}"
+    );
+
+    // A call that never streams any payload reports the payload and both
+    // members, like the non-streaming parse of a bare entry.
+    let ws = run(json!([{"index": 0, "id": "c1"}]));
+    assert_eq!(ws.len(), 3, "{ws:?}");
+    assert!(ws.iter().all(|w| w.code == WarningCode::MalformedToolCall));
+    assert!(ws[0].message.contains("no `function` payload"), "{ws:?}");
+    assert!(
+        ws[1].message.contains("`function.name` is missing"),
+        "{ws:?}"
+    );
+    assert!(
+        ws[2].message.contains("`function.arguments` is missing"),
+        "{ws:?}"
+    );
 }
 
 #[test]

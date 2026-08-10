@@ -95,7 +95,12 @@ impl SseParser {
         // complete events. Known trade-off: a giant non-`data` line
         // (`event:`, `id:`, comment) that arrives complete within one chunk
         // is consumed into parser state unchecked — the § 12 cap is defined
-        // over joined `data:` lines only.
+        // over joined `data:` lines only. Conversely, when the cap is
+        // smaller than an unfinished line's raw length (field name and
+        // colon included), the outcome depends on chunking: byte-wise
+        // delivery trips this guard before the line completes while a
+        // single-chunk push parses it whole — conservative, and required
+        // for flood protection.
         let events = self.drain_lines(false)?;
         self.check_cap()?;
         Ok(events)
@@ -114,6 +119,18 @@ impl SseParser {
     }
 
     fn check_cap(&self) -> Result<(), Error> {
+        // While the BOM check is undecided, `buf` is a 0-2 byte BOM prefix
+        // and no line was ever drained, so `data` is empty. The prefix is
+        // transport decoration, not event payload: counting it would make
+        // caps of 0/1 fail on byte-wise delivery of a BOM that a whole-
+        // stream push accepts. Exempt the window (≤ 2 bytes, so no flood
+        // risk); the push that settles the check re-enters with
+        // `bom_checked` set and counts the bytes normally if they turn out
+        // to be content.
+        if !self.bom_checked {
+            debug_assert!(self.data.is_empty() && self.buf.len() <= 2);
+            return Ok(());
+        }
         // Guard both the joined data and the raw buffer (a stream that
         // never sends a newline must not grow memory unboundedly).
         //
@@ -569,6 +586,71 @@ mod tests {
         let mut p = SseParser::new(8);
         assert!(p.push(b"01234").is_ok());
         assert!(p.push(b"56789").is_err());
+    }
+
+    #[test]
+    fn size_cap_zero_exempts_undecided_bom_prefix() {
+        // A pure-BOM stream delivered byte by byte at cap 0: the undecided
+        // 1-2 byte prefix is transport decoration and must not count, so
+        // every push succeeds with no events — same as one whole push.
+        let mut p = SseParser::new(0);
+        for b in [0xEF, 0xBB, 0xBF] {
+            assert!(p.push(&[b]).unwrap().is_empty());
+        }
+        assert!(p.finish().unwrap().is_empty());
+
+        let mut whole = SseParser::new(0);
+        assert!(whole.push(&[0xEF, 0xBB, 0xBF]).unwrap().is_empty());
+        assert!(whole.finish().unwrap().is_empty());
+
+        // EOF while still undecided on a partial prefix also stays clean.
+        for prefix in [&[0xEF][..], &[0xEF, 0xBB][..]] {
+            let mut p = SseParser::new(0);
+            assert!(p.push(prefix).unwrap().is_empty());
+            assert!(p.finish().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn size_cap_zero_unaffected_by_leading_bom() {
+        // After a byte-wise BOM, cap accounting matches the BOM-less stream:
+        // an empty payload still fits a zero cap and dispatches.
+        let mut p = SseParser::new(0);
+        for b in [0xEF, 0xBB, 0xBF] {
+            assert!(p.push(&[b]).unwrap().is_empty());
+        }
+        let events = p.push(b"data:\n\n").unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "");
+    }
+
+    #[test]
+    fn size_cap_counts_settled_bom_lookalike_as_content() {
+        // A diverging byte proves the 1-byte prefix was content all along;
+        // the settling push counts it: [EF, x] is a 2-byte unfinished line
+        // over cap 1, identically whether split or pushed whole.
+        let mut split = SseParser::new(1);
+        assert!(split.push(&[0xEF]).unwrap().is_empty());
+        let err = split.push(b"x").unwrap_err();
+        assert!(matches!(
+            err,
+            Error::BodyTooLarge {
+                kind: BodyKind::SseEvent,
+                limit: 1,
+                ..
+            }
+        ));
+
+        let mut whole = SseParser::new(1);
+        let err = whole.push(&[0xEF, b'x']).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::BodyTooLarge {
+                kind: BodyKind::SseEvent,
+                limit: 1,
+                ..
+            }
+        ));
     }
 
     #[test]

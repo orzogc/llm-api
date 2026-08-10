@@ -9,7 +9,7 @@ use llm_api::formats::google_generate_content::{
 };
 use llm_api::{
     ApiErrorKind, ApiFormat, ContentBlock, ConvertOptions, Error, ImageSource, ResponseMeta, Role,
-    StopReason, Tool, ToolChoice, ToolOutputBlock, WarningCode,
+    StopReason, Tool, ToolChoice, ToolOutputBlock, WarningCode, WarningSeverity,
 };
 use serde_json::{Value, json};
 
@@ -501,13 +501,20 @@ fn function_call_args_edge_cases() {
         json!({"name": "f", "args": {}})
     );
 
-    // Non-object args parse leniently with a warning; serializing the
-    // resulting IR fails per the § 4.5 arguments contract.
+    // Non-object args parse leniently but degrade the call: the verbatim
+    // value cannot re-serialize (§ 4.5 arguments contract), so the warning
+    // is a semantic MalformedToolCall.
     let body = json!({
         "contents": [{"role": "model", "parts": [{"functionCall": {"name": "f", "args": 5}}]}]
     });
     let (ir, warnings) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
-    assert_eq!(warnings[0].code, WarningCode::MalformedField);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedToolCall);
+    assert_eq!(warnings[0].severity, WarningSeverity::Semantic);
+    assert_eq!(
+        warnings[0].location,
+        "/contents/0/parts/0/functionCall/args"
+    );
     assert!(matches!(
         &ir.messages[0].content[0],
         ContentBlock::ToolCall { arguments, .. } if arguments == "5"

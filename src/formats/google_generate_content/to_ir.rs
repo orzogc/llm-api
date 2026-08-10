@@ -155,11 +155,15 @@ pub(crate) fn classify_assistant_part(
                 serde_json::to_string(args).expect("JSON value serializes")
             }
             Some(other) => {
+                // Semantic: the value is preserved verbatim, but `args`
+                // requires an object, so even the source format cannot
+                // re-serialize the resulting call.
                 warn(
                     warnings,
-                    WarningCode::MalformedField,
+                    WarningCode::MalformedToolCall,
                     format!("{location}/functionCall/args"),
-                    "functionCall.args is not a JSON object",
+                    "functionCall.args is not a JSON object; kept verbatim in \
+                     `arguments`, so rebuilding this call for Google will fail",
                 );
                 serde_json::to_string(other).expect("JSON value serializes")
             }

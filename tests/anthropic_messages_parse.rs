@@ -5,7 +5,7 @@ use llm_api::formats::anthropic_messages::AnthropicMessages;
 use llm_api::{
     ApiErrorKind, ApiFormat, BuildCtx, CallMode, ContentBlock, ConversionError, ConvertOptions,
     Effort, EndpointUrl, Error, Message, OutputFormat, Request, ResponseMeta, Role, StopReason,
-    Tool, ToolChoice, ToolOutputBlock, WarningCode,
+    Tool, ToolChoice, ToolOutputBlock, WarningCode, WarningSeverity,
 };
 use serde_json::{Value, json};
 
@@ -554,6 +554,71 @@ fn parse_response_tool_use() {
         }
         other => panic!("unexpected block: {other:?}"),
     }
+}
+
+#[test]
+fn tool_use_non_object_input_warns_and_keeps_value_verbatim() {
+    // Request side: the wire value survives verbatim in `arguments`, but
+    // the call is degraded — same-format rebuild fails the § 4.5 object
+    // contract — so the parse warns MalformedToolCall (semantic).
+    let body = json!({
+        "model": "m", "max_tokens": 5,
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "tu_1", "name": "f", "input": 5}
+            ]},
+        ],
+    });
+    let (req, warnings) = AnthropicMessages
+        .parse_request(&serde_json::to_vec(&body).unwrap())
+        .unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedToolCall);
+    assert_eq!(warnings[0].severity, WarningSeverity::Semantic);
+    assert_eq!(warnings[0].location, "/messages/1/content/0/input");
+    match &req.messages[1].content[0] {
+        ContentBlock::ToolCall { id, arguments, .. } => {
+            assert_eq!(id.as_deref(), Some("tu_1"));
+            assert_eq!(arguments, "5");
+        }
+        other => panic!("unexpected block: {other:?}"),
+    }
+    assert!(
+        AnthropicMessages
+            .build_request(&req, &ctx_for("m"))
+            .is_err()
+    );
+
+    // Response side reports through Response.warnings.
+    let body = json!({
+        "id": "m", "type": "message", "role": "assistant", "model": "x",
+        "content": [{"type": "tool_use", "id": "tu_1", "name": "f", "input": [1, 2]}],
+        "stop_reason": "tool_use",
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    });
+    let resp = AnthropicMessages
+        .parse_response(&serde_json::to_vec(&body).unwrap(), &meta())
+        .unwrap();
+    assert_eq!(resp.warnings.len(), 1, "{:?}", resp.warnings);
+    assert_eq!(resp.warnings[0].code, WarningCode::MalformedToolCall);
+    assert_eq!(resp.warnings[0].location, "/content/0/input");
+    assert!(matches!(
+        &resp.message.content[0],
+        ContentBlock::ToolCall { arguments, .. } if arguments == "[1,2]"
+    ));
+
+    // An object input stays warning-free.
+    let body = json!({
+        "id": "m", "type": "message", "role": "assistant", "model": "x",
+        "content": [{"type": "tool_use", "id": "tu_1", "name": "f", "input": {"a": 1}}],
+        "stop_reason": "tool_use",
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    });
+    let resp = AnthropicMessages
+        .parse_response(&serde_json::to_vec(&body).unwrap(), &meta())
+        .unwrap();
+    assert!(resp.warnings.is_empty(), "{:?}", resp.warnings);
 }
 
 #[test]

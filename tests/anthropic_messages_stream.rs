@@ -151,6 +151,78 @@ fn tool_use_stream_accumulates_fragments() {
 }
 
 #[test]
+fn tool_use_non_object_start_input_warns() {
+    // `input` on content_block_start arrives whole (not incrementally); a
+    // non-object value warns MalformedToolCall at the start event — once —
+    // and the finalized call keeps the value verbatim.
+    let mut parser = AnthropicMessages.stream_parser();
+    let (_, warnings) = parser
+        .parse(&SseEvent::new(
+            Some("content_block_start"),
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tu_1","name":"f","input":5}}"#,
+        ))
+        .unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedToolCall);
+    assert_eq!(warnings[0].location, "/content_block_start/0/input");
+
+    let (events, warnings) = parser
+        .parse(&SseEvent::new(
+            Some("content_block_stop"),
+            r#"{"type":"content_block_stop","index":0}"#,
+        ))
+        .unwrap();
+    assert!(
+        warnings.is_empty(),
+        "no second warning at stop: {warnings:?}"
+    );
+    match &events[0] {
+        StreamEvent::BlockStop {
+            block: Some(ContentBlock::ToolCall { arguments, .. }),
+            ..
+        } => assert_eq!(arguments, "5"),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn invalid_accumulated_tool_json_stays_silent() {
+    // § 4.5 boundary: invalid JSON assembled from the model's own
+    // input_json_delta fragments is preserved verbatim with no warning
+    // (truncation already shows in the stop reason); only a non-object
+    // start `input` warns. The canonical `{}` start input is warning-free.
+    let mut parser = AnthropicMessages.stream_parser();
+    let (_, warnings) = parser
+        .parse(&SseEvent::new(
+            Some("content_block_start"),
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tu_1","name":"f","input":{}}}"#,
+        ))
+        .unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let (_, warnings) = parser
+        .parse(&SseEvent::new(
+            Some("content_block_delta"),
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"a\": tru"}}"#,
+        ))
+        .unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let (events, warnings) = parser
+        .parse(&SseEvent::new(
+            Some("content_block_stop"),
+            r#"{"type":"content_block_stop","index":0}"#,
+        ))
+        .unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    match &events[0] {
+        StreamEvent::BlockStop {
+            block: Some(ContentBlock::ToolCall { arguments, .. }),
+            ..
+        } => assert_eq!(arguments, "{\"a\": tru"),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
 fn interleaved_thinking_stream() {
     let (events, warnings) = feed("stream_thinking_interleaved.sse").unwrap();
     assert!(warnings.is_empty());

@@ -1853,6 +1853,64 @@ fn tool_call_missing_fields_warn_and_parse_lenient() {
     );
 }
 
+#[test]
+fn typeless_custom_entry_infers_custom_kind() {
+    // A typeless entry carrying only a `custom` payload parses exactly
+    // like one declaring `type: "custom"` — silent § 1 canonicalization;
+    // the rebuilt entry gains the explicit `type`.
+    let parse = |entry: Value| {
+        let body = json!({"messages": [{"role": "assistant", "tool_calls": [entry]}]});
+        request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap()
+    };
+    let typeless =
+        json!({"id": "c", "custom": {"name": "run_sql", "input": "SELECT 1", "vendor": 1}});
+    let mut explicit = typeless.clone();
+    explicit["type"] = json!("custom");
+    let (req_typeless, ws) = parse(typeless);
+    assert!(ws.is_empty(), "{ws:?}");
+    let (req_explicit, ws) = parse(explicit.clone());
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(req_typeless.messages, req_explicit.messages);
+    let ContentBlock::ToolCall {
+        name,
+        arguments,
+        extra,
+        ..
+    } = &req_typeless.messages[0].content[0]
+    else {
+        panic!("expected tool call");
+    };
+    assert_eq!(name, "run_sql");
+    assert_eq!(arguments, "SELECT 1");
+    assert_eq!(extra.get(F).unwrap().get("type"), Some(&json!("custom")));
+
+    // Serialization restores the explicit form.
+    let (body, ws) = from_ir_unary(&req_typeless);
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(body["messages"][0]["tool_calls"][0], explicit);
+
+    // Inferred customs degrade like declared ones: a missing `input`
+    // warns at the custom member path.
+    let (_, ws) = parse(json!({"id": "c", "custom": {"name": "x"}}));
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert_eq!(ws[0].code, WarningCode::MalformedToolCall);
+    assert_eq!(ws[0].location, "/messages/0/tool_calls/0/custom/input");
+
+    // Both payloads without a type keep the `function` reading (the
+    // `custom` payload mirrors into the namespace, no inferred type).
+    let (req, ws) = parse(json!({"id": "c",
+        "function": {"name": "f", "arguments": "{}"},
+        "custom": {"name": "x", "input": "y"}}));
+    assert!(ws.is_empty(), "{ws:?}");
+    let ContentBlock::ToolCall { name, extra, .. } = &req.messages[0].content[0] else {
+        panic!("expected tool call");
+    };
+    assert_eq!(name, "f");
+    let ns = extra.get(F).unwrap();
+    assert!(!ns.contains_key("type"), "{ns:?}");
+    assert_eq!(ns.get("custom"), Some(&json!({"name": "x", "input": "y"})));
+}
+
 // ---------------------------------------------------------------- responses
 
 #[test]

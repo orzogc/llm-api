@@ -105,7 +105,10 @@
 //! `StreamOptionsDropped` except a literal `include_usage: true`, the only
 //! value the build side re-injects); explicit `null` fields
 //! (e.g. assistant `content: null`) canonicalize to absent; a
-//! message-level `refusal` field becomes a `refusal` content part.
+//! message-level `refusal` field becomes a `refusal` content part; a
+//! typeless `tool_calls[]` entry carrying only a `custom` payload counts
+//! as a custom call and re-serializes with an explicit `type: "custom"`
+//! (like the `function` default).
 //! Streaming `logprobs` and chunk envelope fields (`system_fingerprint`,
 //! `obfuscation`, …) are known-ignorable and not surfaced — use the
 //! `include_raw` call option for the raw payloads.
