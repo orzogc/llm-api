@@ -56,18 +56,18 @@ fn clamp_opt(v: Option<i64>) -> Option<u64> {
 
 /// Converts `usageMetadata` to unified usage (§ 8): `promptTokenCount`
 /// already includes cached tokens; `candidatesTokenCount` excludes thoughts,
-/// so `output_tokens` adds `thoughtsTokenCount` back in.
-///
-/// `toolUsePromptTokenCount` (server-side tool prompts, e.g. search
-/// grounding) is deliberately *not* folded into `input_tokens`: the official
-/// docs do not pin whether `promptTokenCount` already includes it, and
-/// folding it in would risk double counting. The field stays visible in
-/// [`Usage::raw`]. Revisit once live traffic settles the question.
+/// so `output_tokens` adds `thoughtsTokenCount` back in; and
+/// `promptTokenCount` excludes the server-side tool-use prompts
+/// (`toolUsePromptTokenCount` — search grounding, code execution) while
+/// `totalTokenCount` includes them, so `input_tokens` adds them back in —
+/// live-verified: prompt + candidates + thoughts + toolUse == total. Both
+/// are field-semantics alignment (addition), not value conversion.
 #[must_use]
 pub(crate) fn usage_from_metadata(u: &types::UsageMetadata) -> Usage {
     let mut usage = Usage {
-        input_tokens: clamp(u.prompt_token_count),
-        // Saturating so misbehaving provider counts cannot overflow the sum.
+        // Saturating so misbehaving provider counts cannot overflow a sum.
+        input_tokens: clamp(u.prompt_token_count)
+            .saturating_add(clamp(u.tool_use_prompt_token_count)),
         output_tokens: clamp(u.candidates_token_count)
             .saturating_add(clamp(u.thoughts_token_count)),
         total_tokens: clamp_opt(u.total_token_count),

@@ -462,6 +462,11 @@ pub struct UsageMetadata {
     /// is used).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_token_count: Option<i64>,
+    /// Tokens of the server-side tool-use prompts (search grounding, code
+    /// execution). Excluded from `promptTokenCount` but included in
+    /// `totalTokenCount` (live-verified).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_prompt_token_count: Option<i64>,
     /// Tokens in the cached part of the prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_content_token_count: Option<i64>,

@@ -892,6 +892,40 @@ fn function_call_response_normalizes_to_tool_use() {
 }
 
 #[test]
+fn usage_folds_tool_use_prompt_tokens_into_input() {
+    // Live-verified shape (code_execution): toolUsePromptTokenCount is
+    // outside promptTokenCount but inside totalTokenCount, so input folds
+    // it in and input + output == total holds.
+    let body = json!({
+        "candidates": [{
+            "content": {"parts": [{"text": "2178588618496"}], "role": "model"},
+            "finishReason": "STOP",
+        }],
+        "usageMetadata": {
+            "promptTokenCount": 74,
+            "candidatesTokenCount": 103,
+            "thoughtsTokenCount": 293,
+            "toolUsePromptTokenCount": 155,
+            "totalTokenCount": 625,
+        }
+    });
+    let resp = response_to_ir(&serde_json::to_vec(&body).unwrap(), &meta()).unwrap();
+    let usage = resp.usage.as_ref().unwrap();
+    assert_eq!(usage.input_tokens, 74 + 155);
+    assert_eq!(usage.output_tokens, 103 + 293);
+    assert_eq!(usage.total_tokens, Some(625));
+    assert_eq!(
+        usage.input_tokens + usage.output_tokens,
+        usage.total_tokens.unwrap()
+    );
+    // The provider field stays visible in raw.
+    assert_eq!(
+        usage.raw.as_ref().unwrap()["toolUsePromptTokenCount"],
+        json!(155)
+    );
+}
+
+#[test]
 fn usage_boundary_values_clamp_and_saturate() {
     let candidate = json!({
         "content": {"parts": [{"text": "x"}], "role": "model"},

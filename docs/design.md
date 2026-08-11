@@ -939,10 +939,12 @@ types — degrades to `usage: None` with a `MalformedField` warning. It never
 fails an otherwise-good billed response or stream, and never silently
 zeroes a field. (Count-tokens responses are the deliberate opposite: § 13
 pins them fail-loud, since the count *is* the payload.) Google's
-`toolUsePromptTokenCount` is deliberately not folded into `input_tokens` —
-the official docs do not pin whether `promptTokenCount` already includes
-it, and double-counting would be worse than under-reporting; the original
-value stays visible in `Usage.raw`.
+`input_tokens` additionally folds in `toolUsePromptTokenCount` (server-side
+tool prompts — search grounding, code execution): live verification shows
+it is excluded from `promptTokenCount` but included in `totalTokenCount`
+(prompt + candidates + thoughts + toolUse == total, exactly), so the fold
+is required both by the "ALL input tokens" semantics above and to keep
+input + output = total.
 
 ## 9. Streaming
 

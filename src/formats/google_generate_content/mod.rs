@@ -36,11 +36,12 @@
 //!   `extra["google_generate_content"]["thoughtSignature"]`.
 //! - `thinkingBudget` is deliberately not modeled (design § 4.7); rewrite
 //!   `generationConfig.thinkingConfig` via `extra` where needed.
-//! - Usage: `input_tokens` maps `promptTokenCount` only —
-//!   `toolUsePromptTokenCount` is not folded in (double-count risk; the raw
-//!   field stays in [`crate::ir::Usage::raw`]); a malformed `usageMetadata`
-//!   degrades to no usage with a `MalformedField` warning instead of
-//!   failing the billed response or chunk.
+//! - Usage: `input_tokens` = `promptTokenCount + toolUsePromptTokenCount`
+//!   (live-verified: the tool-use term is excluded from `promptTokenCount`
+//!   but included in `totalTokenCount`, so folding it in keeps
+//!   input + output = total); a malformed `usageMetadata` degrades to no
+//!   usage with a `MalformedField` warning instead of failing the billed
+//!   response or chunk.
 //! - Streaming: an error envelope (`data: {"error": {...}}`) on the 2xx
 //!   channel raises [`Error::Api`] (`error.code` → status when plausible,
 //!   gRPC `error.status` → kind); a chunk carrying no modeled signal at all

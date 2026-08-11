@@ -198,8 +198,10 @@ Round-trip metadata flows **parse-attach → serialize-consume**.
   (semantic, parse side); in streams, chunks for candidate index > 0
   surface as `Unknown` with the warning emitted **once per stream**.
 - Usage unification (§ 8): Anthropic `input_tokens` += cache read+write;
-  Google `output_tokens` = `candidatesTokenCount + thoughtsTokenCount`.
-  Keep the provider object in `Usage.raw`. Usage parses leniently on
+  Google `output_tokens` = `candidatesTokenCount + thoughtsTokenCount` and
+  `input_tokens` = `promptTokenCount + toolUsePromptTokenCount`
+  (live-verified: the tool-use term is outside `promptTokenCount`, inside
+  `totalTokenCount`). Keep the provider object in `Usage.raw`. Usage parses leniently on
   every path (non-streaming, stream start, stream deltas, terminal
   snapshots): a malformed usage object degrades to `usage: None` +
   `MalformedField` — never fail the billed response/stream, never zero a
