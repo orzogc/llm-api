@@ -10,7 +10,10 @@
 //! Keys and model ids are read from the process environment first, then
 //! from a `.env` file at the crate root (`KEY=VALUE` lines, `#` comments,
 //! optional quotes; the file is gitignored). A test silently passes without
-//! its key. Keys are named `LLM_API_{OPENAI,ANTHROPIC,GOOGLE,DEEPSEEK}
+//! its key — unless `LLM_API_LIVE_REQUIRE_KEYS` is set (non-empty), which
+//! turns a missing key into a panic naming the variable (for runs that
+//! must not skip silently). Keys are named
+//! `LLM_API_{OPENAI,ANTHROPIC,GOOGLE,DEEPSEEK}
 //! _API_KEY` — deliberately prefixed, with no fallback to the providers'
 //! conventional names: development environments own some of those (e.g.
 //! Claude Code sets `ANTHROPIC_API_KEY` to its own credential), and a
@@ -25,8 +28,13 @@
 //!   non-thinking mode to answer "can non-thinking models call tools?");
 //! - structured output (JSON Schema), streaming and non-streaming;
 //! - image input (OpenAI CC / Responses, Anthropic, Google — DeepSeek
-//!   models are text-only);
-//! - model listing, and token counting where the provider has an endpoint.
+//!   models are text-only), non-streaming everywhere plus a streaming
+//!   variant on Responses and Google;
+//! - a system-instruction smoke (the system channel demonstrably steers
+//!   the reply) on the four primary provider/format pairs;
+//! - model listing, and token counting where the provider has an endpoint —
+//!   including a rich count (system + tools) asserted warning-clean;
+//! - an `include_raw` streaming smoke (Google).
 //!
 //! The DeepSeek tests exercise the dialect paths of three formats (per
 //! <https://api-docs.deepseek.com/guides/>): Chat Completions, Anthropic
@@ -41,14 +49,17 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
+use futures_util::StreamExt;
 use llm_api::formats::anthropic_messages::AnthropicMessages;
 use llm_api::formats::google_generate_content::GoogleGenerateContent;
 use llm_api::formats::openai_chat_completions::OpenAiChatCompletions;
 use llm_api::formats::openai_responses::OpenAiResponses;
 use llm_api::{
-    ApiFormat, CallOptions, Client, ContentBlock, Effort, FunctionTool, Message, OutputFormat,
-    ProviderConfig, Reasoning, Request, Response, Tool, http::ApiKey, ids,
+    ApiFormat, CallOptions, Client, ContentBlock, ConversionWarning, Effort, FunctionTool, Message,
+    OutputFormat, ProviderConfig, Reasoning, Request, Response, Tool, WarningSeverity,
+    http::ApiKey, ids,
 };
 use serde_json::{Value, json};
 
@@ -96,6 +107,26 @@ fn env(name: &str) -> Option<String> {
         .or_else(|| dotenv().get(name).cloned().filter(|v| !v.is_empty()))
 }
 
+/// Reads a provider API key. Normally a missing key means "skip the test
+/// silently"; with `LLM_API_LIVE_REQUIRE_KEYS` set (non-empty) it panics
+/// instead, naming the missing variable — for runs that must not skip.
+fn key(name: &str) -> Option<String> {
+    let value = env(name);
+    if value.is_none() && env("LLM_API_LIVE_REQUIRE_KEYS").is_some() {
+        panic!("{name} is not set but LLM_API_LIVE_REQUIRE_KEYS demands it");
+    }
+    value
+}
+
+/// The shared live transport: a generous 300 s timeout — thinking and
+/// long streaming runs regularly outlive reqwest-default-ish budgets.
+fn live_http() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .build()
+        .expect("reqwest client builds")
+}
+
 fn provider(
     format: impl ApiFormat + 'static,
     base: &str,
@@ -113,7 +144,7 @@ fn openai(format: impl ApiFormat + 'static) -> Option<ProviderConfig> {
     Some(provider(
         format,
         "https://api.openai.com/v1",
-        env("LLM_API_OPENAI_API_KEY")?,
+        key("LLM_API_OPENAI_API_KEY")?,
         "LLM_API_LIVE_OPENAI_MODEL",
         "gpt-5.6-sol",
     ))
@@ -123,7 +154,7 @@ fn anthropic() -> Option<ProviderConfig> {
     Some(provider(
         AnthropicMessages,
         "https://api.anthropic.com/v1",
-        env("LLM_API_ANTHROPIC_API_KEY")?,
+        key("LLM_API_ANTHROPIC_API_KEY")?,
         "LLM_API_LIVE_ANTHROPIC_MODEL",
         "claude-opus-5",
     ))
@@ -133,7 +164,7 @@ fn google() -> Option<ProviderConfig> {
     Some(provider(
         GoogleGenerateContent,
         "https://generativelanguage.googleapis.com/v1beta",
-        env("LLM_API_GOOGLE_API_KEY")?,
+        key("LLM_API_GOOGLE_API_KEY")?,
         "LLM_API_LIVE_GOOGLE_MODEL",
         "gemini-3.6-flash",
     ))
@@ -146,7 +177,7 @@ fn deepseek(format: impl ApiFormat + 'static, base: &str) -> Option<ProviderConf
     Some(provider(
         format,
         base,
-        env("LLM_API_DEEPSEEK_API_KEY")?,
+        key("LLM_API_DEEPSEEK_API_KEY")?,
         "LLM_API_LIVE_DEEPSEEK_MODEL",
         "deepseek-v4-flash",
     ))
@@ -255,7 +286,7 @@ fn reasoning_tokens(response: &Response) -> u64 {
 }
 
 async fn chat(provider: &ProviderConfig, request: &Request, streaming: bool) -> Response {
-    let client = Client::new(reqwest::Client::new());
+    let client = Client::new(live_http());
     if streaming {
         client
             .stream(provider, request, &CallOptions::default())
@@ -270,6 +301,25 @@ async fn chat(provider: &ProviderConfig, request: &Request, streaming: bool) -> 
             .await
             .expect("live chat call failed")
     }
+}
+
+/// Fails on any semantic-severity warning in `warnings`; cosmetic ones are
+/// expected noise on several provider paths and stay allowed.
+fn assert_no_semantic_warnings_in(what: &str, warnings: &[ConversionWarning]) {
+    let semantic: Vec<&ConversionWarning> = warnings
+        .iter()
+        .filter(|w| w.severity == WarningSeverity::Semantic)
+        .collect();
+    assert!(
+        semantic.is_empty(),
+        "unexpected semantic warnings in {what}: {semantic:?}"
+    );
+}
+
+/// Bare-path responses (no dialect quirks, no thinking replay) must not
+/// carry semantic warnings.
+fn assert_no_semantic_warnings(response: &Response) {
+    assert_no_semantic_warnings_in("response", &response.warnings);
 }
 
 fn assert_thinking_mode(response: &Response, thinking: bool) {
@@ -497,21 +547,39 @@ async fn assert_structured_output(provider: ProviderConfig, streaming: bool) {
 /// A 64×64 solid-red PNG (base64), small enough to embed.
 const RED_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAS0lEQVR42u3PQQkAAAgAsetfWiP4FgYrsKZeS0BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEDgsqnc8OJg6Ln3AAAAAElFTkSuQmCC";
 
-async fn assert_image_input(provider: ProviderConfig) {
+async fn assert_image_input(provider: ProviderConfig, streaming: bool) {
     let mut req = Request::with_messages(vec![Message::user(vec![
         ContentBlock::text("What is the dominant color of this image? Answer with one word."),
         ContentBlock::image_base64("image/png", RED_PNG_BASE64),
     ])]);
     req.max_output_tokens = Some(1024);
-    let response = chat(&provider, &req, false).await;
+    let response = chat(&provider, &req, streaming).await;
     assert!(
         response.text().to_lowercase().contains("red"),
         "expected the model to see a red image: {response:?}"
     );
+    assert_no_semantic_warnings(&response);
+}
+
+/// System-channel smoke: the system prompt demonstrably steers the reply
+/// (the user turn only makes sense if the instruction arrived).
+async fn assert_system_instruction(provider: ProviderConfig) {
+    let mut req = Request::with_messages(vec![Message::user_text(
+        "Which word were you instructed to reply with? Reply with exactly that word.",
+    )])
+    .with_system_text("Always reply with exactly the single word BLUE, uppercase, no punctuation.");
+    // Enough headroom for the default models that think before answering.
+    req.max_output_tokens = Some(512);
+    let response = chat(&provider, &req, false).await;
+    assert!(
+        response.text().to_lowercase().contains("blue"),
+        "the system instruction did not steer the reply: {response:?}"
+    );
+    assert_no_semantic_warnings(&response);
 }
 
 async fn assert_models_work(provider: ProviderConfig) {
-    let client = Client::new(reqwest::Client::new());
+    let client = Client::new(live_http());
     let models = client
         .list_models(&provider)
         .await
@@ -521,7 +589,7 @@ async fn assert_models_work(provider: ProviderConfig) {
 }
 
 async fn assert_count_works(provider: ProviderConfig) {
-    let client = Client::new(reqwest::Client::new());
+    let client = Client::new(live_http());
     let mut req = Request::with_messages(vec![Message::user_text("Hello!")]);
     req.max_output_tokens = Some(64);
     let count = client
@@ -529,6 +597,26 @@ async fn assert_count_works(provider: ProviderConfig) {
         .await
         .expect("live count failed");
     assert!(count.input_tokens > 0);
+}
+
+/// Rich token count: system + tools + user text. All three ride every
+/// count endpoint's acceptance set, and IR-generated keys an endpoint
+/// rejects (e.g. Anthropic `max_tokens`) drop silently by design (§ 13) —
+/// so the count must come back positive with no semantic warnings.
+async fn assert_count_rich_request(provider: ProviderConfig) {
+    let client = Client::new(live_http());
+    let mut req = Request::with_messages(vec![Message::user_text(
+        "Use the get_weather tool to check the weather in Paris.",
+    )])
+    .with_system_text("You are a terse weather assistant.");
+    req.tools = Some(weather_tools());
+    req.max_output_tokens = Some(64);
+    let count = client
+        .count_tokens(&provider, &req, &CallOptions::default())
+        .await
+        .expect("live rich count failed");
+    assert!(count.input_tokens > 0);
+    assert_no_semantic_warnings_in("token count", &count.warnings);
 }
 
 // ---- test matrix ----
@@ -636,7 +724,16 @@ async fn openai_chat_completions_image_input_live() {
     let Some(p) = openai(OpenAiChatCompletions) else {
         return;
     };
-    assert_image_input(p).await;
+    assert_image_input(p, false).await;
+}
+
+#[tokio::test]
+#[ignore = "live API call; needs LLM_API_OPENAI_API_KEY (env or .env)"]
+async fn openai_chat_completions_system_instruction_live() {
+    let Some(p) = openai(OpenAiChatCompletions) else {
+        return;
+    };
+    assert_system_instruction(p).await;
 }
 
 #[tokio::test]
@@ -725,7 +822,25 @@ async fn openai_responses_image_input_live() {
     let Some(p) = openai(OpenAiResponses) else {
         return;
     };
-    assert_image_input(p).await;
+    assert_image_input(p, false).await;
+}
+
+#[tokio::test]
+#[ignore = "live API call; needs LLM_API_OPENAI_API_KEY (env or .env)"]
+async fn openai_responses_image_input_streaming_live() {
+    let Some(p) = openai(OpenAiResponses) else {
+        return;
+    };
+    assert_image_input(p, true).await;
+}
+
+#[tokio::test]
+#[ignore = "live API call; needs LLM_API_OPENAI_API_KEY (env or .env)"]
+async fn openai_responses_system_instruction_live() {
+    let Some(p) = openai(OpenAiResponses) else {
+        return;
+    };
+    assert_system_instruction(p).await;
 }
 
 #[tokio::test]
@@ -744,6 +859,15 @@ async fn openai_responses_count_tokens_live() {
         return;
     };
     assert_count_works(p).await;
+}
+
+#[tokio::test]
+#[ignore = "live API call; needs LLM_API_OPENAI_API_KEY (env or .env)"]
+async fn openai_responses_count_tokens_rich_live() {
+    let Some(p) = openai(OpenAiResponses) else {
+        return;
+    };
+    assert_count_rich_request(p).await;
 }
 
 // ---- Anthropic ----
@@ -821,7 +945,14 @@ structured_matrix!(
 #[ignore = "live API call; needs LLM_API_ANTHROPIC_API_KEY (env or .env)"]
 async fn anthropic_messages_image_input_live() {
     let Some(p) = anthropic() else { return };
-    assert_image_input(p).await;
+    assert_image_input(p, false).await;
+}
+
+#[tokio::test]
+#[ignore = "live API call; needs LLM_API_ANTHROPIC_API_KEY (env or .env)"]
+async fn anthropic_messages_system_instruction_live() {
+    let Some(p) = anthropic() else { return };
+    assert_system_instruction(p).await;
 }
 
 #[tokio::test]
@@ -830,6 +961,13 @@ async fn anthropic_models_and_count_live() {
     let Some(p) = anthropic() else { return };
     assert_models_work(p.clone()).await;
     assert_count_works(p).await;
+}
+
+#[tokio::test]
+#[ignore = "live API call; needs LLM_API_ANTHROPIC_API_KEY (env or .env)"]
+async fn anthropic_count_tokens_rich_live() {
+    let Some(p) = anthropic() else { return };
+    assert_count_rich_request(p).await;
 }
 
 // ---- Google ----
@@ -907,7 +1045,21 @@ structured_matrix!(
 #[ignore = "live API call; needs LLM_API_GOOGLE_API_KEY (env or .env)"]
 async fn google_image_input_live() {
     let Some(p) = google() else { return };
-    assert_image_input(p).await;
+    assert_image_input(p, false).await;
+}
+
+#[tokio::test]
+#[ignore = "live API call; needs LLM_API_GOOGLE_API_KEY (env or .env)"]
+async fn google_image_input_streaming_live() {
+    let Some(p) = google() else { return };
+    assert_image_input(p, true).await;
+}
+
+#[tokio::test]
+#[ignore = "live API call; needs LLM_API_GOOGLE_API_KEY (env or .env)"]
+async fn google_system_instruction_live() {
+    let Some(p) = google() else { return };
+    assert_system_instruction(p).await;
 }
 
 #[tokio::test]
@@ -922,6 +1074,34 @@ async fn google_models_live() {
 async fn google_count_tokens_live() {
     let Some(p) = google() else { return };
     assert_count_works(p).await;
+}
+
+#[tokio::test]
+#[ignore = "live API call; needs LLM_API_GOOGLE_API_KEY (env or .env)"]
+async fn google_count_tokens_rich_live() {
+    let Some(p) = google() else { return };
+    assert_count_rich_request(p).await;
+}
+
+/// `include_raw` smoke: with the option on, every provider-parsed stream
+/// item carries its source SSE payload.
+#[tokio::test]
+#[ignore = "live API call; needs LLM_API_GOOGLE_API_KEY (env or .env)"]
+async fn google_streaming_include_raw_live() {
+    let Some(p) = google() else { return };
+    let mut req = Request::with_messages(vec![Message::user_text("Say hi in one short word.")]);
+    req.max_output_tokens = Some(512);
+    let client = Client::new(live_http());
+    let mut handle = client
+        .stream(&p, &req, &CallOptions::new().with_include_raw(true))
+        .await
+        .expect("live stream call failed");
+    let mut saw_raw = false;
+    while let Some(item) = handle.next().await {
+        let item = item.expect("stream item failed");
+        saw_raw = saw_raw || item.raw.is_some();
+    }
+    assert!(saw_raw, "include_raw produced no raw payloads");
 }
 
 // ---- DeepSeek dialects (text-only models: no image tests) ----
@@ -939,6 +1119,36 @@ tool_matrix!(
     cfg_deepseek_cc_thinking,
     thinking = Thinking::Required,
     stream = true
+);
+
+// DeepSeek thinking is deterministic (reasoner behavior) on the Messages
+// dialect, so its tool loop uses `Thinking::Required`, like the CC cells.
+tool_matrix!(
+    deepseek_messages_tools_thinking_live,
+    deepseek(AnthropicMessages, "https://api.deepseek.com/anthropic"),
+    cfg_deepseek_messages_thinking,
+    thinking = Thinking::Required,
+    stream = false
+);
+// The Responses dialect does think on tool rounds (curl-verified:
+// a reasoning item + reasoning_tokens on both the call and the reply
+// round, and the plain-content reasoning replay is accepted), but
+// v4-flash thinks only a couple dozen tokens on this task and has been
+// observed sampling zero thinking for a whole loop — so this cell is
+// `Thinking::Enabled`: the enabled path must work end to end without
+// requiring that the model thinks on every run.
+tool_matrix!(
+    deepseek_responses_tools_thinking_live,
+    deepseek(OpenAiResponses, "https://api.deepseek.com"),
+    cfg_deepseek_responses_thinking,
+    thinking = Thinking::Enabled,
+    stream = false
+);
+
+structured_matrix!(
+    deepseek_responses_structured_output_live,
+    deepseek(OpenAiResponses, "https://api.deepseek.com"),
+    stream = false
 );
 
 chat_matrix!(

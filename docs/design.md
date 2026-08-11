@@ -293,11 +293,13 @@ absent.
   plaintext thinking into the target's thinking-text channel — useful when
   switching between open-weight models whose chains of thought are plaintext.
 - Provenance is namespace-based: a block is native to target `F` when its
-  `extra` carries the `F` namespace, or when it has a signature and **no**
-  format namespace at all (parsers leave no namespace when nothing beyond
-  `text`/`signature` needs preserving, so provenance can be unknowable; such
-  blocks are replayed optimistically — the upstream validates signatures
-  authoritatively). Plaintext-only thinking is native to CC (its channel is
+  `extra` carries a **non-empty** `F` namespace, or when it has a signature
+  and no non-empty format namespace at all (parsers leave no namespace when
+  nothing beyond `text`/`signature` needs preserving, so provenance can be
+  unknowable; such blocks are replayed optimistically — the upstream
+  validates signatures authoritatively). An empty namespace carries no
+  provenance: `namespace_mut` creates namespaces on demand, and a
+  logically-empty `Extra` must not change conversion semantics. Plaintext-only thinking is native to CC (its channel is
   plaintext); on signature-validated targets it follows the cross-provider
   rule above.
 
