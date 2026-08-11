@@ -107,7 +107,10 @@ pub enum WarningCode {
     /// item (sibling items may then repeat its wire `id`).
     ItemBoundaryLost,
     /// A non-empty IR message serialized to zero wire content (every block
-    /// was dropped) and was omitted from the request body.
+    /// was dropped) and was omitted from the request body. Also fires when
+    /// non-empty system input (`Request.system`, or leading system messages
+    /// hoisted into a top-level system channel) serialized to zero wire
+    /// content: the whole channel key is omitted (§ 7.6).
     EmptyMessageDropped,
     /// Token counting: the count adapter dropped a field it did not
     /// generate (injected via `extra`, hooks or a dialect) — the result is
@@ -132,6 +135,9 @@ pub enum WarningCode {
     /// `parallel_tool_calls` was meaningless or redundant and not emitted
     /// (no tools, `ToolChoice::None`, `Some(true)` on Google).
     ParallelToolCallsIgnored,
+    /// `tool_choice` was meaningless without wire tools and was not emitted
+    /// (no tools, an explicitly empty list, or every entry dropped).
+    ToolChoiceIgnored,
     /// Anthropic requires `input_schema`; an explicit empty-parameter
     /// schema was synthesized (§ 4.5).
     EmptyParametersSynthesized,
@@ -234,6 +240,7 @@ impl WarningCode {
             | CacheTtlDropped
             | CacheKeyDropped
             | ParallelToolCallsIgnored
+            | ToolChoiceIgnored
             | EmptyParametersSynthesized
             | OutputFormatDetailDropped
             | ReasoningConflict

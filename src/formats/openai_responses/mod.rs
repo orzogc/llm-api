@@ -43,9 +43,11 @@
 //!   required-but-nullable upstream and always serialize (`null` when
 //!   unset). Hosted/built-in tools are `Tool::Opaque`. An explicitly
 //!   empty IR tool list replays as `"tools": []`; a non-empty list whose
-//!   members were all dropped omits the key — and `parallel_tool_calls`
-//!   follows the tools actually emitted, warning `ParallelToolCallsIgnored`
-//!   when none are.
+//!   members were all dropped omits the key — and `tool_choice` /
+//!   `parallel_tool_calls` follow the tools actually emitted, warning
+//!   `ToolChoiceIgnored` / `ParallelToolCallsIgnored` when none are (so a
+//!   foreign `{"tools": [], "tool_choice": …}` body rebuilds without the
+//!   `tool_choice` key, disclosed).
 //! - Cache hints (§ 4.8): input content parts get
 //!   `prompt_cache_breakpoint: {"mode": "explicit"}` (hint TTLs warn —
 //!   OpenAI TTLs are request-level `prompt_cache_options.ttl`, settable

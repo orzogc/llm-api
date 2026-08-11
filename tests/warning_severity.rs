@@ -44,6 +44,7 @@ fn severity_table_is_pinned() {
         (CacheTtlDropped, Cosmetic),
         (CacheKeyDropped, Cosmetic),
         (ParallelToolCallsIgnored, Cosmetic),
+        (ToolChoiceIgnored, Cosmetic),
         (EmptyParametersSynthesized, Cosmetic),
         (OutputFormatDetailDropped, Cosmetic),
         (ReasoningConflict, Cosmetic),

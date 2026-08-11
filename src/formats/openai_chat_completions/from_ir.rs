@@ -138,8 +138,8 @@ pub(crate) fn build_body(
     // Whether any tool actually reached the wire — an explicitly empty IR
     // list replays as `"tools": []` (faithful), while a non-empty list
     // whose entries were all dropped (foreign `Tool::Opaque`, already
-    // disclosed by `OpaqueDropped`) omits the key; `parallel_tool_calls`
-    // follows the emitted tools, not the IR list.
+    // disclosed by `OpaqueDropped`) omits the key; `tool_choice` and
+    // `parallel_tool_calls` follow the emitted tools, not the IR list.
     let mut has_tools = false;
     if let Some(tools) = &req.tools {
         let built = build_tools(tools, &mut warnings, &mut log);
@@ -149,7 +149,15 @@ pub(crate) fn build_body(
         }
     }
     if let Some(choice) = &req.tool_choice {
-        body.insert("tool_choice".to_owned(), build_tool_choice(choice));
+        if has_tools {
+            body.insert("tool_choice".to_owned(), build_tool_choice(choice));
+        } else {
+            warnings.push(warn(
+                WarningCode::ToolChoiceIgnored,
+                "/tool_choice",
+                "`tool_choice` is meaningless without tools and was not emitted",
+            ));
+        }
     }
     if let Some(parallel) = req.parallel_tool_calls {
         if has_tools {

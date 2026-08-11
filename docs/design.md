@@ -402,10 +402,19 @@ are pinned: `tool_choice: Some(x)` → attach `disable_parallel_tool_use` to
 `tool_choice: None` + `Some(false)` → synthesize
 `{"type":"auto","disable_parallel_tool_use":true}`; `tool_choice: None` +
 `Some(true)` → emit nothing (parallel is Anthropic's default —
-canonicalization); a request without `tools` makes the setting meaningless on
-any format — cosmetic warning. Google has no equivalent — dropping
+canonicalization). Google has no equivalent — dropping
 `Some(false)` (a serial-execution constraint) is a **semantic** warning,
 dropping `Some(true)` is cosmetic.
+
+Tool-dependent keys follow the tools that actually reached the wire, not the
+IR list: with no wire tools (`tools` unset, an explicitly empty list, or
+every entry dropped) both settings are meaningless on any format —
+`tool_choice` (Google `toolConfig`; the Anthropic object, including the one
+synthesized from `parallel_tool_calls: false`) is not emitted, warning
+`ToolChoiceIgnored` (cosmetic), and `parallel_tool_calls` is not emitted,
+warning `ParallelToolCallsIgnored` (cosmetic). For a request without wire
+tools the keys change no model-visible behavior; omission only avoids
+upstream rejections.
 
 ### 4.6 Sampling parameters
 
@@ -845,6 +854,20 @@ empty IR message (constructed by the caller with no blocks) is the
 caller's own data and is not covered by this rule. When every message is
 omitted the request serializes with an empty message array — the library
 does not invent content; the upstream rejection is the caller's signal.
+
+The same rule covers the request's top-level system channel: when non-empty
+system input (`Request.system`, or leading system messages hoisted into
+Anthropic `system` / Google `systemInstruction`, § 7.1) serializes to zero
+wire content — e.g. every hoisted block is a dropped foreign `Opaque` — the
+channel key is omitted entirely, with one `EmptyMessageDropped` warning
+located at the channel's wire container (`/system`,
+`/systemInstruction`). `Request.system` itself is Text-only (§ 7.1) and
+cannot lose blocks, so the situation cannot arise on OpenAI CC and
+Responses, which hoist nothing into their system channels. Genuinely empty
+system input (`Request.system: Some(vec![])`, a hoisted message with no
+blocks) keeps each format's existing shape, silently: CC replays an
+empty-content `system` message; Anthropic, Google and Responses omit the
+channel key.
 
 ## 8. Response model
 

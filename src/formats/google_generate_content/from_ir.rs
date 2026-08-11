@@ -154,6 +154,26 @@ pub(crate) fn build_body(req: &Request, options: &ConvertOptions) -> Result<Buil
                 .and_then(Value::as_array)
                 .is_some_and(Vec::is_empty))
     });
+    // Non-empty system input (`Request.system` or hoisted leading system
+    // messages) that serialized to zero wire content omits the channel with
+    // a disclosure (§ 7.6); with no system input at all, or only genuinely
+    // empty input (`Some(vec![])`, zero-block messages), the omission stays
+    // silent. `Request.system` is Text-only (never drops), so only hoisted
+    // messages can lose every block here. A hoisted message's extra merges
+    // into `systemInstruction` above and keeps the channel, so an omitted
+    // channel never had extra to lose.
+    if !keep_system
+        && (req.system.as_ref().is_some_and(|s| !s.is_empty())
+            || messages[..hoisted].iter().any(|m| !m.content.is_empty()))
+    {
+        warn(
+            &mut warnings,
+            WarningCode::EmptyMessageDropped,
+            "/systemInstruction",
+            "the system channel serialized to zero wire content (every block was dropped); \
+             `systemInstruction` was omitted",
+        );
+    }
 
     // ---- contents: group adjacent user-side / model-side messages into
     // alternating wire turns (Google requires alternation, § 7.2). Turns are
@@ -267,34 +287,46 @@ pub(crate) fn build_body(req: &Request, options: &ConvertOptions) -> Result<Buil
     }
     body.insert("contents".to_owned(), Value::Array(contents));
 
-    // ---- tools + toolConfig.
+    // ---- tools + toolConfig. Whether any tool actually reached the wire —
+    // an explicitly empty IR list replays as `"tools": []` (faithful), while
+    // a non-empty list whose entries were all dropped (foreign opaque tools,
+    // disclosed by their OpaqueDropped warnings) omits the key; `toolConfig`
+    // and the `parallel_tool_calls` warnings follow the emitted tools, not
+    // the IR list.
+    let mut has_tools = false;
     if let Some(tools) = &req.tools {
         let entries = serialize_tools(tools, &mut warnings, &mut log)?;
-        // An explicitly empty IR tool list replays as `[]`; a non-empty list
-        // whose entries were all dropped (foreign opaque tools, disclosed by
-        // their OpaqueDropped warnings) omits the key instead.
-        if !entries.is_empty() || tools.is_empty() {
+        has_tools = !entries.is_empty();
+        if has_tools || tools.is_empty() {
             body.insert("tools".to_owned(), Value::Array(entries));
         }
     }
     if let Some(choice) = &req.tool_choice {
-        let mut fcc = Map::new();
-        let mode = match choice {
-            ToolChoice::Auto => "AUTO",
-            ToolChoice::None => "NONE",
-            ToolChoice::Required | ToolChoice::Tool { .. } => "ANY",
-        };
-        fcc.insert("mode".to_owned(), json!(mode));
-        if let ToolChoice::Tool { name, .. } = choice {
-            fcc.insert("allowedFunctionNames".to_owned(), json!([name]));
+        if has_tools {
+            let mut fcc = Map::new();
+            let mode = match choice {
+                ToolChoice::Auto => "AUTO",
+                ToolChoice::None => "NONE",
+                ToolChoice::Required | ToolChoice::Tool { .. } => "ANY",
+            };
+            fcc.insert("mode".to_owned(), json!(mode));
+            if let ToolChoice::Tool { name, .. } = choice {
+                fcc.insert("allowedFunctionNames".to_owned(), json!([name]));
+            }
+            body.insert(
+                "toolConfig".to_owned(),
+                json!({"functionCallingConfig": Value::Object(fcc)}),
+            );
+        } else {
+            warn(
+                &mut warnings,
+                WarningCode::ToolChoiceIgnored,
+                "/toolConfig",
+                "tool_choice is meaningless without tools and was not emitted",
+            );
         }
-        body.insert(
-            "toolConfig".to_owned(),
-            json!({"functionCallingConfig": Value::Object(fcc)}),
-        );
     }
     if let Some(parallel) = req.parallel_tool_calls {
-        let has_tools = req.tools.as_ref().is_some_and(|t| !t.is_empty());
         if !has_tools {
             warn(
                 &mut warnings,

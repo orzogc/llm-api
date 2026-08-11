@@ -267,6 +267,72 @@ fn system_field_and_leading_system_messages_hoist_in_order() {
 }
 
 #[test]
+fn system_channel_serializing_to_nothing_is_omitted_with_warning() {
+    // A hoisted leading system message whose every block is a dropped
+    // foreign opaque: `systemInstruction` is omitted and the channel-level
+    // omission is disclosed on top of the block-level drop.
+    let req = Request::with_messages(vec![
+        Message::new(
+            Role::System,
+            vec![ContentBlock::opaque(
+                "openai_responses",
+                json!({"type": "note"}),
+            )],
+        ),
+        Message::user_text("hi"),
+    ]);
+    let (body, warnings) = build(&req);
+    assert!(body.get("systemInstruction").is_none(), "{body}");
+    let dropped = find(&warnings, &WarningCode::EmptyMessageDropped);
+    assert_eq!(dropped.location, "/systemInstruction");
+    assert_eq!(dropped.severity, WarningSeverity::Semantic);
+    assert!(dropped.message.contains("system channel"), "{warnings:?}");
+    find(&warnings, &WarningCode::OpaqueDropped);
+
+    // A hoisted message's google-namespace extra merges into
+    // `systemInstruction` and keeps the channel on the wire: no omission,
+    // no channel-level warning (current-behavior pin).
+    let mut sys_msg = Message::new(
+        Role::System,
+        vec![ContentBlock::opaque(
+            "openai_responses",
+            json!({"type": "note"}),
+        )],
+    );
+    sys_msg.extra.set(FMT, "contentTag", "tagged");
+    let req = Request::with_messages(vec![sys_msg, Message::user_text("hi")]);
+    let (body, warnings) = build(&req);
+    assert_eq!(
+        body["systemInstruction"],
+        json!({"parts": [], "contentTag": "tagged"})
+    );
+    assert!(
+        !codes(&warnings).contains(&WarningCode::EmptyMessageDropped),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn genuinely_empty_system_input_stays_silent() {
+    // `Request.system: Some(vec![])` is the caller's own data: the key is
+    // omitted without any warning (current-behavior pin).
+    let mut req = user_req("hi");
+    req.system = Some(vec![]);
+    let (body, warnings) = build(&req);
+    assert!(body.get("systemInstruction").is_none(), "{body}");
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    // A zero-block leading system message contributes nothing, silently.
+    let req = Request::with_messages(vec![
+        Message::new(Role::System, vec![]),
+        Message::user_text("hi"),
+    ]);
+    let (body, warnings) = build(&req);
+    assert!(body.get("systemInstruction").is_none(), "{body}");
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
 fn mid_system_and_developer_downgrade_to_user() {
     let req = Request::with_messages(vec![
         Message::user_text("hi"),
@@ -697,6 +763,56 @@ fn parallel_tool_calls_warn_matrix() {
         codes(&warnings),
         vec![WarningCode::ParallelToolCallsIgnored]
     );
+
+    // The gate follows the emitted tools: with every entry dropped,
+    // Some(false) is meaningless too (no serial constraint was lost — no
+    // wire tool exists to run serially).
+    req.tools = Some(vec![Tool::opaque(
+        "openai_responses",
+        json!({"type": "web_search"}),
+    )]);
+    let (_, warnings) = build(&req);
+    assert_eq!(
+        codes(&warnings),
+        vec![
+            WarningCode::OpaqueDropped,
+            WarningCode::ParallelToolCallsIgnored,
+        ]
+    );
+}
+
+#[test]
+fn tool_config_requires_wire_tools() {
+    // `toolConfig` follows the emitted tools, not the IR list: without any
+    // wire tool the key is withheld with a cosmetic warning.
+    let expect_ignored = |req: &Request| {
+        let (body, warnings) = build(req);
+        assert!(body.get("toolConfig").is_none(), "{body}");
+        let w = find(&warnings, &WarningCode::ToolChoiceIgnored);
+        assert_eq!(w.severity, WarningSeverity::Cosmetic);
+        assert_eq!(w.location, "/toolConfig");
+        body
+    };
+
+    // No IR tools at all.
+    let mut req = user_req("hi");
+    req.tool_choice = Some(ToolChoice::Required);
+    let body = expect_ignored(&req);
+    assert!(body.get("tools").is_none());
+
+    // Every tool a dropped foreign opaque: no `tools` key either.
+    req.tools = Some(vec![Tool::opaque(
+        "openai_responses",
+        json!({"type": "web_search"}),
+    )]);
+    let body = expect_ignored(&req);
+    assert!(body.get("tools").is_none(), "{body}");
+
+    // An explicitly empty IR list replays `"tools": []` but still counts
+    // as no wire tools.
+    req.tools = Some(vec![]);
+    let body = expect_ignored(&req);
+    assert_eq!(body["tools"], json!([]));
 }
 
 #[test]

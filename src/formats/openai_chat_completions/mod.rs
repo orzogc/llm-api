@@ -27,7 +27,9 @@
 //!   description, parameters, strict}}`; `parameters` is omitted when
 //!   unset (officially an empty parameter list). `custom` tools and other
 //!   kinds round-trip as `Tool::Opaque`. `ToolChoice::Tool` maps to
-//!   `{type: "function", function: {name}}`.
+//!   `{type: "function", function: {name}}`; `tool_choice` is emitted only
+//!   when a tool actually reached the wire (`ToolChoiceIgnored` otherwise —
+//!   see the canonicalizations below).
 //! - Assistant messages: native thinking → the configured
 //!   `reasoning_field` (default `reasoning_content`, see below), text /
 //!   refusal-marked blocks → `content`, `ToolCall` blocks →
@@ -154,7 +156,11 @@
 //! breakpoint needs a part to sit on), overriding the string shorthand;
 //! an explicitly empty IR tool list replays as `"tools": []`, while a
 //! non-empty list whose entries were all dropped (foreign `Tool::Opaque`)
-//! omits the key; a string `stop` becomes a
+//! omits the key; `tool_choice` and `parallel_tool_calls` follow the
+//! emitted tools — with none on the wire both keys are withheld with
+//! cosmetic warnings (`ToolChoiceIgnored` / `ParallelToolCallsIgnored`),
+//! so a foreign `{"tools": [], "tool_choice": …}` body rebuilds without
+//! the `tool_choice` key; a string `stop` becomes a
 //! one-element array; legacy `max_tokens` becomes `max_completion_tokens`;
 //! `model`, `stream` and `stream_options` are configuration, not IR data,
 //! and are consumed on parse (`stream_options` members warn

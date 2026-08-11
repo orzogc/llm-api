@@ -15,6 +15,11 @@
 //!   `Request.system` when text-only; with any out-of-schema non-text part it
 //!   parses as a leading `System` message (text + same-format opaque blocks)
 //!   instead, which the hoist rule serializes back — nothing is lost.
+//!   Non-empty system input whose every block dropped (foreign opaques in
+//!   hoisted messages) omits `systemInstruction` with an
+//!   `EmptyMessageDropped` warning at `/systemInstruction` (§ 7.6);
+//!   genuinely empty input (`Some(vec![])`, zero-block messages) omits it
+//!   silently.
 //! - Adjacent `User`/`Tool` messages merge into one `user` turn and adjacent
 //!   `Assistant` messages into one `model` turn — Google requires role
 //!   alternation; parsed mixed turns are split back apart carrying
@@ -27,6 +32,12 @@
 //! - A `tools` list whose entries were all dropped (foreign opaque tools)
 //!   omits the `tools` key — the `OpaqueDropped` warnings disclose the
 //!   drops; an explicitly empty IR tool list replays as `"tools": []`.
+//!   `toolConfig` (from `tool_choice`) and the `parallel_tool_calls`
+//!   warnings follow the emitted tools: with none on the wire,
+//!   `toolConfig` is not emitted (`ToolChoiceIgnored`) and
+//!   `parallel_tool_calls` warns `ParallelToolCallsIgnored` for either
+//!   value — so a foreign `{"tools": [], "toolConfig": …}` body rebuilds
+//!   without the `toolConfig` key, disclosed.
 //! - `ToolResult.is_error: true` maps to the documented
 //!   `functionResponse.response` failure key `{"error": …}` (and back);
 //!   `is_error: false` canonicalizes to the plain `{"output": …}` encoding.

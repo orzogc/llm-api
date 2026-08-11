@@ -214,6 +214,19 @@ fn strict_mode_escalates_unless_overridden() {
 }
 
 #[test]
+fn genuinely_empty_request_system_omits_instructions_silently() {
+    // `Request.system: Some(vec![])` is the caller's own data: the
+    // `instructions` key is omitted without any warning (current-behavior
+    // pin). `Request.system` is Text-only here, so — unlike the hoisting
+    // formats — the channel can never lose every block to drops (§ 7.6).
+    let mut req = Request::with_messages(vec![Message::user_text("hi")]);
+    req.system = Some(vec![]);
+    let built = build(&req);
+    assert!(body_of(&built).get("instructions").is_none());
+    assert!(built.warnings.is_empty(), "{:?}", built.warnings);
+}
+
+#[test]
 fn system_joins_into_instructions() {
     let mut req = Request::with_messages(vec![Message::user_text("hi")]);
     req.system = Some(vec![
@@ -957,13 +970,55 @@ fn tool_choice_forms() {
         ),
     ] {
         let mut req = Request::with_messages(vec![Message::user_text("hi")]);
+        req.tools = Some(vec![Tool::function(FunctionTool::new("get_weather"))]);
         req.tool_choice = Some(choice.clone());
         let built = build(&req);
+        assert!(built.warnings.is_empty(), "{:?}", built.warnings);
         assert_eq!(body_of(&built)["tool_choice"], expected);
         // And it parses back to the same IR value.
         let (parsed, _) = request_to_ir(&built.body).unwrap();
         assert_eq!(parsed.tool_choice, Some(choice));
     }
+}
+
+#[test]
+fn tool_choice_requires_wire_tools() {
+    // `tool_choice` follows the emitted tools, not the IR list: without any
+    // wire tool the key is withheld with a cosmetic warning.
+    let expect_ignored = |req: &Request| {
+        let built = build(req);
+        let body = body_of(&built);
+        assert!(body.get("tool_choice").is_none(), "{body}");
+        let w = built
+            .warnings
+            .iter()
+            .find(|w| w.code == WarningCode::ToolChoiceIgnored)
+            .unwrap_or_else(|| panic!("expected ToolChoiceIgnored: {:?}", built.warnings));
+        assert_eq!(w.severity, WarningSeverity::Cosmetic);
+        assert_eq!(w.location, "/tool_choice");
+        built
+    };
+
+    // No IR tools at all.
+    let mut req = Request::with_messages(vec![Message::user_text("hi")]);
+    req.tool_choice = Some(ToolChoice::Required);
+    let built = expect_ignored(&req);
+    assert!(body_of(&built).get("tools").is_none());
+
+    // Every tool a dropped foreign opaque: no `tools` key either.
+    req.tools = Some(vec![Tool::opaque(
+        "anthropic_messages",
+        json!({"type": "computer_20250124"}),
+    )]);
+    let built = expect_ignored(&req);
+    assert!(body_of(&built).get("tools").is_none());
+    assert!(has_code(&built.warnings, &WarningCode::OpaqueDropped));
+
+    // An explicitly empty IR list replays `"tools": []` but still counts
+    // as no wire tools.
+    req.tools = Some(vec![]);
+    let built = expect_ignored(&req);
+    assert_eq!(body_of(&built)["tools"], json!([]));
 }
 
 #[test]

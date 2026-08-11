@@ -326,6 +326,79 @@ fn request_system_rejects_non_text() {
 }
 
 #[test]
+fn system_channel_serializing_to_nothing_is_omitted_with_warning() {
+    // A hoisted leading system message whose every block is a dropped
+    // foreign opaque: the `system` key is omitted and the channel-level
+    // omission is disclosed on top of the block-level drop, both at the
+    // `/system` container (its entries never reached the wire).
+    let mut sys_msg = Message::new(
+        Role::System,
+        vec![ContentBlock::opaque(
+            "openai_responses",
+            json!({"type": "note"}),
+        )],
+    );
+    sys_msg.extra.set(FMT, "meta_key", 1);
+    let r = req(vec![sys_msg, Message::user_text("hi")]);
+    let (body, warnings) = build(&r);
+    assert!(body.get("system").is_none(), "{body}");
+    assert_eq!(
+        body["messages"],
+        json!([{"role": "user", "content": [{"type": "text", "text": "hi"}]}])
+    );
+    let dropped = find(&warnings, &WarningCode::EmptyMessageDropped).unwrap();
+    assert_eq!(dropped.location, "/system");
+    assert_eq!(dropped.severity, WarningSeverity::Semantic);
+    assert!(dropped.message.contains("system channel"), "{warnings:?}");
+    let opaque = find(&warnings, &WarningCode::OpaqueDropped).unwrap();
+    assert_eq!(opaque.location, "/system");
+    // The hoisted message's own extra lost its landing spot too.
+    let extra = find(&warnings, &WarningCode::ExtraDropped).unwrap();
+    assert_eq!(extra.location, "/system");
+
+    // With surviving content the channel is kept and nothing extra warns.
+    let r2 = req(vec![
+        Message::new(
+            Role::System,
+            vec![
+                ContentBlock::opaque("openai_responses", json!({"type": "note"})),
+                ContentBlock::text("rule"),
+            ],
+        ),
+        Message::user_text("hi"),
+    ]);
+    let (body2, w2) = build(&r2);
+    // Exactly one surviving plain text entry: the string form applies.
+    assert_eq!(body2["system"], json!("rule"));
+    assert!(find(&w2, &WarningCode::EmptyMessageDropped).is_none());
+    // The block-level drop keeps its positional location.
+    assert_eq!(
+        find(&w2, &WarningCode::OpaqueDropped).unwrap().location,
+        "/system/0"
+    );
+}
+
+#[test]
+fn genuinely_empty_system_input_stays_silent() {
+    // `Request.system: Some(vec![])` is the caller's own data: the key is
+    // omitted without any warning (current-behavior pin).
+    let mut r = req(vec![Message::user_text("hi")]);
+    r.system = Some(vec![]);
+    let (body, warnings) = build(&r);
+    assert!(body.get("system").is_none(), "{body}");
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    // A zero-block hoisted system message contributes nothing, silently.
+    let r2 = req(vec![
+        Message::new(Role::System, vec![]),
+        Message::user_text("hi"),
+    ]);
+    let (body2, w2) = build(&r2);
+    assert!(body2.get("system").is_none(), "{body2}");
+    assert!(w2.is_empty(), "{w2:?}");
+}
+
+#[test]
 fn role_block_validity_is_structural() {
     // User + ToolCall.
     let r = req(vec![Message::user(vec![ContentBlock::tool_call(
@@ -756,6 +829,65 @@ fn tool_choice_cells() {
         let (body, _) = build(&r);
         assert_eq!(body["tool_choice"], expected);
     }
+}
+
+#[test]
+fn tool_choice_requires_wire_tools() {
+    // `tool_choice` follows the emitted tools, not the IR list: without any
+    // wire tool no `tool_choice` key is emitted (the synthesized
+    // parallel-fold carrier included) and the settings warn.
+    let expect_ignored = |r: &Request| {
+        let (body, warnings) = build(r);
+        assert!(body.get("tool_choice").is_none(), "{body}");
+        let w = find(&warnings, &WarningCode::ToolChoiceIgnored)
+            .unwrap_or_else(|| panic!("expected ToolChoiceIgnored: {warnings:?}"));
+        assert_eq!(w.severity, WarningSeverity::Cosmetic);
+        assert_eq!(w.location, "/tool_choice");
+        (body, warnings)
+    };
+
+    // No IR tools at all.
+    let mut r = req(vec![Message::user_text("hi")]);
+    r.tool_choice = Some(ToolChoice::Required);
+    let (body, _) = expect_ignored(&r);
+    assert!(body.get("tools").is_none());
+
+    // Every tool a dropped foreign opaque: no `tools` key either.
+    r.tools = Some(vec![Tool::opaque(
+        "openai_responses",
+        json!({"type": "web_search"}),
+    )]);
+    let (body, warnings) = expect_ignored(&r);
+    assert!(body.get("tools").is_none(), "{body}");
+    assert!(find(&warnings, &WarningCode::OpaqueDropped).is_some());
+
+    // An explicitly empty IR list replays `"tools": []` but still counts
+    // as no wire tools.
+    r.tools = Some(vec![]);
+    let (body, _) = expect_ignored(&r);
+    assert_eq!(body["tools"], json!([]));
+
+    // A choice plus a parallel flag: both settings warn, nothing is
+    // emitted.
+    let mut r2 = req(vec![Message::user_text("hi")]);
+    r2.tool_choice = Some(ToolChoice::Auto);
+    r2.parallel_tool_calls = Some(false);
+    let (_, warnings) = expect_ignored(&r2);
+    assert!(find(&warnings, &WarningCode::ParallelToolCallsIgnored).is_some());
+
+    // No choice + parallel Some(false) without wire tools: the carrier is
+    // not synthesized; the flag warns (no ToolChoiceIgnored — there was no
+    // tool_choice to ignore).
+    let mut r3 = req(vec![Message::user_text("hi")]);
+    r3.tools = Some(vec![Tool::opaque(
+        "openai_responses",
+        json!({"type": "web_search"}),
+    )]);
+    r3.parallel_tool_calls = Some(false);
+    let (body3, w3) = build(&r3);
+    assert!(body3.get("tool_choice").is_none(), "{body3}");
+    assert!(find(&w3, &WarningCode::ParallelToolCallsIgnored).is_some());
+    assert!(find(&w3, &WarningCode::ToolChoiceIgnored).is_none());
 }
 
 #[test]

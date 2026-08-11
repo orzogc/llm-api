@@ -41,9 +41,18 @@ fixtures under `tests/fixtures/<id>/`.
    A non-empty IR message whose serialization produced zero wire content
    is omitted from the body with `EmptyMessageDropped` (semantic; design
    § 7.6), `location` = the containing array (`/messages`, `/contents`,
-   `/input`), message text naming the IR message index. Genuinely empty
-   IR messages are the caller's own data and serialize as the format
-   allows.
+   `/input`), message text naming the IR message index. The same rule
+   covers the top-level system channel: non-empty system input
+   (`Request.system` plus hoisted leading system messages) that serialized
+   to zero wire content omits the channel key with one
+   `EmptyMessageDropped` at the channel container (Anthropic `/system`,
+   Google `/systemInstruction`; unreachable on CC/Responses —
+   `Request.system` is Text-only and they hoist nothing). Genuinely empty
+   IR messages — and genuinely empty system input, `Request.system:
+   Some(vec![])` or zero-block hoisted messages — are the caller's own
+   data and serialize as the format allows, silently (CC replays an
+   empty-content `system` message; Anthropic/Google/Responses omit the
+   channel key).
 2. Merge `request.extra[<id>]` into the whole body with base `""` last.
 3. Collect `ConversionWarning`s using the exact `WarningCode`s from
    `src/convert/warnings.rs`; `location` is a JSON pointer into the final

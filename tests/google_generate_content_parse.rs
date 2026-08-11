@@ -726,9 +726,14 @@ fn user_parts_that_are_invalid_for_the_role_stay_opaque() {
 
 #[test]
 fn unmodeled_tool_config_shapes_mirror_into_extra() {
+    // The bodies carry a real tool: `toolConfig` follows the emitted tools,
+    // so a tool-less body would rebuild without the key (its own test).
+    let tools = json!([{"functionDeclarations": [{"name": "a"}]}]);
+
     // VALIDATED mode is not modeled.
     let body = json!({
         "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+        "tools": tools,
         "toolConfig": {"functionCallingConfig": {"mode": "VALIDATED", "allowedFunctionNames": ["a", "b"]}}
     });
     let (ir, _) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
@@ -738,6 +743,7 @@ fn unmodeled_tool_config_shapes_mirror_into_extra() {
     // ANY with several allowed names degrades to Required + mirror.
     let body = json!({
         "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+        "tools": tools,
         "toolConfig": {"functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": ["a", "b"]}}
     });
     let (ir, _) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
@@ -752,6 +758,7 @@ fn unmodeled_tool_config_shapes_mirror_into_extra() {
     ] {
         let body = json!({
             "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "tools": tools,
             "toolConfig": {"functionCallingConfig": {"mode": mode}}
         });
         let (ir, _) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();

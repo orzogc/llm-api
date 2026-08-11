@@ -32,6 +32,14 @@
 //! - `redacted_thinking` blocks parse to `Thinking` with the payload in
 //!   `signature` and `{"redacted": true}` in the block's format namespace;
 //!   the marker is consumed on re-serialization.
+//! - Tools (§ 4.5): an explicitly empty IR tool list replays as
+//!   `"tools": []`, while a non-empty list whose entries were all dropped
+//!   (foreign `Tool::Opaque`) omits the key; the `tool_choice` keys follow
+//!   the emitted tools — with none on the wire, `tool_choice` (including
+//!   the object synthesized from `parallel_tool_calls: false`) is not
+//!   emitted, warning `ToolChoiceIgnored` / `ParallelToolCallsIgnored`, so
+//!   a foreign `{"tools": [], "tool_choice": …}` body rebuilds without the
+//!   `tool_choice` key, disclosed.
 //! - Unmodeled content blocks (`document`, `server_tool_use`, tool-result
 //!   variants, …) are preserved in place as `Opaque` nodes.
 //! - `parse_request` handles `messages[]` entries one by one: a malformed
@@ -40,7 +48,11 @@
 //! - A non-empty IR message that serializes to zero wire content (e.g. a
 //!   foreign thinking-only turn) is omitted from `messages` with an
 //!   `EmptyMessageDropped` warning; a truly empty IR message still
-//!   serializes as `content: []`.
+//!   serializes as `content: []`. The same rule covers the system channel
+//!   (§ 7.6): non-empty system input whose every block dropped omits the
+//!   `system` key with an `EmptyMessageDropped` at `/system` (block
+//!   warnings re-addressed to the container); `Request.system:
+//!   Some(vec![])` and zero-block hoisted messages omit the key silently.
 //! - `usage` parses leniently on responses and streams: a malformed usage
 //!   degrades to no usage plus a `MalformedField` warning (the streaming
 //!   snapshot heals on later valid cumulative usage); `count_tokens` stays

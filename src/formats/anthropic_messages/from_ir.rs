@@ -400,7 +400,12 @@ pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) ->
         body.insert("stream".to_owned(), Value::Bool(true));
     }
 
-    // Tools.
+    // Tools. Whether any tool actually reached the wire — an explicitly
+    // empty IR list replays as `"tools": []` (faithful), while a non-empty
+    // list whose entries were all dropped (foreign `Tool::Opaque`, already
+    // disclosed by `OpaqueDropped`) omits the key; the `tool_choice` keys
+    // follow the emitted tools, not the IR list.
+    let mut has_tools = false;
     if let Some(tools) = &req.tools {
         let mut out: Vec<Value> = Vec::new();
         for tool in tools {
@@ -448,11 +453,14 @@ pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) ->
                 }
             }
         }
-        body.insert("tools".to_owned(), Value::Array(out));
+        has_tools = !out.is_empty();
+        if has_tools || tools.is_empty() {
+            body.insert("tools".to_owned(), Value::Array(out));
+        }
     }
 
     // Tool choice and parallel_tool_calls (§ 4.5 combination table).
-    build_tool_choice(req, &mut body, &mut warnings);
+    build_tool_choice(req, has_tools, &mut body, &mut warnings);
 
     // Reasoning → thinking / output_config.effort (§ 4.7).
     let mut output_config = Map::new();
@@ -755,7 +763,10 @@ fn apply_missing_thinking(
 
 /// Builds the top-level `system` value from `Request.system` plus the
 /// hoisted leading System messages (§ 7.1). Returns `None` when there is no
-/// system content.
+/// system content. Non-empty system input whose every block dropped
+/// (foreign opaques in hoisted messages) omits the channel with an
+/// `EmptyMessageDropped` warning (§ 7.6); block warnings are re-addressed
+/// to the `/system` container, whose entries never reached the wire.
 fn build_system(
     req: &Request,
     messages: &[Message],
@@ -786,6 +797,10 @@ fn build_system(
 
     let mut entries: Vec<Entry<'_>> = Vec::new();
     let mut msg_extras: Vec<(usize, &Extra)> = Vec::new(); // (first entry index, extra)
+    // Block warnings are buffered: when the whole channel is omitted below,
+    // their positional locations would point into a `system` array that
+    // does not exist, so they are re-addressed to the container.
+    let mut sys_warnings: Vec<ConversionWarning> = Vec::new();
 
     if let Some(system) = &req.system {
         for (bi, block) in system.iter().enumerate() {
@@ -827,7 +842,7 @@ fn build_system(
                             text_form_ok: false,
                         });
                     } else {
-                        warnings.push(warn(
+                        sys_warnings.push(warn(
                             WarningCode::OpaqueDropped,
                             loc,
                             format!("opaque block belongs to format `{format}`; dropped"),
@@ -851,8 +866,44 @@ fn build_system(
     }
 
     if entries.is_empty() {
+        // Non-empty input that serialized to nothing omits the channel with
+        // a disclosure (§ 7.6); genuinely empty input (`Some(vec![])`, or a
+        // hoisted message with no blocks) stays silent — the caller's own
+        // data. `Request.system` is Text-only (never drops), so only
+        // hoisted messages can lose every block here.
+        let input_non_empty = req.system.as_ref().is_some_and(|s| !s.is_empty())
+            || hoisted.iter().any(|&i| !messages[i].content.is_empty());
+        if input_non_empty {
+            for w in &mut sys_warnings {
+                w.location = "/system".to_owned();
+            }
+            sys_warnings.push(warn(
+                WarningCode::EmptyMessageDropped,
+                "/system",
+                "the system channel serialized to zero wire content (every block was \
+                 dropped); the `system` key was omitted",
+            ));
+            // A hoisted message's extra would have merged into its first
+            // produced entry; with none, the user-addressed data is lost.
+            for &i in hoisted {
+                if !messages[i].content.is_empty()
+                    && messages[i].extra.get(FMT).is_some_and(|ns| !ns.is_empty())
+                {
+                    sys_warnings.push(warn(
+                        WarningCode::ExtraDropped,
+                        "/system",
+                        format!(
+                            "message-level `extra` of hoisted system message {i} has no wire \
+                             location (the `system` channel was omitted) and was dropped"
+                        ),
+                    ));
+                }
+            }
+        }
+        warnings.append(&mut sys_warnings);
         return Ok(None);
     }
+    warnings.append(&mut sys_warnings);
     // Exactly one plain text segment (no cache hint, no extra for this
     // format) uses the string form; anything else uses the block array.
     if entries.len() == 1 && entries[0].text_form_ok && msg_extras.is_empty() {
@@ -1199,21 +1250,40 @@ fn convert_thinking(
 }
 
 /// Builds `tool_choice` (and folds `parallel_tool_calls` into it) per the
-/// § 4.5 combination table.
+/// § 4.5 combination table. `has_tools` is whether any tool reached the
+/// wire: without wire tools no `tool_choice` key is emitted at all —
+/// including the object synthesized from `parallel_tool_calls: false` —
+/// and the ignored settings warn instead.
 fn build_tool_choice(
     req: &Request,
+    has_tools: bool,
     body: &mut Map<String, Value>,
     warnings: &mut Vec<ConversionWarning>,
 ) {
-    let tools_present = req.tools.as_ref().is_some_and(|t| !t.is_empty());
     let parallel = req.parallel_tool_calls;
-    let ignored = |warnings: &mut Vec<ConversionWarning>, why: &str| {
+    let parallel_ignored = |warnings: &mut Vec<ConversionWarning>, why: &str| {
         warnings.push(warn(
             WarningCode::ParallelToolCallsIgnored,
             "/tool_choice",
             why,
         ));
     };
+    if !has_tools {
+        if req.tool_choice.is_some() {
+            warnings.push(warn(
+                WarningCode::ToolChoiceIgnored,
+                "/tool_choice",
+                "tool_choice is meaningless without tools; not emitted",
+            ));
+        }
+        if parallel.is_some() {
+            parallel_ignored(
+                warnings,
+                "parallel_tool_calls is meaningless without tools; not emitted",
+            );
+        }
+        return;
+    }
     match &req.tool_choice {
         Some(choice) => {
             let mut obj = match choice {
@@ -1223,13 +1293,8 @@ fn build_tool_choice(
                 ToolChoice::Tool { name, .. } => json!({"type": "tool", "name": name}),
             };
             if let Some(p) = parallel {
-                if !tools_present {
-                    ignored(
-                        warnings,
-                        "parallel_tool_calls is meaningless without tools; not emitted",
-                    );
-                } else if matches!(choice, ToolChoice::None) {
-                    ignored(
+                if matches!(choice, ToolChoice::None) {
+                    parallel_ignored(
                         warnings,
                         "parallel_tool_calls is meaningless on tool_choice none; not emitted",
                     );
@@ -1239,23 +1304,16 @@ fn build_tool_choice(
             }
             body.insert("tool_choice".to_owned(), obj);
         }
-        None => match parallel {
-            Some(_) if !tools_present => {
-                ignored(
-                    warnings,
-                    "parallel_tool_calls is meaningless without tools; not emitted",
-                );
-            }
-            Some(false) => {
+        None => {
+            // Some(true) canonicalizes to nothing, no warning: parallel is
+            // Anthropic's default (§ 4.5).
+            if parallel == Some(false) {
                 body.insert(
                     "tool_choice".to_owned(),
                     json!({"type": "auto", "disable_parallel_tool_use": true}),
                 );
             }
-            // Some(true): parallel is Anthropic's default — canonicalized to
-            // nothing, no warning (§ 4.5).
-            Some(true) | None => {}
-        },
+        }
     }
 }
 
