@@ -6,6 +6,9 @@ rust-version = "1.88"
 license = "MIT"
 description = "Unified intermediate representation and bidirectional conversion for LLM chat APIs, with a pluggable HTTP transport"
 readme = "README.md"
+repository = "https://github.com/orzogc/llm-api"
+keywords = ["llm", "openai", "anthropic", "gemini", "api"]
+categories = ["api-bindings", "asynchronous"]
 
 [features]
 default = ["reqwest"]
@@ -28,8 +31,7 @@ wiremock = "0.6"
 [lints.rust]
 missing_docs = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(docsrs_dep)'] }
-#unsafe_code = "deny"
-unsafe_op_in_unsafe_fn = "warn"
+unsafe_code = "forbid"
 unused_qualifications = "warn"
 
 [lints.clippy]

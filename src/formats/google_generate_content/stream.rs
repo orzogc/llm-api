@@ -280,9 +280,8 @@ impl StreamParser for GoogleStreamParser {
         if self.terminated {
             Ok((Vec::new(), Vec::new()))
         } else {
-            Err(Error::Parse {
-                message: "truncated stream: no finishReason or blocked-prompt chunk was seen"
-                    .to_owned(),
+            Err(Error::TruncatedStream {
+                message: "no finishReason or blocked-prompt chunk was seen".to_owned(),
                 raw: bytes::Bytes::new(),
             })
         }

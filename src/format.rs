@@ -416,9 +416,10 @@ pub trait StreamParser: Send {
     /// Called exactly once when the byte stream ends: flushes held warnings
     /// and safely finalizable blocks, then validates terminal state — it
     /// never synthesizes `MessageStop` (parsers emit that themselves, § 9).
-    /// A stream that showed no protocol terminator returns `Error::Parse`
-    /// ("truncated stream") — a silent EOF must not pass a half response
-    /// off as complete.
+    /// A stream that showed no protocol terminator returns
+    /// [`Error::TruncatedStream`] (usually retryable, unlike malformed-data
+    /// `Error::Parse`) — a silent EOF must not pass a half response off as
+    /// complete.
     fn finish(&mut self) -> Result<(Vec<StreamEvent>, Vec<ConversionWarning>)>;
 }
 

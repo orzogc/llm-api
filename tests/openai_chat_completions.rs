@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 
 use llm_api::formats::openai_chat_completions::{
     OpenAiChatCompletions, request_from_ir, request_to_ir, response_to_ir,
+    text_block_reserved_key,
 };
 use llm_api::{
     ApiFormat, BuildCtx, BuiltRequest, CacheHint, CallMode, ContentBlock, ConversionDirection,
@@ -454,7 +455,7 @@ fn assistant_message_maps_thinking_text_and_tool_calls() {
 #[test]
 fn assistant_refusal_blocks_become_refusal_parts() {
     let mut refusal = ContentBlock::text("No.");
-    refusal = refusal.with_extra(F, "refusal", true);
+    refusal = refusal.with_extra(F, text_block_reserved_key::REFUSAL, true);
     let msg = Message::assistant(vec![ContentBlock::text("Partial answer."), refusal]);
     let built = build(&Request::with_messages(vec![msg]));
     assert_eq!(
@@ -1681,7 +1682,10 @@ fn refusal_field_canonicalizes_to_refusal_part() {
     let ContentBlock::Text { extra, .. } = &req.messages[0].content[1] else {
         panic!("expected refusal-marked text");
     };
-    assert_eq!(extra.get(F).unwrap().get("refusal"), Some(&json!(true)));
+    assert_eq!(
+        extra.get(F).unwrap().get(text_block_reserved_key::REFUSAL),
+        Some(&json!(true))
+    );
 
     let (body, _) = from_ir_unary(&req);
     assert_eq!(
@@ -1695,6 +1699,63 @@ fn refusal_field_canonicalizes_to_refusal_part() {
     let (req2, _) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
     let (body2, _) = from_ir_unary(&req2);
     assert_eq!(body2, body);
+}
+
+#[test]
+fn refusal_part_round_trips_via_marker() {
+    // The real refusal channel: a wire `refusal` part parses into a
+    // `Text` block carrying the internal `__llm_api_refusal` marker and
+    // serializes back into the same `refusal` part.
+    let part = json!({"type": "refusal", "refusal": "No."});
+    let wire = json!({"messages": [{"role": "assistant", "content": [part]}]});
+    let (req, warnings) = request_to_ir(&serde_json::to_vec(&wire).unwrap()).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let block = &req.messages[0].content[0];
+    let ContentBlock::Text { text, extra, .. } = block else {
+        panic!("expected refusal-marked text, got {block:?}");
+    };
+    assert_eq!(text, "No.");
+    assert_eq!(
+        extra.get(F).unwrap().get(text_block_reserved_key::REFUSAL),
+        Some(&json!(true))
+    );
+    assert!(llm_api::ir::is_refusal_block(block));
+
+    let (body, ws) = from_ir_unary(&req);
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(body["messages"][0]["content"], json!([part]));
+}
+
+#[test]
+fn stray_refusal_field_on_text_part_round_trips_verbatim() {
+    // A wire text part with an unknown field that happens to be named
+    // `refusal` is plain unknown data — the internal marker key is
+    // `__llm_api_refusal`, so the part must not be rewritten into a
+    // refusal part.
+    let part = json!({"type": "text", "text": "hi", "refusal": true});
+    let wire = json!({
+        "messages": [{"role": "assistant", "content": [part]}],
+    });
+    let (req, warnings) = request_to_ir(&serde_json::to_vec(&wire).unwrap()).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let block = &req.messages[0].content[0];
+    assert!(matches!(block, ContentBlock::Text { .. }));
+    assert!(!llm_api::ir::is_refusal_block(block));
+
+    let (body, ws) = from_ir_unary(&req);
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(body["messages"][0]["content"], json!([part]));
+
+    // A response carrying the same stray field keeps its stop reason.
+    let resp_wire = json!({
+        "id": "r", "object": "chat.completion", "model": "m",
+        "choices": [{"index": 0,
+            "message": {"role": "assistant", "content": [part]},
+            "finish_reason": "stop"}],
+    });
+    let resp = response_to_ir(&serde_json::to_vec(&resp_wire).unwrap(), &meta_ok()).unwrap();
+    assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
+    assert!(!llm_api::ir::is_refusal_block(&resp.message.content[0]));
 }
 
 #[test]
@@ -2158,7 +2219,11 @@ fn response_refusal_normalizes_stop_reason() {
         panic!("expected refusal-marked text block");
     };
     assert_eq!(text, "I cannot help with that.");
-    assert_eq!(extra.get(F).unwrap().get("refusal"), Some(&json!(true)));
+    assert_eq!(
+        extra.get(F).unwrap().get(text_block_reserved_key::REFUSAL),
+        Some(&json!(true))
+    );
+    assert!(llm_api::ir::is_refusal_block(&resp.message.content[0]));
 }
 
 #[test]

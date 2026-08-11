@@ -387,7 +387,7 @@ fn error_event_fails_the_stream() {
 fn truncated_stream_fails_finish() {
     let err = feed("stream_truncated.sse").unwrap_err();
     match err {
-        Error::Parse { message, .. } => assert!(message.contains("truncated")),
+        Error::TruncatedStream { message, .. } => assert!(message.contains("message_stop")),
         other => panic!("unexpected: {other:?}"),
     }
 }

@@ -106,6 +106,9 @@ pub enum WarningCode {
     /// its neighbours serializes as a separate item, splitting the original
     /// item (sibling items may then repeat its wire `id`).
     ItemBoundaryLost,
+    /// A non-empty IR message serialized to zero wire content (every block
+    /// was dropped) and was omitted from the request body.
+    EmptyMessageDropped,
     /// Token counting: the count adapter dropped a field it did not
     /// generate (injected via `extra`, hooks or a dialect) — the result is
     /// no longer exact (§ 13).
@@ -219,6 +222,7 @@ impl WarningCode {
             | MergeBlockedBySignature
             | ExtraDropped
             | ItemBoundaryLost
+            | EmptyMessageDropped
             | CountTokensFieldDropped
             | CountTokensApproximate
             | MultipleCandidates

@@ -2,7 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 /// Format-namespaced free-form JSON attached to every IR node.
@@ -15,10 +16,39 @@ use serde_json::{Map, Value};
 ///
 /// Because `null` means delete, `extra` cannot set a field to literal JSON
 /// `null`; use the `on_request` hook for that rare case.
+///
+/// Empty namespaces (e.g. left behind by [`Extra::namespace_mut`]) carry no
+/// data and are invisible: equality ignores them and serialization prunes
+/// them, so an `Extra` round-trips through serde as an equal value either
+/// way.
 #[non_exhaustive]
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(transparent)]
 pub struct Extra(BTreeMap<String, Map<String, Value>>);
+
+impl PartialEq for Extra {
+    /// Compares only non-empty namespaces: a lingering empty namespace is
+    /// not data (it never serializes and never merges).
+    fn eq(&self, other: &Self) -> bool {
+        self.0
+            .iter()
+            .filter(|(_, ns)| !ns.is_empty())
+            .eq(other.0.iter().filter(|(_, ns)| !ns.is_empty()))
+    }
+}
+
+impl Serialize for Extra {
+    /// Serializes the namespace map transparently, pruning empty
+    /// namespaces so the wire shape matches equality.
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let entries: Vec<_> = self.0.iter().filter(|(_, ns)| !ns.is_empty()).collect();
+        let mut map = serializer.serialize_map(Some(entries.len()))?;
+        for (format, ns) in entries {
+            map.serialize_entry(format, ns)?;
+        }
+        map.end()
+    }
+}
 
 impl Extra {
     /// Creates an empty `Extra`.
@@ -376,6 +406,45 @@ mod tests {
         let mut log = MergeLog::new();
         extra.merge_into("a_fmt", &mut target, "", &mut log);
         assert_eq!(target, json!({"x": 1}));
+    }
+
+    #[test]
+    fn empty_namespace_is_invisible() {
+        // `namespace_mut` leaves an empty namespace behind; it must not
+        // affect equality or the serialized shape.
+        let mut with_empty = Extra::new();
+        with_empty.namespace_mut("fmt");
+        let plain = Extra::new();
+        assert_eq!(with_empty, plain);
+        assert_eq!(plain, with_empty);
+        assert_eq!(serde_json::to_string(&with_empty).unwrap(), "{}");
+
+        // Serde round trip of the empty-namespace value stays equal.
+        let s = serde_json::to_string(&with_empty).unwrap();
+        let back: Extra = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, with_empty);
+
+        // Mixed: one empty and one populated namespace — the empty one is
+        // pruned, the populated one survives.
+        let mut mixed = Extra::new();
+        mixed.namespace_mut("empty_fmt");
+        mixed.set("fmt", "k", 1);
+        let mut expected = Extra::new();
+        expected.set("fmt", "k", 1);
+        assert_eq!(mixed, expected);
+        let s = serde_json::to_string(&mixed).unwrap();
+        assert_eq!(s, r#"{"fmt":{"k":1}}"#);
+        let back: Extra = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, mixed);
+
+        // Non-empty differences still compare unequal.
+        let mut other = Extra::new();
+        other.set("fmt", "k", 2);
+        assert_ne!(mixed, other);
+        let mut different_ns = Extra::new();
+        different_ns.set("fmt2", "k", 1);
+        assert_ne!(mixed, different_ns);
+        assert_ne!(plain, expected);
     }
 
     #[test]

@@ -34,8 +34,8 @@
 //!   `include_usage` final chunk, or dialects that attach usage to the
 //!   finish chunk) emits a `MessageDelta` usage snapshot.
 //! - The literal `data: [DONE]` terminator emits `MessageStop`; a stream
-//!   that ends without it fails [`StreamParser::finish`] with a
-//!   truncated-stream parse error, and anything received after it (data
+//!   that ends without it fails [`StreamParser::finish`] with
+//!   [`Error::TruncatedStream`], and anything received after it (data
 //!   or a repeated `[DONE]`) surfaces as [`StreamEvent::Unknown`] with an
 //!   `UnknownStreamEvent` warning.
 //! - Chunks for choice indexes beyond the first surface as
@@ -1189,9 +1189,8 @@ impl StreamParser for ChatCompletionsStreamParser {
         if self.terminal {
             Ok((Vec::new(), Vec::new()))
         } else {
-            Err(Error::Parse {
-                message: "truncated stream: the Chat Completions stream ended without `[DONE]`"
-                    .to_owned(),
+            Err(Error::TruncatedStream {
+                message: "the Chat Completions stream ended without `[DONE]`".to_owned(),
                 raw: bytes::Bytes::new(),
             })
         }

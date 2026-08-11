@@ -349,7 +349,10 @@ impl ResponsesStreamParser {
         }
         let block = match part.get("type").and_then(Value::as_str) {
             Some("refusal") => {
-                ns.insert("refusal".to_owned(), Value::from(true));
+                ns.insert(
+                    super::text_block_reserved_key::REFUSAL.to_owned(),
+                    Value::from(true),
+                );
                 ContentBlock::Text {
                     text: part
                         .get("refusal")
@@ -994,9 +997,8 @@ impl StreamParser for ResponsesStreamParser {
         if self.terminal {
             Ok((Vec::new(), Vec::new()))
         } else {
-            Err(Error::Parse {
-                message: "truncated stream: the Responses stream ended without a terminal event"
-                    .to_owned(),
+            Err(Error::TruncatedStream {
+                message: "the Responses stream ended without a terminal event".to_owned(),
                 raw: bytes::Bytes::new(),
             })
         }

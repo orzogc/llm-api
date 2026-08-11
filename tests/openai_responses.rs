@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 
 use llm_api::formats::openai_responses::{
-    OpenAiResponses, request_from_ir, request_to_ir, response_to_ir,
+    OpenAiResponses, request_from_ir, request_to_ir, response_to_ir, text_block_reserved_key,
 };
 use llm_api::{
     ApiFormat, BuildCtx, BuiltRequest, CacheHint, CallMode, ContentBlock, ConversionError,
@@ -332,7 +332,7 @@ fn assistant_texts_group_by_item_id_and_refusal_parts_rebuild() {
             .with_extra(F, "status", "completed"),
         ContentBlock::text("No more.")
             .with_extra(F, "id", "msg_1")
-            .with_extra(F, "refusal", true),
+            .with_extra(F, text_block_reserved_key::REFUSAL, true),
         ContentBlock::text("Different item.").with_extra(F, "id", "msg_2"),
     ]);
     let built = build(&Request::with_messages(vec![msg]));
@@ -1702,7 +1702,67 @@ fn response_refusal_normalizes_stop_reason() {
         panic!("expected refusal-marked text block");
     };
     assert_eq!(text, "I cannot help with that.");
-    assert_eq!(extra.get(F).unwrap().get("refusal"), Some(&json!(true)));
+    assert_eq!(
+        extra.get(F).unwrap().get(text_block_reserved_key::REFUSAL),
+        Some(&json!(true))
+    );
+    assert!(llm_api::ir::is_refusal_block(&resp.message.content[0]));
+}
+
+#[test]
+fn refusal_part_round_trips_via_marker() {
+    // The real refusal channel: a wire `refusal` part parses into a
+    // `Text` block carrying the internal `__llm_api_refusal` marker and
+    // serializes back into the same `refusal` part.
+    let part = json!({"type": "refusal", "refusal": "No."});
+    let item = json!({"type": "message", "role": "assistant", "content": [part]});
+    let wire = json!({"input": [item]});
+    let (req, warnings) = request_to_ir(&serde_json::to_vec(&wire).unwrap()).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let block = &req.messages[0].content[0];
+    let ContentBlock::Text { text, extra, .. } = block else {
+        panic!("expected refusal-marked text, got {block:?}");
+    };
+    assert_eq!(text, "No.");
+    assert_eq!(
+        extra.get(F).unwrap().get(text_block_reserved_key::REFUSAL),
+        Some(&json!(true))
+    );
+    assert!(llm_api::ir::is_refusal_block(block));
+
+    let (body, ws) = request_from_ir(&req, Some("m"), CallMode::Unary, &ConvertOptions::default())
+        .unwrap();
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(body["input"], json!([item]));
+}
+
+#[test]
+fn stray_refusal_field_on_output_text_part_round_trips_verbatim() {
+    // A wire `output_text` part with an unknown field named `refusal` is
+    // plain unknown data — the internal marker key is `__llm_api_refusal`,
+    // so the part must not be rewritten into a refusal part.
+    let part = json!({"type": "output_text", "text": "hi", "annotations": [], "refusal": true});
+    let item = json!({"type": "message", "role": "assistant", "content": [part]});
+    let wire = json!({"input": [item]});
+    let (req, warnings) = request_to_ir(&serde_json::to_vec(&wire).unwrap()).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let block = &req.messages[0].content[0];
+    assert!(matches!(block, ContentBlock::Text { .. }));
+    assert!(!llm_api::ir::is_refusal_block(block));
+
+    let (body, ws) = request_from_ir(&req, Some("m"), CallMode::Unary, &ConvertOptions::default())
+        .unwrap();
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(body["input"], json!([item]));
+
+    // A response carrying the same stray field keeps its stop reason.
+    let resp_wire = json!({
+        "id": "resp_s", "object": "response", "status": "completed", "model": "m",
+        "output": [item],
+    });
+    let resp = response_to_ir(&serde_json::to_vec(&resp_wire).unwrap(), &meta_ok()).unwrap();
+    assert_ne!(resp.stop_reason, Some(StopReason::Refusal));
+    assert!(!llm_api::ir::is_refusal_block(&resp.message.content[0]));
 }
 
 #[test]

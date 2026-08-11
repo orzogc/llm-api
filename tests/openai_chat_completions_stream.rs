@@ -11,7 +11,7 @@
 use serde_json::{Value, json};
 
 use llm_api::formats::openai_chat_completions::{
-    OpenAiChatCompletions, request_from_ir, request_to_ir,
+    OpenAiChatCompletions, request_from_ir, request_to_ir, text_block_reserved_key,
 };
 use llm_api::http::{SseEvent, SseParser};
 use llm_api::{
@@ -336,7 +336,12 @@ fn refusal_stream_accumulates_to_refusal_stop() {
     };
     assert!(matches!(block, ContentBlock::Text { .. }));
     assert_eq!(
-        block.extra().unwrap().get(F).unwrap().get("refusal"),
+        block
+            .extra()
+            .unwrap()
+            .get(F)
+            .unwrap()
+            .get(text_block_reserved_key::REFUSAL),
         Some(&json!(true))
     );
     assert_eq!(
@@ -355,15 +360,15 @@ fn truncated_stream_fails_at_finish() {
     let (events, warnings, finish) = run_stream("stream_truncated.sse");
     assert!(warnings.is_empty());
     match finish {
-        Err(Error::Parse { message, .. }) => assert!(message.contains("truncated")),
-        other => panic!("expected truncation parse error, got {other:?}"),
+        Err(Error::TruncatedStream { message, .. }) => assert!(message.contains("[DONE]")),
+        other => panic!("expected a truncated-stream error, got {other:?}"),
     }
     // Accumulation of the partial record also refuses to finish.
     let mut acc = Accumulator::new();
     for event in &events {
         acc.push(&StreamItem::new(event.clone())).unwrap();
     }
-    assert!(matches!(acc.finish(), Err(Error::Parse { .. })));
+    assert!(matches!(acc.finish(), Err(Error::TruncatedStream { .. })));
 }
 
 #[test]
@@ -601,10 +606,10 @@ fn unknown_delta_fields_fold_into_accumulated_block() {
     };
     assert_eq!(text, "hi!");
     // Message-level by origin (the delta object is message-shaped), so
-    // the fold nests under the `message` reserved key.
+    // the fold nests under the `__llm_api_message` reserved key.
     assert_eq!(
         Value::Object(extra.get(F).unwrap().clone()),
-        json!({"message": {
+        json!({text_block_reserved_key::MESSAGE: {
             "annotations": [
                 {"type": "url_citation", "url_citation": {"url": "https://a"}},
                 {"type": "url_citation", "url_citation": {"url": "https://b"}},
@@ -638,7 +643,7 @@ fn legacy_function_call_delta_folds_verbatim() {
     assert_eq!(text, "");
     let call = json!({"name": "legacy", "arguments": "{\"a\":1}"});
     assert_eq!(
-        extra.get(F).unwrap().get("message"),
+        extra.get(F).unwrap().get(text_block_reserved_key::MESSAGE),
         Some(&json!({"function_call": call}))
     );
 

@@ -149,8 +149,9 @@ impl Client {
     /// — but only when the chat URL is a base URL; with a full
     /// chat URL and no explicit config this returns
     /// [`Error::NotSupported`]. A pagination cursor equal to one already
-    /// seen aborts with `Error::Parse` (malformed pagination) instead of
-    /// looping forever.
+    /// seen, or more than [`super::Limits::max_model_pages`] pages without
+    /// an end, aborts with `Error::Parse` (malformed pagination) instead
+    /// of looping forever.
     pub async fn list_models(&self, provider: &ProviderConfig) -> Result<Vec<Model>> {
         let endpoint = resolve_secondary_endpoint(
             provider,
@@ -170,6 +171,7 @@ impl Client {
         let mut models = Vec::new();
         let mut cursor: Option<String> = None;
         let mut seen = HashSet::new();
+        let mut pages = 0usize;
         loop {
             let built = endpoint
                 .format
@@ -196,9 +198,21 @@ impl Client {
             .await?;
             let (page, next) = endpoint.format.parse_models_response(&body)?;
             models.extend(page);
+            pages += 1;
             match next {
                 None => break,
                 Some(next) => {
+                    // The runaway guard: a server minting a fresh cursor on
+                    // every page never trips the seen-cursor check.
+                    if pages >= provider.limits.max_model_pages {
+                        return Err(Error::Parse {
+                            message: format!(
+                                "malformed pagination: exceeded {} pages without an end",
+                                provider.limits.max_model_pages
+                            ),
+                            raw: Bytes::from(body),
+                        });
+                    }
                     if !seen.insert(next.clone()) {
                         return Err(Error::Parse {
                             message: format!(

@@ -200,15 +200,24 @@ impl Response {
     }
 }
 
+/// The library-internal refusal marker key (§ 9): parsers that map wire
+/// refusal content into a `Text` block record `true` under this key in the
+/// block's format namespace, and serializers read it to rebuild the wire
+/// refusal shape. The double-underscore prefix keeps it disjoint from real
+/// wire fields, whose unknown values mirror into `extra` under their own
+/// names — a stray provider `refusal` field is plain unknown data, not a
+/// marker.
+pub const REFUSAL_MARKER: &str = "__llm_api_refusal";
+
 /// `true` when the block is refusal-marked: a block whose `extra` records
-/// `{"refusal": true}` in any format namespace (§ 9).
+/// [`REFUSAL_MARKER`] `= true` in any format namespace (§ 9).
 #[must_use]
 pub fn is_refusal_block(block: &ContentBlock) -> bool {
     block.extra().is_some_and(|extra| {
         extra.formats().any(|fmt| {
             extra
                 .get(fmt)
-                .and_then(|ns| ns.get("refusal"))
+                .and_then(|ns| ns.get(REFUSAL_MARKER))
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
         })
@@ -333,7 +342,7 @@ mod tests {
 
         // Refusal-marked text block.
         let mut extra = Extra::new();
-        extra.set("openai_chat_completions", "refusal", true);
+        extra.set("openai_chat_completions", REFUSAL_MARKER, true);
         let refusal_msg = Message::assistant(vec![ContentBlock::Text {
             text: "cannot help".into(),
             cache: None,
@@ -352,6 +361,26 @@ mod tests {
             normalize_stop_reason(&refusal_msg, Some(StopReason::MaxTokens)),
             Some(StopReason::MaxTokens)
         );
+        assert!(refusal_msg.content.iter().all(is_refusal_block));
+    }
+
+    #[test]
+    fn stray_wire_refusal_field_is_not_a_marker() {
+        // A provider's own unknown `refusal` field mirrors into `extra`
+        // under its bare wire name; only the internal marker key counts.
+        let mut extra = Extra::new();
+        extra.set("openai_chat_completions", "refusal", true);
+        let msg = Message::assistant(vec![ContentBlock::Text {
+            text: "hi".into(),
+            cache: None,
+            extra,
+        }]);
+        assert!(!msg.content.iter().any(is_refusal_block));
+        assert_eq!(
+            normalize_stop_reason(&msg, Some(StopReason::EndTurn)),
+            Some(StopReason::EndTurn)
+        );
+        assert_eq!(normalize_stop_reason(&msg, None), None);
     }
 
     #[test]

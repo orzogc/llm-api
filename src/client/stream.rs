@@ -115,8 +115,8 @@ impl StreamHandle {
     /// Consumes the stream and accumulates it into a [`Response`] using the
     /// core [`Accumulator`], seeded with the response status, headers and
     /// the request-build warnings. Fails with the first stream error, or
-    /// with `Error::Parse` when the stream ends without its protocol
-    /// terminator.
+    /// with [`Error::TruncatedStream`] when the stream ends without its
+    /// protocol terminator.
     pub async fn collect(mut self) -> Result<Response> {
         let mut acc = Accumulator::new();
         acc.set_status(self.status);

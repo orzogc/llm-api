@@ -51,6 +51,21 @@ pub enum Error {
         /// The offending raw data.
         raw: Bytes,
     },
+    /// A stream ended cleanly before its protocol terminator
+    /// (`message_stop` / `[DONE]` / a terminal event).
+    ///
+    /// Everything delivered up to that point parsed fine — the response is
+    /// merely incomplete, and the events already delivered remain the
+    /// caller's partial record. Unlike [`Error::Parse`] (malformed data,
+    /// not worth resending), truncation is usually retryable.
+    #[non_exhaustive]
+    TruncatedStream {
+        /// Description of the missing terminator.
+        message: String,
+        /// The raw data at hand when truncation was detected (often empty:
+        /// nothing was malformed).
+        raw: Bytes,
+    },
     /// A response body or SSE event exceeded a configured size cap.
     #[non_exhaustive]
     BodyTooLarge {
@@ -266,6 +281,54 @@ impl Error {
         }
     }
 
+    /// A `TruncatedStream` error. Public constructor for third-party
+    /// [`crate::StreamParser`] implementations (their `finish` must return
+    /// this when the stream showed no protocol terminator).
+    #[must_use]
+    pub fn truncated_stream(message: impl Into<String>, raw: impl Into<Bytes>) -> Self {
+        Self::TruncatedStream {
+            message: message.into(),
+            raw: raw.into(),
+        }
+    }
+
+    /// Advisory retryability classification.
+    ///
+    /// This is a *suggestion* based on the error class alone — callers own
+    /// their retry policy (backoff, attempt caps, honoring the `Api`
+    /// variant's `retry_after`) and may override it freely. The mapping:
+    ///
+    /// | Error | Retryable |
+    /// |---|---|
+    /// | `Api` with [`ApiErrorKind::RateLimit`] / [`ApiErrorKind::Overloaded`] / [`ApiErrorKind::ServerError`] | yes |
+    /// | `Api`, any other kind (auth, invalid request, not found, …) | no |
+    /// | `Transport` with [`HttpErrorKind::Connect`] / [`HttpErrorKind::Timeout`] / [`HttpErrorKind::Body`] | yes |
+    /// | `Transport` with [`HttpErrorKind::Protocol`] / [`HttpErrorKind::Other`] | no |
+    /// | `TruncatedStream` | yes |
+    /// | everything else (`Parse`, `Conversion`, `Hook`, `BodyTooLarge`, `NotSupported`) | no |
+    ///
+    /// [`HttpErrorKind::Connect`]: crate::http::HttpErrorKind::Connect
+    /// [`HttpErrorKind::Timeout`]: crate::http::HttpErrorKind::Timeout
+    /// [`HttpErrorKind::Body`]: crate::http::HttpErrorKind::Body
+    /// [`HttpErrorKind::Protocol`]: crate::http::HttpErrorKind::Protocol
+    /// [`HttpErrorKind::Other`]: crate::http::HttpErrorKind::Other
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        use crate::http::HttpErrorKind;
+        match self {
+            Self::Api { kind, .. } => matches!(
+                kind,
+                ApiErrorKind::RateLimit | ApiErrorKind::Overloaded | ApiErrorKind::ServerError
+            ),
+            Self::Transport(e) => matches!(
+                e.kind,
+                HttpErrorKind::Connect | HttpErrorKind::Timeout | HttpErrorKind::Body
+            ),
+            Self::TruncatedStream { .. } => true,
+            _ => false,
+        }
+    }
+
     /// An `Api` error with the given classification; `retry_after` is
     /// extracted from `headers`, `parsed` from `raw` when it is JSON.
     #[must_use]
@@ -414,6 +477,7 @@ impl fmt::Display for Error {
             Self::Conversion(e) => write!(f, "conversion error: {e}"),
             Self::Hook(e) => write!(f, "request hook failed: {e}"),
             Self::Parse { message, .. } => write!(f, "parse error: {message}"),
+            Self::TruncatedStream { message, .. } => write!(f, "truncated stream: {message}"),
             Self::BodyTooLarge { kind, limit, .. } => {
                 let what = match kind {
                     BodyKind::SuccessBody => "response body",
@@ -455,15 +519,24 @@ impl From<HookError> for Error {
     }
 }
 
-/// Parses a `Retry-After` header as integer seconds.
+/// Parses a `Retry-After` header: integer seconds, or an HTTP-date.
 ///
-/// HTTP-date values are not parsed and yield `None` (the providers covered by
-/// this crate send integer seconds).
+/// The providers covered by this crate send integer seconds, but proxies
+/// and CDNs in front of them commonly send an IMF-fixdate (RFC 9110). A
+/// date is converted to the remaining wait from now; one already in the
+/// past yields `Duration::ZERO`. Unparseable values yield `None`.
 #[must_use]
 pub fn retry_after_from_headers(headers: &http::HeaderMap) -> Option<Duration> {
     let v = headers.get(http::header::RETRY_AFTER)?;
     let s = v.to_str().ok()?.trim();
-    s.parse::<u64>().ok().map(Duration::from_secs)
+    if let Ok(secs) = s.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    // IMF-fixdate is valid RFC 2822 (the well-known parser accepts the
+    // `GMT` zone literal).
+    let date =
+        time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc2822).ok()?;
+    Some(Duration::try_from(date - time::OffsetDateTime::now_utc()).unwrap_or(Duration::ZERO))
 }
 
 #[cfg(test)]
@@ -486,19 +559,79 @@ mod tests {
         assert_eq!(ApiErrorKind::from_status(529), ApiErrorKind::Overloaded);
     }
 
-    #[test]
-    fn retry_after_parses_seconds_only() {
+    fn retry_after_of(value: &'static str) -> Option<Duration> {
         let mut h = http::HeaderMap::new();
-        h.insert(
-            http::header::RETRY_AFTER,
-            http::HeaderValue::from_static("12"),
-        );
-        assert_eq!(retry_after_from_headers(&h), Some(Duration::from_secs(12)));
+        h.insert(http::header::RETRY_AFTER, http::HeaderValue::from_static(value));
+        retry_after_from_headers(&h)
+    }
 
-        h.insert(
-            http::header::RETRY_AFTER,
-            http::HeaderValue::from_static("Sun, 06 Nov 1994 08:49:37 GMT"),
+    #[test]
+    fn retry_after_parses_integer_seconds() {
+        assert_eq!(retry_after_of("12"), Some(Duration::from_secs(12)));
+        assert_eq!(retry_after_of(" 3 "), Some(Duration::from_secs(3)));
+        assert_eq!(retry_after_from_headers(&http::HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn retry_after_parses_http_date() {
+        // A far-future IMF-fixdate yields a positive remaining wait.
+        let future = retry_after_of("Thu, 31 Dec 2099 23:59:59 GMT").expect("parses");
+        assert!(future > Duration::from_secs(60), "got {future:?}");
+        // A past date clamps to zero rather than failing.
+        assert_eq!(
+            retry_after_of("Sun, 06 Nov 1994 08:49:37 GMT"),
+            Some(Duration::ZERO)
         );
-        assert_eq!(retry_after_from_headers(&h), None);
+        // Garbage still yields None.
+        assert_eq!(retry_after_of("soon"), None);
+        assert_eq!(retry_after_of("12.5"), None);
+    }
+
+    #[test]
+    fn truncated_stream_display_and_source() {
+        let e = Error::truncated_stream("no message_stop before EOF", Bytes::new());
+        assert_eq!(e.to_string(), "truncated stream: no message_stop before EOF");
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn is_retryable_mapping() {
+        use crate::http::{HttpError, HttpErrorKind};
+
+        let api = |kind: ApiErrorKind| {
+            Error::api(500, kind, "m", Bytes::new(), http::HeaderMap::new())
+        };
+        assert!(api(ApiErrorKind::RateLimit).is_retryable());
+        assert!(api(ApiErrorKind::Overloaded).is_retryable());
+        assert!(api(ApiErrorKind::ServerError).is_retryable());
+        assert!(!api(ApiErrorKind::InvalidRequest).is_retryable());
+        assert!(!api(ApiErrorKind::Auth).is_retryable());
+        assert!(!api(ApiErrorKind::PermissionDenied).is_retryable());
+        assert!(!api(ApiErrorKind::NotFound).is_retryable());
+        assert!(!api(ApiErrorKind::Other("x".into())).is_retryable());
+
+        let transport = |kind: HttpErrorKind| Error::Transport(HttpError::new(kind));
+        assert!(transport(HttpErrorKind::Connect).is_retryable());
+        assert!(transport(HttpErrorKind::Timeout).is_retryable());
+        assert!(transport(HttpErrorKind::Body).is_retryable());
+        assert!(!transport(HttpErrorKind::Protocol).is_retryable());
+        assert!(!transport(HttpErrorKind::Other).is_retryable());
+
+        assert!(Error::truncated_stream("t", Bytes::new()).is_retryable());
+
+        assert!(!Error::parse("p", Bytes::new()).is_retryable());
+        assert!(!Error::from(ConversionError::other("c")).is_retryable());
+        assert!(!Error::from(HookError::new("h")).is_retryable());
+        assert!(
+            !Error::BodyTooLarge {
+                kind: BodyKind::SuccessBody,
+                limit: 1,
+                status: None,
+                headers: None,
+                prefix: Bytes::new(),
+            }
+            .is_retryable()
+        );
+        assert!(!Error::NotSupported("n").is_retryable());
     }
 }

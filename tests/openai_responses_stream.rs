@@ -8,7 +8,9 @@
 
 use serde_json::{Value, json};
 
-use llm_api::formats::openai_responses::{OpenAiResponses, request_from_ir};
+use llm_api::formats::openai_responses::{
+    OpenAiResponses, request_from_ir, text_block_reserved_key,
+};
 use llm_api::http::{SseEvent, SseParser};
 use llm_api::{
     Accumulator, ApiFormat, BlockDelta, CallMode, ContentBlock, ConversionWarning, ConvertOptions,
@@ -285,7 +287,12 @@ fn refusal_stream_accumulates_to_refusal_stop() {
     };
     assert!(matches!(block, ContentBlock::Text { .. }));
     assert_eq!(
-        block.extra().unwrap().get(F).unwrap().get("refusal"),
+        block
+            .extra()
+            .unwrap()
+            .get(F)
+            .unwrap()
+            .get(text_block_reserved_key::REFUSAL),
         Some(&json!(true))
     );
     assert_eq!(
@@ -750,15 +757,17 @@ fn truncated_stream_fails_at_finish() {
     let (events, warnings, finish) = run_stream("stream_truncated.sse");
     assert!(warnings.is_empty());
     match finish {
-        Err(Error::Parse { message, .. }) => assert!(message.contains("truncated")),
-        other => panic!("expected truncation parse error, got {other:?}"),
+        Err(Error::TruncatedStream { message, .. }) => {
+            assert!(message.contains("without a terminal event"));
+        }
+        other => panic!("expected a truncated-stream error, got {other:?}"),
     }
     // Accumulation of the partial record also refuses to finish.
     let mut acc = Accumulator::new();
     for event in &events {
         acc.push(&StreamItem::new(event.clone())).unwrap();
     }
-    assert!(matches!(acc.finish(), Err(Error::Parse { .. })));
+    assert!(matches!(acc.finish(), Err(Error::TruncatedStream { .. })));
 }
 
 #[test]

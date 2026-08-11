@@ -369,7 +369,8 @@ impl StreamParser for MockStreamParser {
 
     fn finish(&mut self) -> llm_api::Result<(Vec<StreamEvent>, Vec<ConversionWarning>)> {
         if !self.seen_stop {
-            return Err(parse_err("mock: truncated stream"));
+            // The public constructor third-party parsers use for this case.
+            return Err(Error::truncated_stream("mock: no stop event", Bytes::new()));
         }
         if let Some(text) = self.held.take() {
             return Ok((
@@ -1527,7 +1528,7 @@ async fn stream_truncated_at_eof_surfaces_finish_error() {
     let items = drain(handle).await;
     assert!(matches!(
         items.last().unwrap(),
-        Err(Error::NotSupported(m)) if m.contains("truncated")
+        Err(Error::TruncatedStream { message, .. }) if message.contains("no stop event")
     ));
 
     // collect() propagates the same failure.
@@ -1538,7 +1539,9 @@ async fn stream_truncated_at_eof_surfaces_finish_error() {
         .collect()
         .await
         .unwrap_err();
-    assert!(matches!(err, Error::NotSupported(m) if m.contains("truncated")));
+    assert!(
+        matches!(err, Error::TruncatedStream { ref message, .. } if message.contains("no stop event"))
+    );
 }
 
 #[tokio::test]
@@ -1773,6 +1776,41 @@ async fn list_models_repeated_cursor_is_malformed_pagination() {
         Error::Parse { message, .. } => assert!(message.contains("malformed pagination")),
         other => panic!("unexpected error: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn list_models_page_cap_stops_fresh_cursor_runaway() {
+    // Every page returns a brand-new cursor: the seen-cursor check never
+    // trips, so `max_model_pages` is the guard.
+    let (client, captured) = scripted(vec![
+        respond_json(&json!({"data": [{"id": "a"}], "next": "c1"})),
+        respond_json(&json!({"data": [{"id": "b"}], "next": "c2"})),
+        respond_json(&json!({"data": [{"id": "c"}], "next": "c3"})),
+    ]);
+    let mut provider = mock_provider();
+    provider.limits = Limits::new().with_max_model_pages(3);
+    let err = client.list_models(&provider).await.unwrap_err();
+    match err {
+        Error::Parse { message, .. } => {
+            assert!(message.contains("malformed pagination"), "{message}");
+            assert!(message.contains("3 pages"), "{message}");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+    assert_eq!(captured.lock().unwrap().len(), 3, "exactly the cap");
+}
+
+#[tokio::test]
+async fn list_models_page_cap_allows_exact_cap_listing() {
+    // A listing that ends on exactly the cap's page count is fine.
+    let (client, _) = scripted(vec![
+        respond_json(&json!({"data": [{"id": "a"}], "next": "c1"})),
+        respond_json(&json!({"data": [{"id": "b"}]})),
+    ]);
+    let mut provider = mock_provider();
+    provider.limits = Limits::new().with_max_model_pages(2);
+    let models = client.list_models(&provider).await.unwrap();
+    assert_eq!(models.len(), 2);
 }
 
 #[tokio::test]
@@ -2236,6 +2274,42 @@ mod wire {
             models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
             ["a", "b"]
         );
+    }
+
+    /// Serves a model-list page with a brand-new cursor on every request.
+    struct FreshCursorPages(std::sync::atomic::AtomicUsize);
+
+    impl wiremock::Respond for FreshCursorPages {
+        fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+            let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{"id": format!("m{n}")}],
+                "next": format!("c{n}"),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn list_models_page_cap_end_to_end() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(FreshCursorPages(std::sync::atomic::AtomicUsize::new(0)))
+            .expect(3)
+            .mount(&server)
+            .await;
+
+        let mut provider = wire_provider(&server).await;
+        provider.limits = Limits::new().with_max_model_pages(3);
+        let client = Client::new(reqwest::Client::new());
+        let err = client.list_models(&provider).await.unwrap_err();
+        match err {
+            Error::Parse { message, .. } => {
+                assert!(message.contains("malformed pagination"), "{message}");
+                assert!(message.contains("3 pages"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -441,7 +441,10 @@ fn assistant_fields_to_blocks(
 
 /// A refusal-marked `Text` block (§ 9).
 fn refusal_text_block(text: String, mut ns: Map<String, Value>) -> ContentBlock {
-    ns.insert("refusal".to_owned(), Value::from(true));
+    ns.insert(
+        super::text_block_reserved_key::REFUSAL.to_owned(),
+        Value::from(true),
+    );
     ContentBlock::Text {
         text,
         cache: None,

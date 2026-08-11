@@ -24,6 +24,8 @@ pub use message::{Message, RoundTripMeta};
 pub use output::OutputFormat;
 pub use reasoning::{Effort, Reasoning};
 pub use request::Request;
-pub use response::{Response, StopReason, Usage, is_refusal_block, normalize_stop_reason};
+pub use response::{
+    REFUSAL_MARKER, Response, StopReason, Usage, is_refusal_block, normalize_stop_reason,
+};
 pub use role::Role;
 pub use tools::{FunctionTool, Tool, ToolChoice};

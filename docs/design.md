@@ -1003,13 +1003,14 @@ pub enum BlockDelta {
   `output_text.annotation.added`, …) surface as `BlockDelta::Other` and are
   folded into the finalized block at `BlockStop`. CC unknown `delta` fields
   (`annotations`, `audio`, the legacy `function_call`, dialect fields) fold
-  into the block's extra at close — nested under the `message` reserved key
-  on content/refusal blocks, top-level on thinking blocks (a thinking
-  block's extra already merges into the containing message on
-  serialization). Fields repeating across chunks merge under CC delta
-  semantics: strings concatenate, arrays append, objects merge per key
-  recursively, anything else replaces (last wins). Serialization hoists the
-  `message` key back onto the containing wire message — several holding
+  into the block's extra at close — nested under the internal
+  `__llm_api_message` reserved key on content/refusal blocks, top-level on
+  thinking blocks (a thinking block's extra already merges into the
+  containing message on serialization). Fields repeating across chunks
+  merge under CC delta semantics: strings concatenate, arrays append,
+  objects merge per key recursively, anything else replaces (last wins).
+  Serialization hoists the
+  `__llm_api_message` key back onto the containing wire message — several holding
   blocks merge in block order (later keys win, RFC 7396) before the
   message's own `extra`, which stays authoritative — so replaying the
   accumulated message equals replaying the non-streaming parse of the same
@@ -1020,8 +1021,10 @@ pub enum BlockDelta {
   indexes beyond the first surface as `Unknown` — multi-candidate is
   unsupported (§ 8). Refusal content (CC `refusal` field/delta, Responses refusal parts)
   parses into a `Text` block whose format namespace in `extra` records
-  `{"refusal": true}` — it survives accumulation and round-trips even though
-  `Response.raw` is `None` for streamed responses.
+  `{"__llm_api_refusal": true}` (an internal marker key, prefixed so a stray
+  wire field named `refusal` stays ordinary unknown data) — it survives
+  accumulation and round-trips even though `Response.raw` is `None` for
+  streamed responses.
 - Stream parse warnings ride `StreamItem.warnings`: the client attaches a
   parse call's warnings to the first item that call emits (held for the next
   item when a call emits none; `StreamParser::finish` flushes any still-held
@@ -1142,8 +1145,10 @@ pub trait StreamParser: Send {
     /// Responses event; Google either a `finishReason` on the first
     /// candidate or a blocked-prompt chunk (`promptFeedback.blockReason`
     /// with no candidates). A stream that showed none of these returns
-    /// `Error::Parse` ("truncated stream") — a silent EOF must not pass a
-    /// half response off as complete.
+    /// `Error::TruncatedStream` (usually retryable, unlike malformed-data
+    /// `Error::Parse`) — a silent EOF must not pass a half response off
+    /// as complete. `Accumulator::finish` fails the same way when no
+    /// `MessageStop` was accumulated (§ 9).
     fn finish(&mut self)
         -> Result<(Vec<StreamEvent>, Vec<ConversionWarning>)>;
 }
@@ -1286,10 +1291,11 @@ pub enum Override<T> { Inherit, Set(T), Disable }
       pub max_response_body: usize, // decompressed bytes, as delivered by the transport
       pub max_error_body: usize,
       pub max_sse_event: usize,     // one complete logical SSE event (joined data lines)
+      pub max_model_pages: usize,   // list_models auto-pagination guard (§ 13)
   }
   ```
 
-  Plain byte counts, no magic values (`usize::MAX` ≈ unlimited). Defaults are
+  Plain counts (bytes, or pages), no magic values (`usize::MAX` ≈ unlimited). Defaults are
   generous, chosen at implementation, and may be tuned in minor versions —
   the semver guarantee is the mechanism, not the numbers. Exceeding a cap
   keeps what was already read: a 2xx body or an SSE event over its cap fails
@@ -1345,7 +1351,9 @@ warnings — under strict that is a `ConversionError`, and a per-call
 - `list_models` auto-paginates to exhaustion (Anthropic cursor via
   `after_id`/`has_more`; Google `pageToken` with `pageSize` up to 1000; OpenAI
   is a single page). A page token/cursor equal to one already seen aborts
-  with `Error::Parse` (malformed pagination) instead of looping forever.
+  with `Error::Parse` (malformed pagination) instead of looping forever, and
+  `Limits.max_model_pages` (default 1000) caps the page count the same way —
+  a server minting a fresh cursor on every page never repeats one.
   Fine-grained pagination control = use the typed format layer directly.
 - `count_tokens(&Request) -> TokenCount { input_tokens, raw, warnings }`
   (accepts `CallOptions`, § 12) — endpoints:
@@ -1382,6 +1390,10 @@ pub enum Error {
     Conversion(ConversionError),   // structural/strict failures, invalid IR
     Hook(HookError),               // a request hook returned Err
     Parse { message: String, raw: Bytes },
+    TruncatedStream { message: String, raw: Bytes }, // stream ended before
+                                   // its protocol terminator; delivered
+                                   // events parsed fine (usually retryable,
+                                   // unlike Parse)
     BodyTooLarge { kind: BodyKind, // SuccessBody | SseEvent
                    limit: usize, status: Option<u16>,
                    headers: Option<http::HeaderMap>, prefix: Bytes },

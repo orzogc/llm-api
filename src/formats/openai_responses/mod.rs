@@ -59,9 +59,10 @@
 //!   unknown item fields; `call_id` maps to the block id.
 //! - `Text` blocks of assistant messages use the reserved keys of
 //!   [`text_block_reserved_key`]: `id` / `status` / `phase` are
-//!   item-level fields, `item` nests unknown item-level fields, `refusal`
-//!   marks refusal parts; every other key (`annotations`, `logprobs`, …)
-//!   is part-level and merges back into the content part. On
+//!   item-level fields, `item` nests unknown item-level fields, the
+//!   internal `__llm_api_refusal` marker flags refusal parts; every other
+//!   key (`annotations`, `logprobs`, …) is part-level and merges back
+//!   into the content part. On
 //!   serialization, consecutive blocks sharing an `id` re-group into one
 //!   `message` item (a later member's conflicting item-level value drops
 //!   with an `ExtraDropped` warning located at the item-level field);
@@ -152,8 +153,11 @@ pub mod text_block_reserved_key {
     /// Unknown item-level fields, nested as an object. Part of the
     /// grouping key for id-less blocks.
     pub const ITEM: &str = "item";
-    /// Marks the block as a `refusal` part (§ 9).
-    pub const REFUSAL: &str = "refusal";
+    /// Marks the block as a `refusal` part (§ 9). A library-internal
+    /// `__llm_api_`-prefixed marker: a wire part field that happens to be
+    /// named `refusal` mirrors into the namespace as plain unknown data
+    /// and replays verbatim.
+    pub const REFUSAL: &str = crate::ir::REFUSAL_MARKER;
 }
 
 /// Top-level request keys accepted by `POST /v1/responses/input_tokens`

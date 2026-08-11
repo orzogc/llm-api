@@ -92,8 +92,9 @@ impl fmt::Debug for EndpointConfig {
 
 /// Size caps bounding memory against misbehaving peers (§ 12).
 ///
-/// Plain byte counts, no magic values (`usize::MAX` ≈ unlimited). A payload
-/// strictly larger than its cap fails: a 2xx body or an SSE event with
+/// Plain counts — bytes, or requests for [`Limits::max_model_pages`] — with
+/// no magic values (`usize::MAX` ≈ unlimited). A payload strictly larger
+/// than its byte cap fails: a 2xx body or an SSE event with
 /// [`crate::error::Error::BodyTooLarge`], an error body with a full
 /// [`crate::error::Error::Api`] carrying `truncated: true` and the read
 /// prefix as `raw`.
@@ -128,6 +129,13 @@ pub struct Limits {
     /// error discards the buffered input — the error's `prefix` is the
     /// only retained copy). Default: 64 MiB.
     pub max_sse_event: usize,
+    /// Cap on [`super::Client::list_models`] auto-pagination — the
+    /// runaway guard: a malicious or broken server returning a fresh
+    /// cursor on every page would otherwise loop forever (the seen-cursor
+    /// check only catches repeats). A listing still paginating after this
+    /// many pages fails with [`crate::error::Error::Parse`] (malformed
+    /// pagination). Default: 1000 pages.
+    pub max_model_pages: usize,
 }
 
 impl Limits {
@@ -137,6 +145,8 @@ impl Limits {
     pub const DEFAULT_MAX_ERROR_BODY: usize = 8 * 1024 * 1024;
     /// Default [`Limits::max_sse_event`] (64 MiB).
     pub const DEFAULT_MAX_SSE_EVENT: usize = 64 * 1024 * 1024;
+    /// Default [`Limits::max_model_pages`] (1000 pages).
+    pub const DEFAULT_MAX_MODEL_PAGES: usize = 1000;
 
     /// The default limits.
     #[must_use]
@@ -164,6 +174,13 @@ impl Limits {
         self.max_sse_event = bytes;
         self
     }
+
+    /// Sets the model-listing page cap.
+    #[must_use]
+    pub fn with_max_model_pages(mut self, pages: usize) -> Self {
+        self.max_model_pages = pages;
+        self
+    }
 }
 
 impl Default for Limits {
@@ -172,6 +189,7 @@ impl Default for Limits {
             max_response_body: Self::DEFAULT_MAX_RESPONSE_BODY,
             max_error_body: Self::DEFAULT_MAX_ERROR_BODY,
             max_sse_event: Self::DEFAULT_MAX_SSE_EVENT,
+            max_model_pages: Self::DEFAULT_MAX_MODEL_PAGES,
         }
     }
 }
@@ -464,17 +482,20 @@ mod tests {
         assert_eq!(limits.max_response_body, 256 * 1024 * 1024);
         assert_eq!(limits.max_error_body, 8 * 1024 * 1024);
         assert_eq!(limits.max_sse_event, 64 * 1024 * 1024);
+        assert_eq!(limits.max_model_pages, 1000);
         let tuned = Limits::new()
             .with_max_sse_event(16)
             .with_max_error_body(8)
-            .with_max_response_body(4);
+            .with_max_response_body(4)
+            .with_max_model_pages(2);
         assert_eq!(
             (
                 tuned.max_response_body,
                 tuned.max_error_body,
-                tuned.max_sse_event
+                tuned.max_sse_event,
+                tuned.max_model_pages
             ),
-            (4, 8, 16)
+            (4, 8, 16, 2)
         );
     }
 

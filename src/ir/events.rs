@@ -283,13 +283,13 @@ impl Accumulator {
         Ok(())
     }
 
-    /// Finishes accumulation. Fails with `Error::Parse` when the stream
-    /// never delivered its `MessageStop` — a partial stream must not pass a
-    /// half response off as complete; the events already delivered remain
-    /// the caller's partial record.
+    /// Finishes accumulation. Fails with [`Error::TruncatedStream`] when
+    /// the stream never delivered its `MessageStop` — a partial stream must
+    /// not pass a half response off as complete; the events already
+    /// delivered remain the caller's partial record.
     pub fn finish(self) -> Result<Response, Error> {
         if !self.stopped {
-            return Err(Error::Parse {
+            return Err(Error::TruncatedStream {
                 message: "stream ended without MessageStop; accumulated response is partial"
                     .to_owned(),
                 raw: bytes::Bytes::new(),
@@ -499,7 +499,7 @@ mod tests {
             usage: None,
         }))
         .unwrap();
-        assert!(matches!(acc.finish(), Err(Error::Parse { .. })));
+        assert!(matches!(acc.finish(), Err(Error::TruncatedStream { .. })));
     }
 
     #[test]

@@ -280,7 +280,7 @@ fn truncated_stream_fails_finish() {
     assert!(warnings.is_empty());
     let err = finish.unwrap_err();
     match err {
-        Error::Parse { message, .. } => assert!(message.contains("truncated stream")),
+        Error::TruncatedStream { message, .. } => assert!(message.contains("finishReason")),
         other => panic!("unexpected: {other:?}"),
     }
     // No terminal events were fabricated.

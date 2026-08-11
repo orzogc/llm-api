@@ -178,7 +178,10 @@ Round-trip metadata flows **parse-attach → serialize-consume**.
 - Always run `normalize_stop_reason` (core) last — on non-streaming
   parses and in the accumulator.
 - Refusal content (CC `refusal` field/delta, Responses refusal parts)
-  parses into a `Text` block with `extra[<id>]["refusal"] = true`.
+  parses into a `Text` block with
+  `extra[<id>]["__llm_api_refusal"] = true` (the `ir::REFUSAL_MARKER`
+  internal key — prefixed so a stray wire field named `refusal` stays
+  plain unknown data and replays verbatim instead of rewriting the block).
 - Multi-choice/candidate: read the first, warn `MultipleCandidates`
   (semantic, parse side); in streams, chunks for candidate index > 0
   surface as `Unknown` with the warning emitted **once per stream**.
@@ -242,14 +245,16 @@ Round-trip metadata flows **parse-attach → serialize-consume**.
   surfaces each raw fragment in real time. Anthropic's unknown delta
   *types* on a known block emit `Other` + `MalformedField` and nothing
   folds at stop (nothing known to fold — disclosed, not silent).
-- CC assistant `Text` blocks reserve two namespace keys
-  (`text_block_reserved_key`): `refusal` marks a refusal part (§ 9);
-  `message` nests an object of message-level fields — the streaming
-  parser folds unknown delta fields there, and serialization merges the
-  object into the containing wire message in block order (later keys win)
-  before `Message.extra`. All other Text-block namespace keys are
-  part-level; a lone `message` key does not block the single-block
-  `content` string shorthand.
+- CC assistant `Text` blocks reserve two internal namespace keys
+  (`text_block_reserved_key`, both `__llm_api_`-prefixed so wire fields
+  named `refusal`/`message` cannot collide): `__llm_api_refusal` marks a
+  refusal part (§ 9); `__llm_api_message` nests an object of
+  message-level fields — the streaming parser folds unknown delta fields
+  there, and serialization merges the object into the containing wire
+  message in block order (later keys win) before `Message.extra`. All
+  other Text-block namespace keys are part-level; a lone
+  `__llm_api_message` key does not block the single-block `content`
+  string shorthand.
 - CC `Thinking` block extras have no dedicated wire object
   (`reasoning_content` is a plain string field) and merge wholesale into
   the containing assistant message on serialization; streamed unknown
@@ -306,6 +311,9 @@ list); Google: `pageSize=1000` + `pageToken=<cursor>` /
 Unix seconds via `models::system_time_from_unix_seconds`, Anthropic RFC
 3339 via `models::system_time_from_rfc3339`; parse failure → `None` +
 `MalformedField` warning is *not* needed (silent degrade, § 13).
+Client-side, `list_models` aborts with `Error::Parse` (malformed
+pagination) on a repeated cursor **and** past `Limits.max_model_pages`
+(default 1000) — a fresh cursor on every page never repeats one.
 
 ## Misc pins
 
@@ -392,7 +400,7 @@ Unix seconds via `models::system_time_from_unix_seconds`, Anthropic RFC
   `extra`, `Opaque` nodes, message order.
 - Stream fixtures: complete SSE sessions (interleaved thinking/text,
   tool-argument fragments, blocked prompts, multi-candidate, truncated
-  stream ⇒ `finish()` error). Put fixture files under
-  `tests/fixtures/<id>/`.
+  stream ⇒ `finish()` returns `Error::TruncatedStream`). Put fixture
+  files under `tests/fixtures/<id>/`.
 - `cargo test --all-features` and `cargo clippy --all-features
   --all-targets` clean (missing docs are warnings — write the docs).

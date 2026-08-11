@@ -563,8 +563,8 @@ impl StreamParser for AnthropicStreamParser {
         if self.terminated {
             Ok((Vec::new(), Vec::new()))
         } else {
-            Err(Error::Parse {
-                message: "truncated stream: no message_stop before EOF".to_owned(),
+            Err(Error::TruncatedStream {
+                message: "no message_stop before EOF".to_owned(),
                 raw: bytes::Bytes::new(),
             })
         }

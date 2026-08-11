@@ -8,7 +8,9 @@
 use serde_json::{Value, json};
 
 use llm_api::formats::anthropic_messages::AnthropicMessages;
-use llm_api::formats::openai_chat_completions::{OpenAiChatCompletions, request_from_ir};
+use llm_api::formats::openai_chat_completions::{
+    OpenAiChatCompletions, request_from_ir, text_block_reserved_key,
+};
 use llm_api::http::SseEvent;
 use llm_api::{
     Accumulator, ApiFormat, BlockDelta, CallMode, ContentBlock, ConversionWarning, ConvertOptions,
@@ -307,7 +309,7 @@ fn stream_reasoning_content_is_leftover_under_custom_field() {
         panic!("expected text block");
     };
     assert_eq!(
-        extra.get(F).unwrap().get("message"),
+        extra.get(F).unwrap().get(text_block_reserved_key::MESSAGE),
         Some(&json!({"reasoning_content": "legacy"}))
     );
 
@@ -469,7 +471,7 @@ fn stream_non_string_thinking_value_warns_and_folds() {
             panic!("{field}: expected text block");
         };
         assert_eq!(
-            extra.get(F).unwrap().get("message"),
+            extra.get(F).unwrap().get(text_block_reserved_key::MESSAGE),
             Some(&json!({field: {"x": 1}}))
         );
 
