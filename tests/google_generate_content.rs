@@ -390,6 +390,103 @@ fn adjacent_assistant_messages_merge_into_one_model_turn() {
 }
 
 #[test]
+fn empty_serialization_message_is_omitted_and_neighbours_merge() {
+    // The assistant message consists of one foreign thinking block, which
+    // drops: no empty-`parts` model turn may reach the wire, and the two
+    // user messages merge across the gap into a single turn.
+    let foreign_thinking =
+        ContentBlock::thinking_signed("plan", "sig").with_extra("anthropic_messages", "s", 1);
+    let req = Request::with_messages(vec![
+        Message::user_text("first"),
+        Message::assistant(vec![foreign_thinking]),
+        Message::user_text("second"),
+    ]);
+    let (body, warnings) = build(&req);
+    assert_eq!(
+        body["contents"],
+        json!([{"role": "user", "parts": [{"text": "first"}, {"text": "second"}]}])
+    );
+    let dropped: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.code == WarningCode::EmptyMessageDropped)
+        .collect();
+    assert_eq!(dropped.len(), 1, "{warnings:?}");
+    assert_eq!(dropped[0].severity, WarningSeverity::Semantic);
+    assert_eq!(dropped[0].location, "/contents");
+    assert!(dropped[0].message.contains("IR message 1"), "{warnings:?}");
+    find(&warnings, &WarningCode::ThinkingDropped);
+
+    // A native (google-marked) thinking block keeps its turn.
+    let native = ContentBlock::thinking("plan").with_extra(FMT, "thought", true);
+    let req = Request::with_messages(vec![
+        Message::user_text("first"),
+        Message::assistant(vec![native]),
+        Message::user_text("second"),
+    ]);
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(body["contents"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn omitted_message_skips_role_downgrade_but_reports_lost_extra() {
+    // A mid-conversation system message whose only block is foreign opaque:
+    // the message is omitted, so no RoleDowngraded fires — only the drop
+    // disclosures. Its google-namespace extra has nowhere to land.
+    let mut msg = Message::new(
+        Role::System,
+        vec![ContentBlock::opaque(
+            "openai_responses",
+            json!({"type": "note"}),
+        )],
+    );
+    msg.extra.set(FMT, "contentTag", "tagged");
+    let req = Request::with_messages(vec![
+        Message::user_text("hi"),
+        Message::assistant_text("hello"),
+        msg,
+        Message::user_text("bye"),
+    ]);
+    let (body, warnings) = build(&req);
+    assert_eq!(body["contents"].as_array().unwrap().len(), 3);
+    assert_eq!(body["contents"][2]["parts"], json!([{"text": "bye"}]));
+    assert!(!codes(&warnings).contains(&WarningCode::RoleDowngraded));
+    find(&warnings, &WarningCode::OpaqueDropped);
+    find(&warnings, &WarningCode::EmptyMessageDropped);
+    let extra = find(&warnings, &WarningCode::ExtraDropped);
+    assert!(extra.message.contains("IR message 2"), "{warnings:?}");
+
+    // Without a google-namespace extra there is nothing to report beyond
+    // the message drop itself.
+    let req = Request::with_messages(vec![
+        Message::user_text("hi"),
+        Message::assistant(vec![ContentBlock::opaque(
+            "openai_responses",
+            json!({"type": "note"}),
+        )]),
+    ]);
+    let (_, warnings) = build(&req);
+    find(&warnings, &WarningCode::EmptyMessageDropped);
+    assert!(!codes(&warnings).contains(&WarningCode::ExtraDropped));
+}
+
+#[test]
+fn deliberately_empty_ir_messages_keep_their_empty_turn() {
+    // Zero-block IR messages are the IR image of the wire's own
+    // empty-content form and replay as an empty turn, without warnings.
+    let req = Request::with_messages(vec![Message::user_text("hi"), Message::assistant(vec![])]);
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        body["contents"],
+        json!([
+            {"role": "user", "parts": [{"text": "hi"}]},
+            {"role": "model", "parts": []},
+        ])
+    );
+}
+
+#[test]
 fn role_block_validity_is_enforced() {
     for (role, block) in [
         (Role::User, ContentBlock::tool_call("f", "{}")),
@@ -514,6 +611,34 @@ fn tool_strict_and_cache_warn_and_foreign_opaque_drops() {
     find(&warnings, &WarningCode::CacheHintDropped);
     let opaque = find(&warnings, &WarningCode::OpaqueDropped);
     assert_eq!(opaque.severity, WarningSeverity::Semantic);
+}
+
+#[test]
+fn tools_key_omitted_when_all_entries_drop_but_empty_list_replays() {
+    // Every IR tool is foreign opaque: the key is omitted entirely (the
+    // OpaqueDropped warnings disclose the drops) — `"tools": []` would
+    // misstate the caller's intent.
+    let mut req = user_req("hi");
+    req.tools = Some(vec![
+        Tool::opaque("openai_responses", json!({"type": "web_search"})),
+        Tool::opaque("anthropic_messages", json!({"type": "bash"})),
+    ]);
+    let (body, warnings) = build(&req);
+    assert!(body.get("tools").is_none(), "{body}");
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|w| w.code == WarningCode::OpaqueDropped)
+            .count(),
+        2
+    );
+
+    // An explicitly empty IR tool list is replayed faithfully.
+    let mut req = user_req("hi");
+    req.tools = Some(vec![]);
+    let (body, warnings) = build(&req);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(body["tools"], json!([]));
 }
 
 #[test]
@@ -942,7 +1067,8 @@ fn thinking_provenance_controls_serialization() {
         json!({"text": "planning", "thought": true})
     );
 
-    // Foreign namespace: dropped with a semantic warning.
+    // Foreign namespace: dropped with a semantic warning. The message then
+    // serializes to nothing, so no empty model turn reaches the wire.
     let block = ContentBlock::thinking_signed("planning", "sig").with_extra(
         "anthropic_messages",
         "redacted",
@@ -953,9 +1079,13 @@ fn thinking_provenance_controls_serialization() {
         Message::assistant(vec![block]),
     ]);
     let (body, warnings) = build(&req);
-    assert_eq!(body["contents"][1]["parts"], json!([]));
+    assert_eq!(
+        body["contents"],
+        json!([{"role": "user", "parts": [{"text": "hi"}]}])
+    );
     let w = find(&warnings, &WarningCode::ThinkingDropped);
     assert_eq!(w.severity, WarningSeverity::Semantic);
+    find(&warnings, &WarningCode::EmptyMessageDropped);
 
     // thinking_as_text re-encodes the plaintext and drops the signature.
     let block = ContentBlock::thinking_signed("planning", "sig").with_extra(
@@ -1070,13 +1200,35 @@ fn missing_thinking_with_tool_calls_warns_or_fills() {
 
     // With fill_missing_thinking the placeholder is inserted (and, being
     // plaintext-only, subsequently dropped on this signature-validated
-    // target — the design documents that the option cannot help here).
+    // target — the design documents that the option cannot help here). The
+    // Filled message says so instead of implying a fix.
     let mut options = ConvertOptions::default();
     options.fill_missing_thinking = Some("tool call".to_owned());
     let (_, warnings) = request_from_ir(&req, &options).unwrap();
-    find(&warnings, &WarningCode::MissingThinkingFilled);
+    let filled = find(&warnings, &WarningCode::MissingThinkingFilled);
+    assert_eq!(
+        filled.message,
+        "inserted a placeholder thinking block before the tool calls; this format \
+         drops the placeholder during serialization (no unsigned thinking channel) \
+         — set `thinking_as_text` to carry it as text"
+    );
     find(&warnings, &WarningCode::ThinkingDropped);
     assert!(!codes(&warnings).contains(&WarningCode::MissingThinkingWithToolCalls));
+
+    // With thinking_as_text the placeholder actually reaches the wire, so
+    // the message keeps its plain form and nothing is dropped.
+    options.thinking_as_text = true;
+    let (body, warnings) = request_from_ir(&req, &options).unwrap();
+    let filled = find(&warnings, &WarningCode::MissingThinkingFilled);
+    assert_eq!(
+        filled.message,
+        "inserted a placeholder thinking block before the tool calls"
+    );
+    assert!(!codes(&warnings).contains(&WarningCode::ThinkingDropped));
+    assert_eq!(
+        body["contents"][1]["parts"][0],
+        json!({"text": "tool call", "thought": true})
+    );
 
     // No reasoning configured → no warning at all.
     req.reasoning = None;

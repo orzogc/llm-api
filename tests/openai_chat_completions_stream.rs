@@ -1864,3 +1864,225 @@ fn content_after_finish_opens_fresh_block() {
     assert_eq!(resp.message.content.len(), 2);
     assert_eq!(resp.text(), "ab");
 }
+
+// ------------------------------------- non-string channel values (R1)
+
+/// Runs the chunks plus `[DONE]` through a fresh parser, collecting
+/// events and warnings.
+fn run_chunks(chunks: &[Value]) -> (Vec<StreamEvent>, Vec<ConversionWarning>) {
+    let mut parser = OpenAiChatCompletions.stream_parser();
+    let mut events = Vec::new();
+    let mut warnings = Vec::new();
+    for chunk in chunks {
+        let (evs, ws) = parser.parse(&chunk_event(chunk)).unwrap();
+        events.extend(evs);
+        warnings.extend(ws);
+    }
+    let (evs, ws) = parser.parse(&SseEvent::new(None, "[DONE]")).unwrap();
+    events.extend(evs);
+    warnings.extend(ws);
+    (events, warnings)
+}
+
+#[test]
+fn non_string_channel_value_without_block_warns_and_surfaces_unknown() {
+    // No block open: like any unknown delta field the value cannot be
+    // attributed — MalformedField plus one UnknownStreamEvent per field
+    // name, and the chunk surfaces as Unknown (nothing silent).
+    for field in ["content", "refusal"] {
+        let (events, warnings) = run_chunks(&[
+            json!({"id": "c", "choices": [{"index": 0,
+                "delta": {"role": "assistant",
+                          field: [{"type": "text", "text": "hi"}]},
+                "finish_reason": null}]}),
+            json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+        ]);
+        let malformed: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.code == WarningCode::MalformedField)
+            .collect();
+        assert_eq!(malformed.len(), 1, "{field}: {warnings:?}");
+        assert_eq!(malformed[0].location, format!("/choices/0/delta/{field}"));
+        assert!(
+            malformed[0]
+                .message
+                .contains(&format!("non-string `{field}`")),
+            "{field}: {warnings:?}"
+        );
+        let unknown: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.code == WarningCode::UnknownStreamEvent)
+            .collect();
+        assert_eq!(unknown.len(), 1, "{field}: {warnings:?}");
+        assert!(
+            unknown[0].message.contains(&format!("`{field}`")),
+            "{field}: {warnings:?}"
+        );
+        assert!(events.contains(&StreamEvent::Unknown), "{field}");
+        let resp = accumulate(&events);
+        assert!(resp.message.content.is_empty(), "{field}");
+    }
+}
+
+#[test]
+fn non_string_channel_value_folds_into_open_reasoning_block() {
+    // With a block open the value takes the leftover fold — parity with
+    // the reasoning_field branch: warned, surfaced as an Other delta,
+    // folded into the block extra and replayed on the message level.
+    let (events, warnings) = run_chunks(&[
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"role": "assistant", "reasoning_content": "think"},
+            "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"content": [{"type": "text", "text": "hi"}]},
+            "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+    ]);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedField);
+    assert_eq!(warnings[0].location, "/choices/0/delta/content");
+    assert!(
+        events.iter().any(|e| matches!(e,
+            StreamEvent::BlockDelta { index: 0, delta: BlockDelta::Other(v), .. }
+                if v.get("content").is_some())),
+        "{events:#?}"
+    );
+
+    let resp = accumulate(&events);
+    assert_eq!(resp.message.content.len(), 1, "{:#?}", resp.message.content);
+    let ContentBlock::Thinking { text, extra, .. } = &resp.message.content[0] else {
+        panic!("expected thinking block: {:?}", resp.message.content);
+    };
+    assert_eq!(text.as_deref(), Some("think"));
+    // Thinking-channel leftovers stay top-level in the namespace.
+    assert_eq!(
+        extra.get(F).unwrap().get("content"),
+        Some(&json!([{"type": "text", "text": "hi"}]))
+    );
+
+    // Replay: the thinking-block extra merges into the containing message,
+    // restoring the dialect's array `content` verbatim.
+    let (body, ws) = replay_message(&resp.message);
+    assert!(ws.is_empty(), "{ws:?}");
+    let msg = &body["messages"][0];
+    assert_eq!(msg["reasoning_content"], json!("think"));
+    assert_eq!(msg["content"], json!([{"type": "text", "text": "hi"}]));
+}
+
+#[test]
+fn non_array_tool_calls_delta_warns_and_folds() {
+    // A non-array `tool_calls` opens no ToolCall block: it warns and
+    // folds like an unknown delta field (here under the `message`
+    // reserved key of the open text block), replaying on the message.
+    let (events, warnings) = run_chunks(&[
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"role": "assistant", "content": "hi"}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"tool_calls": {"id": "x"}}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+    ]);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedField);
+    assert_eq!(warnings[0].location, "/choices/0/delta/tool_calls");
+    assert!(
+        warnings[0].message.contains("non-array `tool_calls`"),
+        "{warnings:?}"
+    );
+    assert!(
+        events.iter().all(|e| !matches!(
+            e,
+            StreamEvent::BlockStart {
+                block: ContentBlock::ToolCall { .. },
+                ..
+            }
+        )),
+        "no tool call block: {events:#?}"
+    );
+
+    let resp = accumulate(&events);
+    assert_eq!(resp.message.content.len(), 1);
+    let ContentBlock::Text { text, extra, .. } = &resp.message.content[0] else {
+        panic!("expected text block: {:?}", resp.message.content);
+    };
+    assert_eq!(text, "hi");
+    assert_eq!(
+        extra.get(F).unwrap().get(text_block_reserved_key::MESSAGE),
+        Some(&json!({"tool_calls": {"id": "x"}}))
+    );
+
+    let (body, ws) = replay_message(&resp.message);
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(body["messages"][0]["tool_calls"], json!({"id": "x"}));
+}
+
+#[test]
+fn null_channel_values_stay_silent() {
+    // Pin: `null` is the absent canonical form on every channel — no
+    // warning, no event.
+    let events = run_chunks_no_warnings(&[
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"role": "assistant", "content": null, "refusal": null,
+                      "tool_calls": null},
+            "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"content": "hi"}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+    ]);
+    let resp = accumulate(&events);
+    assert_eq!(resp.message.content.len(), 1);
+    assert!(matches!(&resp.message.content[0],
+        ContentBlock::Text { text, extra, .. } if text == "hi" && extra.is_empty()));
+}
+
+// ----------------------------------------------- malformed usage (R5)
+
+#[test]
+fn malformed_usage_chunk_warns_and_drops_snapshot() {
+    // The include_usage final chunk (empty choices) with a malformed
+    // usage: warned, no usage snapshot emitted, stream completes.
+    let (events, warnings) = run_chunks(&[
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"role": "assistant", "content": "hi"}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+        json!({"id": "c", "choices": [],
+            "usage": {"prompt_tokens": 12.5, "completion_tokens": 3}}),
+    ]);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedField);
+    assert_eq!(warnings[0].location, "/usage");
+    assert!(
+        events
+            .iter()
+            .all(|e| !matches!(e, StreamEvent::MessageDelta { usage: Some(_), .. })),
+        "no usage snapshot: {events:#?}"
+    );
+    let resp = accumulate(&events);
+    assert_eq!(resp.text(), "hi");
+    assert!(resp.usage.is_none());
+
+    // A finish chunk carrying malformed usage still reports the stop
+    // reason; only the usage degrades.
+    let (events, warnings) = run_chunks(&[
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"role": "assistant", "content": "hi"}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": "busy"}),
+    ]);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedField);
+    assert_eq!(warnings[0].location, "/usage");
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::EndTurn),
+                usage: None,
+                ..
+            }
+        )),
+        "{events:#?}"
+    );
+    let resp = accumulate(&events);
+    assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
+    assert!(resp.usage.is_none());
+}

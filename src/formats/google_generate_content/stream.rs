@@ -7,6 +7,9 @@
 //! the open block, or any whole part (`functionCall`, media, opaque) closes
 //! it. The stream terminates on the first candidate's `finishReason` or on a
 //! blocked-prompt chunk; a silent EOF without either is a truncated stream.
+//! An error envelope (`data: {"error": {...}}`) raises [`Error::Api`]; a
+//! chunk with no modeled signal at all surfaces as an `Unknown` event with
+//! a once-per-stream warning.
 
 use serde_json::{Map, Value, json};
 
@@ -55,6 +58,7 @@ pub struct GoogleStreamParser {
     open: Option<OpenBlock>,
     last_usage: Option<Usage>,
     multi_candidate_warned: bool,
+    empty_chunk_warned: bool,
 }
 
 impl GoogleStreamParser {
@@ -226,9 +230,42 @@ impl StreamParser for GoogleStreamParser {
             return Ok((vec![StreamEvent::Unknown], warnings));
         }
 
+        // A mid-stream error envelope (`data: {"error": {...}}`) replaces
+        // normal flow: raise the API error instead of consuming the chunk
+        // silently (first chunk or later; after the terminator the gate
+        // above downgrades it like any other unattributable data).
+        if chunk.extra.contains_key("error") {
+            return Err(super::stream_error(&event.data));
+        }
+
+        // A chunk with no modeled signal at all produces no events and
+        // would otherwise vanish: surface it (aligned with the non-stream
+        // "neither candidates nor a prompt block reason" check). `Unknown`
+        // is emitted per chunk so `include_raw` exposes each one; the
+        // warning fires once per stream.
+        if chunk.candidates.is_empty()
+            && chunk.prompt_feedback.is_none()
+            && chunk.usage_metadata.is_none()
+            && chunk.model_version.is_none()
+            && chunk.response_id.is_none()
+        {
+            if !self.empty_chunk_warned {
+                self.empty_chunk_warned = true;
+                warnings.push(ConversionWarning::from_format(
+                    WarningCode::MalformedField,
+                    ID,
+                    "/candidates",
+                    "chunk carries neither candidates nor a prompt block reason",
+                ));
+            }
+            return Ok((vec![StreamEvent::Unknown], warnings));
+        }
+
         let mut events = Vec::new();
-        if let Some(u) = &chunk.usage_metadata {
-            self.last_usage = Some(super::to_ir::usage_from_metadata(u));
+        if let Some(value) = &chunk.usage_metadata
+            && let Some(usage) = super::to_ir::usage_from_value(value, &mut warnings)
+        {
+            self.last_usage = Some(usage);
         }
         if !self.started {
             self.started = true;

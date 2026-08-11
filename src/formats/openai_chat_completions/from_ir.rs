@@ -137,7 +137,11 @@ pub(crate) fn build_body(
     }
     if let Some(tools) = &req.tools {
         let built = build_tools(tools, &mut warnings, &mut log);
-        if !built.is_empty() {
+        // An explicitly empty IR tool list replays as `"tools": []`; a
+        // non-empty list whose entries were all dropped (foreign
+        // `Tool::Opaque`) omits the key instead — the `OpaqueDropped`
+        // warnings already disclose the loss.
+        if !built.is_empty() || tools.is_empty() {
             body.insert("tools".to_owned(), Value::Array(built));
         }
     }
@@ -508,7 +512,38 @@ fn apply_breakpoint(
     }
 }
 
-/// Serializes one IR message into wire messages.
+/// `true` when a serialized wire message carries zero content: no member
+/// beyond `role`, or beyond a `content` left empty (an empty part array,
+/// defensively `null`) after every block was dropped.
+fn is_empty_wire_message(item: &Value) -> bool {
+    item.as_object().is_some_and(|obj| {
+        obj.iter().all(|(key, value)| match key.as_str() {
+            "role" => true,
+            "content" => value.is_null() || value.as_array().is_some_and(Vec::is_empty),
+            _ => false,
+        })
+    })
+}
+
+/// Warns that a non-empty IR message serialized to zero wire content and
+/// was omitted from `messages`. The location points at the container —
+/// the element does not exist on the wire.
+fn warn_empty_message_dropped(mi: usize, warnings: &mut Vec<ConversionWarning>) {
+    warnings.push(warn(
+        WarningCode::EmptyMessageDropped,
+        "/messages",
+        format!(
+            "IR message {mi} serialized to zero wire content (every block was dropped) \
+             and was omitted from `messages`"
+        ),
+    ));
+}
+
+/// Serializes one IR message into wire messages. A non-empty IR message
+/// whose blocks all dropped (foreign thinking without `thinking_as_text`,
+/// foreign opaques, unsupported images) serializes to zero wire content
+/// and is omitted with an `EmptyMessageDropped` warning; genuinely empty
+/// IR messages pass through unchanged.
 fn build_message(
     msg: &Message,
     mi: usize,
@@ -520,7 +555,9 @@ fn build_message(
 ) -> Result<()> {
     // A message holding exactly one Opaque node that is itself a wire
     // message (it has a `role`) re-emits verbatim — the parse-side home for
-    // legacy `function` messages and unmodeled dialect roles.
+    // legacy `function` messages and unmodeled dialect roles. Verbatim
+    // replays are never dropped as empty: the wire shape is the parsed
+    // original, not the residue of dropped blocks.
     if let [ContentBlock::Opaque { format, value }] = msg.content.as_slice()
         && format == FORMAT
         && value.get("role").is_some_and(Value::is_string)
@@ -552,16 +589,32 @@ fn build_message(
             let content = encode_role_content(msg, mi, &ptr, system_channel, warnings, log)?;
             let mut item = json!({"role": wire_role, "content": content});
             msg.extra.merge_into(FORMAT, &mut item, &ptr, log);
+            if !msg.content.is_empty() && is_empty_wire_message(&item) {
+                warn_empty_message_dropped(mi, warnings);
+                return Ok(());
+            }
             wire.push(item);
             pointers.push((ptr, ir_role));
         }
         Role::Assistant => {
             let ptr = format!("/messages/{}", wire.len());
             let item = build_assistant_message(msg, mi, ctx, &ptr, warnings, log)?;
+            if !msg.content.is_empty() && is_empty_wire_message(&item) {
+                warn_empty_message_dropped(mi, warnings);
+                return Ok(());
+            }
             wire.push(item);
             pointers.push((ptr, Role::Assistant));
         }
-        Role::Tool => build_tool_messages(msg, mi, wire, pointers, warnings, log)?,
+        Role::Tool => {
+            let before = wire.len();
+            build_tool_messages(msg, mi, wire, pointers, warnings, log)?;
+            // Every `ToolResult` emits its own wire message; producing
+            // none means every block was dropped (foreign opaques).
+            if !msg.content.is_empty() && wire.len() == before {
+                warn_empty_message_dropped(mi, warnings);
+            }
+        }
     }
     Ok(())
 }
@@ -995,15 +1048,7 @@ fn build_tool_messages(
                          dropped",
                     ));
                 }
-                if cache.is_some() {
-                    warnings.push(warn(
-                        WarningCode::CacheHintDropped,
-                        ptr.clone(),
-                        "cache breakpoints exist only on content parts; the hint on this tool \
-                         result was dropped",
-                    ));
-                }
-                let content = build_tool_content(content, &ptr, warnings, log);
+                let content = build_tool_content(content, cache.as_ref(), &ptr, warnings, log);
                 let mut item = json!({
                     "role": "tool",
                     "tool_call_id": call_id,
@@ -1049,12 +1094,18 @@ fn build_tool_messages(
 
 /// Encodes `ToolResult.content` as the tool message `content`: the empty
 /// list becomes `""`, a single plain non-empty text block uses the string
-/// shorthand, anything else becomes a text-part array (§ 7.2). Chat
+/// shorthand, anything else becomes a text-part array (§ 7.2). A
+/// block-level `ToolResult` cache hint becomes a
+/// `prompt_cache_breakpoint` on the last emitted part — every input part
+/// accepts one upstream — forcing the part-array form; the hint drops
+/// with a warning only when no emitted part can carry it (empty or fully
+/// dropped content, or a trailing non-object opaque part). Chat
 /// Completions tool messages are text-only: images drop with a semantic
 /// warning (§ 4.5); nested cache hints drop with a cosmetic warning
 /// (§ 4.8, v1 rule).
 fn build_tool_content(
     content: &[ToolOutputBlock],
+    cache: Option<&CacheHint>,
     msg_ptr: &str,
     warnings: &mut Vec<ConversionWarning>,
     log: &mut MergeLog,
@@ -1066,27 +1117,60 @@ fn build_tool_content(
             "cache hints on nested tool-output blocks are dropped on every target in v1",
         ));
     };
+    let hint_dropped = |warnings: &mut Vec<ConversionWarning>| {
+        warnings.push(warn(
+            WarningCode::CacheHintDropped,
+            msg_ptr.to_owned(),
+            "the tool result serialized without a content part to carry its cache \
+             breakpoint; the hint was dropped",
+        ));
+    };
+    // The wire slot of the block-level hint: the last block that emits a
+    // content part (images and foreign opaques drop).
+    let hint_slot = cache.and_then(|_| {
+        content.iter().rposition(|block| match block {
+            ToolOutputBlock::Text { .. } => true,
+            ToolOutputBlock::Opaque { format, .. } => format == FORMAT,
+            ToolOutputBlock::Image { .. } => false,
+        })
+    });
+    if cache.is_some() && hint_slot.is_none() {
+        hint_dropped(warnings);
+    }
     if content.is_empty() {
         return Value::from("");
     }
-    if let [ToolOutputBlock::Text { text, cache, extra }] = content
+    if let [
+        ToolOutputBlock::Text {
+            text,
+            cache: nested,
+            extra,
+        },
+    ] = content
+        && cache.is_none()
         && !text.is_empty()
         && extra.get(FORMAT).is_none_or(Map::is_empty)
     {
-        if cache.is_some() {
+        if nested.is_some() {
             nested_hint(warnings, format!("{msg_ptr}/content"));
         }
         return Value::from(text.clone());
     }
     let mut parts: Vec<Value> = Vec::new();
-    for block in content {
+    for (bi, block) in content.iter().enumerate() {
         let part_ptr = format!("{msg_ptr}/content/{}", parts.len());
+        let breakpoint = if hint_slot == Some(bi) { cache } else { None };
         match block {
-            ToolOutputBlock::Text { text, cache, extra } => {
-                if cache.is_some() {
+            ToolOutputBlock::Text {
+                text,
+                cache: nested,
+                extra,
+            } => {
+                if nested.is_some() {
                     nested_hint(warnings, part_ptr.clone());
                 }
                 let mut part = json!({"type": "text", "text": text});
+                apply_breakpoint(&mut part, breakpoint, &part_ptr, warnings);
                 extra.merge_into(FORMAT, &mut part, &part_ptr, log);
                 parts.push(part);
             }
@@ -1099,7 +1183,15 @@ fn build_tool_content(
             }
             ToolOutputBlock::Opaque { format, value } => {
                 if format == FORMAT {
-                    parts.push(value.clone());
+                    let mut part = value.clone();
+                    if breakpoint.is_some() {
+                        if part.is_object() {
+                            apply_breakpoint(&mut part, breakpoint, &part_ptr, warnings);
+                        } else {
+                            hint_dropped(warnings);
+                        }
+                    }
+                    parts.push(part);
                 } else {
                     warnings.push(warn(
                         WarningCode::OpaqueDropped,

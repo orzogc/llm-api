@@ -240,7 +240,10 @@ pub(crate) fn response_to_ir_with(
     response.id = wire.id;
     response.model = wire.model;
     response.stop_reason = stop_reason;
-    response.usage = wire.usage.as_ref().map(usage_to_ir);
+    response.usage = wire
+        .usage
+        .as_ref()
+        .and_then(|value| lenient_usage(value, &mut warnings));
     response.status = meta.status;
     response.headers = meta.headers.clone();
     response.raw = Some(raw);
@@ -788,15 +791,17 @@ fn tool_message_to_ir(
         }
     };
     let mut content: Vec<ToolOutputBlock> = Vec::new();
+    let mut cache: Option<CacheHint> = None;
     match &wire.content {
         None | Some(Value::Null) => {}
         Some(Value::String(s)) if s.is_empty() => {}
         Some(Value::String(s)) => content.push(ToolOutputBlock::text(s.clone())),
         Some(Value::Array(parts)) => {
+            let last = parts.len().saturating_sub(1);
             for (pi, part) in parts.iter().enumerate() {
                 content.push(tool_output_part_to_block(
                     part,
-                    &format!("{ptr}/content/{pi}"),
+                    (pi == last).then_some(&mut cache),
                 ));
             }
         }
@@ -825,22 +830,40 @@ fn tool_message_to_ir(
         name,
         content,
         is_error: None,
-        cache: None,
+        cache,
         extra: Extra::from_unknown(FORMAT, ns),
     };
     Message::tool(vec![block])
 }
 
-/// Parses one nested tool-message content part. Text parts map; nested
-/// cache breakpoints stay verbatim in the part extra (the v1 build side
-/// drops nested hints, § 4.8) so round-trips are warning-free.
-fn tool_output_part_to_block(part: &Value, _ptr: &str) -> ToolOutputBlock {
+/// Parses one nested tool-message content part. Text parts map; a
+/// breakpoint on the last part hoists into the `ToolResult` block-level
+/// cache hint (`hoist` is `Some` there) — the mirror image of the build
+/// side, which re-attaches the block hint to the last emitted part
+/// (§ 4.8). Breakpoints on earlier text parts stay verbatim in the part
+/// extra (the build side drops nested block hints, v1 rule) and non-text
+/// parts stay verbatim wholesale, so round-trips are warning-free.
+fn tool_output_part_to_block(
+    part: &Value,
+    hoist: Option<&mut Option<CacheHint>>,
+) -> ToolOutputBlock {
     if part.get("type").and_then(Value::as_str) == Some("text")
         && let Ok(w) = serde_json::from_value::<types::TextPart>(part.clone())
     {
         let mut ns = w.extra;
-        if let Some(pcb) = w.prompt_cache_breakpoint {
-            ns.insert("prompt_cache_breakpoint".to_owned(), pcb);
+        match hoist {
+            Some(slot) => {
+                let (cache, raw) = parse_breakpoint(w.prompt_cache_breakpoint);
+                *slot = cache;
+                if let Some(raw) = raw {
+                    ns.insert("prompt_cache_breakpoint".to_owned(), raw);
+                }
+            }
+            None => {
+                if let Some(pcb) = w.prompt_cache_breakpoint {
+                    ns.insert("prompt_cache_breakpoint".to_owned(), pcb);
+                }
+            }
         }
         return ToolOutputBlock::Text {
             text: w.text,
@@ -975,14 +998,24 @@ pub(crate) fn usage_to_ir(u: &types::Usage) -> Usage {
     }
 }
 
-/// Parses a usage object out of a raw JSON value, ignoring non-objects.
-pub(crate) fn usage_from_value(value: &Value) -> Option<Usage> {
-    if !value.is_object() {
-        return None;
+/// Parses a present, non-`null` wire `usage` value leniently — shared by
+/// the response and stream paths: a malformed value (float token counts
+/// from proxies, wrong shapes) degrades to `None` with a `MalformedField`
+/// warning. A billed 2xx response must never fail, and usage must never
+/// silently vanish, over a malformed `usage` object.
+pub(crate) fn lenient_usage(value: &Value, warnings: &mut Vec<ConversionWarning>) -> Option<Usage> {
+    let usage = value
+        .as_object()
+        .and_then(|_| serde_json::from_value::<types::Usage>(value.clone()).ok())
+        .map(|u| usage_to_ir(&u));
+    if usage.is_none() {
+        warnings.push(warn(
+            WarningCode::MalformedField,
+            "/usage",
+            "malformed `usage` was dropped; the response parses without token usage",
+        ));
     }
-    serde_json::from_value::<types::Usage>(value.clone())
-        .ok()
-        .map(|u| usage_to_ir(&u))
+    usage
 }
 
 /// Removes and returns a string value from a map, leaving non-strings in

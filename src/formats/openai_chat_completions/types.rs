@@ -284,9 +284,12 @@ pub struct Response {
     /// Choices; only the first is read (the rest remain in `raw`).
     #[serde(default)]
     pub choices: Vec<Value>,
-    /// Token usage.
+    /// Token usage, kept raw and parsed in a second step: a malformed
+    /// object (e.g. float token counts from proxies) must degrade to
+    /// `usage: None` with a warning instead of failing the whole billed
+    /// response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<Usage>,
+    pub usage: Option<Value>,
     /// Unknown fields (`created`, `object`, `system_fingerprint`,
     /// `service_tier`, …); terminal envelope data, available via `raw`.
     #[serde(flatten)]

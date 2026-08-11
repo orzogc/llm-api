@@ -535,8 +535,25 @@ pub(crate) fn parse_request_body(body: &[u8]) -> Result<(Request, Vec<Conversion
     }
 
     let mut group_counter: u64 = 0;
-    for (i, wm) in wire.messages.into_iter().enumerate() {
+    for (i, entry) in wire.messages.into_iter().enumerate() {
         let msg_loc = format!("/messages/{i}");
+        // Per-message typed-or-opaque (aligned with the CC parser): one
+        // malformed entry — missing role/content, content of a wrong
+        // type — degrades to a lone verbatim Opaque block instead of
+        // failing the whole request.
+        let wm: MessageParam = match serde_json::from_value(entry.clone()) {
+            Ok(wm) => wm,
+            Err(e) => {
+                warnings.push(pwarn(
+                    WarningCode::MalformedField,
+                    msg_loc,
+                    format!("message failed to parse and was kept verbatim: {e}"),
+                ));
+                req.messages
+                    .push(Message::user(vec![ContentBlock::opaque(FMT, entry)]));
+                continue;
+            }
+        };
         req.messages.extend(parse_wire_message(
             wm,
             &msg_loc,
@@ -744,10 +761,23 @@ pub(crate) fn parse_response_body(body: &[u8], meta: &ResponseMeta) -> Result<Re
     let message = Message::assistant(content);
     let stop_reason = wire.stop_reason.as_deref().map(StopReason::from_str_lossy);
     let stop_reason = normalize_stop_reason(&message, stop_reason);
-    let usage = wire.usage.as_ref().map(|u| {
-        let uraw = serde_json::to_value(u).unwrap_or(Value::Null);
-        unify_usage(u, uraw)
-    });
+    // Two-stage usage parse: the response is already billed, so a usage
+    // object that fails the wire shape degrades to no usage plus a warning —
+    // never a failed response, never silent zeros.
+    let usage = match &wire.usage {
+        None | Some(Value::Null) => None,
+        Some(uraw) => match serde_json::from_value::<UsageWire>(uraw.clone()) {
+            Ok(u) => Some(unify_usage(&u, uraw.clone())),
+            Err(e) => {
+                warnings.push(pwarn(
+                    WarningCode::MalformedField,
+                    "/usage",
+                    format!("usage failed to parse and was dropped: {e}"),
+                ));
+                None
+            }
+        },
+    };
     let mut response = Response::new(message);
     response.id = wire.id;
     response.model = wire.model;

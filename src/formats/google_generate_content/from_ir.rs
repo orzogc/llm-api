@@ -156,7 +156,10 @@ pub(crate) fn build_body(req: &Request, options: &ConvertOptions) -> Result<Buil
     });
 
     // ---- contents: group adjacent user-side / model-side messages into
-    // alternating wire turns (Google requires alternation, § 7.2).
+    // alternating wire turns (Google requires alternation, § 7.2). Turns are
+    // created lazily: a non-empty IR message whose blocks all drop is
+    // omitted (no empty `parts` turn reaches the wire) and its same-side
+    // neighbours merge across the gap.
     let mut contents: Vec<Value> = Vec::new();
     let mut sides: Vec<Side> = Vec::new();
     let mut pointers: Vec<(String, Role)> = Vec::new();
@@ -171,7 +174,64 @@ pub(crate) fn build_body(req: &Request, options: &ConvertOptions) -> Result<Buil
             Role::User | Role::Tool => (Side::User, false),
             Role::System | Role::Developer => (Side::User, true),
         };
-        if sides.last() != Some(&side) {
+        // Prospective turn index and base part index; block-level warning
+        // locations use them even when the message ends up omitted (the
+        // established would-be-location reading for dropped content).
+        let new_turn = sides.last() != Some(&side);
+        let ci = if new_turn {
+            contents.len()
+        } else {
+            contents.len() - 1
+        };
+        let part_base = if new_turn {
+            0
+        } else {
+            contents[ci]["parts"]
+                .as_array()
+                .expect("content.parts is an array")
+                .len()
+        };
+        let mut parts: Vec<Value> = Vec::new();
+        serialize_message_blocks(
+            msg,
+            mi,
+            ci,
+            part_base,
+            &mut parts,
+            options,
+            &mut call_names,
+            &mut warnings,
+            &mut log,
+        )?;
+        if parts.is_empty() && !msg.content.is_empty() {
+            // Every block was dropped (each with its own warning): omit the
+            // message rather than sending an empty-`parts` turn the wire
+            // never carries. An IR message with zero blocks keeps its
+            // empty-turn form below (faithful replay). No RoleDowngraded is
+            // reported for an omitted message.
+            warn(
+                &mut warnings,
+                WarningCode::EmptyMessageDropped,
+                "/contents",
+                format!(
+                    "IR message {mi} serialized to no parts (every block was dropped) \
+                     and was omitted from `contents`"
+                ),
+            );
+            if msg.extra.get(ID).is_some_and(|ns| !ns.is_empty()) {
+                warn(
+                    &mut warnings,
+                    WarningCode::ExtraDropped,
+                    "/contents",
+                    format!(
+                        "message-level `extra` of omitted IR message {mi} has no wire \
+                         location and was dropped"
+                    ),
+                );
+            }
+            continue;
+        }
+        if new_turn {
             let role = match side {
                 Side::User => "user",
                 Side::Model => "model",
@@ -179,14 +239,13 @@ pub(crate) fn build_body(req: &Request, options: &ConvertOptions) -> Result<Buil
             contents.push(json!({"role": role, "parts": []}));
             sides.push(side);
             pointers.push((
-                format!("/contents/{}", contents.len() - 1),
+                format!("/contents/{ci}"),
                 match side {
                     Side::User => Role::User,
                     Side::Model => Role::Assistant,
                 },
             ));
         }
-        let ci = contents.len() - 1;
         msg_to_content.insert(mi, ci);
         if downgraded {
             warn(
@@ -199,16 +258,10 @@ pub(crate) fn build_body(req: &Request, options: &ConvertOptions) -> Result<Buil
                 ),
             );
         }
-        serialize_message_blocks(
-            msg,
-            mi,
-            ci,
-            &mut contents[ci],
-            options,
-            &mut call_names,
-            &mut warnings,
-            &mut log,
-        )?;
+        contents[ci]["parts"]
+            .as_array_mut()
+            .expect("content.parts is an array")
+            .extend(parts);
         let base = format!("/contents/{ci}");
         msg.extra.merge_into(ID, &mut contents[ci], &base, &mut log);
     }
@@ -217,7 +270,12 @@ pub(crate) fn build_body(req: &Request, options: &ConvertOptions) -> Result<Buil
     // ---- tools + toolConfig.
     if let Some(tools) = &req.tools {
         let entries = serialize_tools(tools, &mut warnings, &mut log)?;
-        body.insert("tools".to_owned(), Value::Array(entries));
+        // An explicitly empty IR tool list replays as `[]`; a non-empty list
+        // whose entries were all dropped (foreign opaque tools, disclosed by
+        // their OpaqueDropped warnings) omits the key instead.
+        if !entries.is_empty() || tools.is_empty() {
+            body.insert("tools".to_owned(), Value::Array(entries));
+        }
     }
     if let Some(choice) = &req.tool_choice {
         let mut fcc = Map::new();
@@ -385,13 +443,17 @@ fn block_allowed(role: Role, block: &ContentBlock) -> bool {
     )
 }
 
-/// Serializes the blocks of one IR message into the wire content's `parts`.
+/// Serializes the blocks of one IR message, appending the produced wire
+/// parts to `parts`. The caller decides where the parts land: `content_index`
+/// and `part_base` (parts already in the destination turn) only seed the
+/// warning/merge locations.
 #[expect(clippy::too_many_arguments, reason = "internal assembly helper")]
 fn serialize_message_blocks(
     msg: &Message,
     msg_index: usize,
     content_index: usize,
-    content: &mut Value,
+    part_base: usize,
+    parts: &mut Vec<Value>,
     options: &ConvertOptions,
     call_names: &mut HashMap<String, String>,
     warnings: &mut Vec<ConversionWarning>,
@@ -406,10 +468,7 @@ fn serialize_message_blocks(
             }
             .into());
         }
-        let part_index = content["parts"]
-            .as_array()
-            .expect("content.parts is an array")
-            .len();
+        let part_index = part_base + parts.len();
         let ptr = format!("/contents/{content_index}/parts/{part_index}");
         if block.cache().is_some() {
             warn(
@@ -423,12 +482,12 @@ fn serialize_message_blocks(
             ContentBlock::Text { text, extra, .. } => {
                 let mut part = json!({"text": text});
                 extra.merge_into(ID, &mut part, &ptr, log);
-                content["parts"].as_array_mut().expect("parts").push(part);
+                parts.push(part);
             }
             ContentBlock::Image { source, extra, .. } => {
                 let mut part = serialize_image(source, &ptr, warnings);
                 extra.merge_into(ID, &mut part, &ptr, log);
-                content["parts"].as_array_mut().expect("parts").push(part);
+                parts.push(part);
             }
             ContentBlock::ToolCall {
                 id,
@@ -465,7 +524,7 @@ fn serialize_message_blocks(
                 fc.insert("args".to_owned(), args);
                 let mut part = json!({"functionCall": Value::Object(fc)});
                 extra.merge_into(ID, &mut part, &ptr, log);
-                content["parts"].as_array_mut().expect("parts").push(part);
+                parts.push(part);
             }
             ContentBlock::Thinking {
                 text,
@@ -477,7 +536,7 @@ fn serialize_message_blocks(
                     serialize_thinking(text, signature, extra, options, &ptr, warnings)
                 {
                     extra.merge_into(ID, &mut part, &ptr, log);
-                    content["parts"].as_array_mut().expect("parts").push(part);
+                    parts.push(part);
                 }
             }
             ContentBlock::ToolResult {
@@ -499,14 +558,11 @@ fn serialize_message_blocks(
                     log,
                 )?;
                 extra.merge_into(ID, &mut part, &ptr, log);
-                content["parts"].as_array_mut().expect("parts").push(part);
+                parts.push(part);
             }
             ContentBlock::Opaque { format, value, .. } => {
                 if format == ID {
-                    content["parts"]
-                        .as_array_mut()
-                        .expect("parts")
-                        .push(value.clone());
+                    parts.push(value.clone());
                 } else {
                     warn(
                         warnings,
@@ -793,6 +849,12 @@ fn serialize_tools(
                 }
                 let mut decl = Map::new();
                 decl.insert("name".to_owned(), json!(ft.name));
+                // `description` is documented as required upstream but is
+                // deliberately allowed to be absent here: fabricating one
+                // would break the never-invent principle, the live service
+                // accepts declarations without it, and tools converted from
+                // other providers may legitimately lack a description —
+                // failing the whole request over it would be worse.
                 if let Some(description) = &ft.description {
                     decl.insert("description".to_owned(), json!(description));
                 }
@@ -1116,10 +1178,21 @@ fn apply_missing_thinking(
         }
         if let Some(text) = &options.fill_missing_thinking {
             msg.content.insert(0, ContentBlock::thinking(text.clone()));
+            // The placeholder is plaintext-only thinking; without
+            // `thinking_as_text` this signature-validated format drops it
+            // again on serialization, so say so instead of implying a fix.
+            let text = if options.thinking_as_text {
+                "inserted a placeholder thinking block before the tool calls".to_owned()
+            } else {
+                "inserted a placeholder thinking block before the tool calls; this format \
+                 drops the placeholder during serialization (no unsigned thinking channel) \
+                 — set `thinking_as_text` to carry it as text"
+                    .to_owned()
+            };
             pending.push(PendingWarning {
                 code: WarningCode::MissingThinkingFilled,
                 message_index: Some(mi),
-                text: "inserted a placeholder thinking block before the tool calls".to_owned(),
+                text,
             });
         } else {
             pending.push(PendingWarning {

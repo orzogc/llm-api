@@ -213,22 +213,6 @@ pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) ->
         plans = merged;
     }
 
-    // Map post-transform IR message index → wire message index.
-    let mut ir_to_wire: Vec<Option<usize>> = vec![None; messages.len()];
-    for (w, plan) in plans.iter().enumerate() {
-        for &p in &plan.parts {
-            ir_to_wire[p] = Some(w);
-        }
-    }
-    for p in pending {
-        let location = match p.msg.and_then(|i| ir_to_wire.get(i).copied().flatten()) {
-            Some(w) if p.at_first_block => format!("/messages/{w}/content/0"),
-            Some(w) => format!("/messages/{w}"),
-            None => "/messages".to_owned(),
-        };
-        warnings.push(warn(p.code, location, p.text));
-    }
-
     // Required max_tokens.
     let Some(max_tokens) = req.max_output_tokens.or(opts.default_max_tokens) else {
         return Err(ConversionError::missing(
@@ -247,10 +231,13 @@ pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) ->
         body.insert("system".to_owned(), system);
     }
 
-    // Messages.
+    // Messages. Wire indices are assigned at push time: a wire message may
+    // be omitted below, shifting every later index.
+    let mut ir_to_wire: Vec<Option<usize>> = vec![None; messages.len()];
     let mut message_pointers: Vec<(String, Role)> = Vec::new();
     let mut wire_messages: Vec<Value> = Vec::new();
-    for (w, plan) in plans.iter().enumerate() {
+    for plan in &plans {
+        let w = wire_messages.len();
         let msg_loc = format!("/messages/{w}");
         if plan.verbatim {
             let m = &messages[plan.parts[0]];
@@ -258,22 +245,60 @@ pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) ->
                 verbatim_wire_message(m).expect("verbatim plan holds a lone opaque wire message");
             let mut wire_msg = value.clone();
             m.extra.merge_into(FMT, &mut wire_msg, &msg_loc, &mut log);
+            ir_to_wire[plan.parts[0]] = Some(w);
             wire_messages.push(wire_msg);
             message_pointers.push((msg_loc, m.role));
             continue;
         }
         let mut content: Vec<Value> = Vec::new();
+        // Block warnings are buffered per plan: when the whole wire message
+        // is omitted below, their positional locations would point at the
+        // next message, so they are re-addressed to the container.
+        let mut plan_warnings: Vec<ConversionWarning> = Vec::new();
         for &p in &plan.parts {
             let m = &messages[p];
-            for block in &m.content {
+            for (bi, block) in m.content.iter().enumerate() {
                 let block_loc = format!("{msg_loc}/content/{}", content.len());
-                if let Some(v) =
-                    convert_block(m.role, block, &block_loc, convert, &mut warnings, &mut log)?
-                {
+                let ir_loc = format!("/messages/{p}/content/{bi}");
+                if let Some(v) = convert_block(
+                    m.role,
+                    block,
+                    &block_loc,
+                    &ir_loc,
+                    convert,
+                    &mut plan_warnings,
+                    &mut log,
+                )? {
                     content.push(v);
                 }
             }
         }
+        // Non-empty IR content that serialized to zero wire content is
+        // omitted (disclosed) rather than sent as an empty `content: []`
+        // message; truly empty IR messages still serialize as `content: []`.
+        if content.is_empty() && plan.parts.iter().any(|&p| !messages[p].content.is_empty()) {
+            for pw in &mut plan_warnings {
+                pw.location = "/messages".to_owned();
+            }
+            warnings.append(&mut plan_warnings);
+            let dropped: Vec<String> = plan
+                .parts
+                .iter()
+                .filter(|&&p| !messages[p].content.is_empty())
+                .map(usize::to_string)
+                .collect();
+            warnings.push(warn(
+                WarningCode::EmptyMessageDropped,
+                "/messages",
+                format!(
+                    "IR message(s) {} serialized to zero wire content (every block \
+                     was dropped); the empty wire message was omitted",
+                    dropped.join(", ")
+                ),
+            ));
+            continue;
+        }
+        warnings.append(&mut plan_warnings);
         let mut wire_msg = json!({
             "role": plan.role.as_str(),
             "content": Value::Array(content),
@@ -282,11 +307,24 @@ pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) ->
             messages[p]
                 .extra
                 .merge_into(FMT, &mut wire_msg, &msg_loc, &mut log);
+            ir_to_wire[p] = Some(w);
         }
         wire_messages.push(wire_msg);
         message_pointers.push((msg_loc, plan.role.ir_role()));
     }
     body.insert("messages".to_owned(), Value::Array(wire_messages));
+
+    // Deferred warnings resolve against final wire positions; a message
+    // omitted above (or removed by a transform) falls back to the
+    // `/messages` container.
+    for p in pending {
+        let location = match p.msg.and_then(|i| ir_to_wire.get(i).copied().flatten()) {
+            Some(w) if p.at_first_block => format!("/messages/{w}/content/0"),
+            Some(w) => format!("/messages/{w}"),
+            None => "/messages".to_owned(),
+        };
+        warnings.push(warn(p.code, location, p.text));
+    }
 
     // Metadata: only `user_id` maps; other keys are dropped with a warning.
     if let Some(metadata) = &req.metadata
@@ -750,7 +788,7 @@ fn build_system(
     let mut msg_extras: Vec<(usize, &Extra)> = Vec::new(); // (first entry index, extra)
 
     if let Some(system) = &req.system {
-        for block in system {
+        for (bi, block) in system.iter().enumerate() {
             match block {
                 ContentBlock::Text {
                     text, cache, extra, ..
@@ -758,11 +796,12 @@ fn build_system(
                     entries.push(text_entry(text, cache.as_ref(), extra));
                 }
                 other => {
-                    // `Request.system` allows only Text blocks (contract pin).
+                    // `Request.system` allows only Text blocks (contract
+                    // pin); the location is the block's IR coordinate.
                     return Err(ConversionError::InvalidBlockForRole {
                         role: Role::System,
                         block: other.kind_name(),
-                        location: format!("/system/{}", entries.len()),
+                        location: format!("/system/{bi}"),
                     }
                     .into());
                 }
@@ -772,7 +811,7 @@ fn build_system(
     for &i in hoisted {
         let m = &messages[i];
         let first_entry = entries.len();
-        for block in &m.content {
+        for (bi, block) in m.content.iter().enumerate() {
             let loc = format!("/system/{}", entries.len());
             match block {
                 ContentBlock::Text {
@@ -796,10 +835,11 @@ fn build_system(
                     }
                 }
                 other => {
+                    // A hoisted message's block reports its IR coordinate.
                     return Err(ConversionError::InvalidBlockForRole {
                         role: Role::System,
                         block: other.kind_name(),
-                        location: loc,
+                        location: format!("/messages/{i}/content/{bi}"),
                     }
                     .into());
                 }
@@ -838,11 +878,14 @@ fn build_system(
 
 /// Converts one IR content block for its role (§ 7.4 validity plus the
 /// per-block mapping). Returns `None` when the block is dropped with a
-/// warning.
+/// warning. `loc` points into the would-be wire output (warnings, merges,
+/// `MissingRequired`); `ir_loc` is the block's IR coordinate, which is what
+/// `InvalidBlockForRole` reports.
 fn convert_block(
     role: Role,
     block: &ContentBlock,
     loc: &str,
+    ir_loc: &str,
     convert: &ConvertOptions,
     warnings: &mut Vec<ConversionWarning>,
     log: &mut MergeLog,
@@ -851,7 +894,7 @@ fn convert_block(
         ConversionError::InvalidBlockForRole {
             role,
             block: block.kind_name(),
-            location: loc.to_owned(),
+            location: ir_loc.to_owned(),
         }
         .into()
     };

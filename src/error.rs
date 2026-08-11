@@ -561,7 +561,10 @@ mod tests {
 
     fn retry_after_of(value: &'static str) -> Option<Duration> {
         let mut h = http::HeaderMap::new();
-        h.insert(http::header::RETRY_AFTER, http::HeaderValue::from_static(value));
+        h.insert(
+            http::header::RETRY_AFTER,
+            http::HeaderValue::from_static(value),
+        );
         retry_after_from_headers(&h)
     }
 
@@ -590,7 +593,10 @@ mod tests {
     #[test]
     fn truncated_stream_display_and_source() {
         let e = Error::truncated_stream("no message_stop before EOF", Bytes::new());
-        assert_eq!(e.to_string(), "truncated stream: no message_stop before EOF");
+        assert_eq!(
+            e.to_string(),
+            "truncated stream: no message_stop before EOF"
+        );
         assert!(std::error::Error::source(&e).is_none());
     }
 
@@ -598,9 +604,8 @@ mod tests {
     fn is_retryable_mapping() {
         use crate::http::{HttpError, HttpErrorKind};
 
-        let api = |kind: ApiErrorKind| {
-            Error::api(500, kind, "m", Bytes::new(), http::HeaderMap::new())
-        };
+        let api =
+            |kind: ApiErrorKind| Error::api(500, kind, "m", Bytes::new(), http::HeaderMap::new());
         assert!(api(ApiErrorKind::RateLimit).is_retryable());
         assert!(api(ApiErrorKind::Overloaded).is_retryable());
         assert!(api(ApiErrorKind::ServerError).is_retryable());

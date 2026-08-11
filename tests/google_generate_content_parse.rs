@@ -934,6 +934,35 @@ fn usage_boundary_values_clamp_and_saturate() {
 }
 
 #[test]
+fn malformed_usage_metadata_degrades_instead_of_failing_the_response() {
+    let candidate = json!({
+        "content": {"parts": [{"text": "billed output"}], "role": "model"},
+        "finishReason": "STOP",
+    });
+    // A float count cannot be decoded; the already-billed response must
+    // still parse — usage degrades to None with a warning, never to
+    // silently zeroed counts.
+    for usage_metadata in [json!({"promptTokenCount": 3.5}), json!("not an object")] {
+        let body = json!({
+            "candidates": [candidate.clone()],
+            "usageMetadata": usage_metadata,
+        });
+        let resp = response_to_ir(&serde_json::to_vec(&body).unwrap(), &meta()).unwrap();
+        assert_eq!(resp.text(), "billed output");
+        assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
+        assert!(resp.usage.is_none());
+        let w = resp
+            .warnings
+            .iter()
+            .find(|w| w.code == WarningCode::MalformedField)
+            .unwrap_or_else(|| panic!("expected warning, got {:?}", resp.warnings));
+        assert_eq!(w.location, "/usageMetadata");
+        // The verbatim value stays reachable through the raw body.
+        assert!(resp.raw.as_ref().unwrap().get("usageMetadata").is_some());
+    }
+}
+
+#[test]
 fn thinking_response_parses_thought_parts() {
     let body = include_str!("fixtures/google_generate_content/response_thinking.json");
     let resp = response_to_ir(body.as_bytes(), &meta()).unwrap();

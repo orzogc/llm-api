@@ -674,11 +674,9 @@ fn tool_results_encode_output_variants() {
 }
 
 #[test]
-fn tool_result_is_error_and_hints_warn() {
+fn tool_result_is_error_and_nested_hints_warn() {
     let tool = Message::tool(vec![
-        ContentBlock::tool_result_text(Some("c1".into()), "failed")
-            .with_is_error(true)
-            .with_cache(CacheHint::new()),
+        ContentBlock::tool_result_text(Some("c1".into()), "failed").with_is_error(true),
         ContentBlock::tool_result(
             Some("c2".into()),
             // The IR type has no nested-hint builder (nested hints are
@@ -699,19 +697,89 @@ fn tool_result_is_error_and_hints_warn() {
         .find(|w| w.code == WarningCode::IsErrorDropped)
         .unwrap();
     assert_eq!(w.severity, WarningSeverity::Semantic);
-    // Block-level hint and nested tool-output hint both drop cosmetically.
+    // The nested tool-output hint drops cosmetically.
     let hints: Vec<_> = built
         .warnings
         .iter()
         .filter(|w| w.code == WarningCode::CacheHintDropped)
         .collect();
-    assert_eq!(hints.len(), 2);
+    assert_eq!(hints.len(), 1, "{:?}", built.warnings);
+    assert_eq!(hints[0].location, "/input/1/output");
     // is_error: Some(false) is equivalent to absent and drops silently.
     let ok = Message::tool(vec![
         ContentBlock::tool_result_text(Some("c1".into()), "fine").with_is_error(false),
     ]);
     let built = build(&Request::with_messages(vec![ok]));
     assert!(built.warnings.is_empty());
+}
+
+#[test]
+fn tool_result_hint_maps_to_breakpoint_on_last_output_part() {
+    // A block-level hint on a `ToolResult` becomes a
+    // `prompt_cache_breakpoint` on the last output part (output parts are
+    // input parts, which all accept breakpoints upstream). The
+    // single-text string shorthand yields to the array form to carry it.
+    let tool = Message::tool(vec![
+        ContentBlock::tool_result_text(Some("c1".into()), "sunny").with_cache(CacheHint::new()),
+        ContentBlock::tool_result(
+            Some("c2".into()),
+            vec![ToolOutputBlock::text("a"), ToolOutputBlock::text("b")],
+        )
+        .with_cache(CacheHint::new()),
+    ]);
+    let built = build(&Request::with_messages(vec![tool]));
+    assert!(built.warnings.is_empty(), "{:?}", built.warnings);
+    let body = body_of(&built);
+    assert_eq!(
+        body["input"],
+        json!([
+            {"type": "function_call_output", "call_id": "c1", "output": [
+                {"type": "input_text", "text": "sunny",
+                 "prompt_cache_breakpoint": {"mode": "explicit"}},
+            ]},
+            {"type": "function_call_output", "call_id": "c2", "output": [
+                {"type": "input_text", "text": "a"},
+                {"type": "input_text", "text": "b",
+                 "prompt_cache_breakpoint": {"mode": "explicit"}},
+            ]},
+        ])
+    );
+
+    // Round trip: the breakpoint survives verbatim (as part extra).
+    let (req, parse_warnings) = request_to_ir(&built.body).unwrap();
+    assert!(parse_warnings.is_empty(), "{parse_warnings:?}");
+    let (body2, ws) =
+        request_from_ir(&req, None, CallMode::Unary, &ConvertOptions::default()).unwrap();
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(body2["input"], body["input"]);
+}
+
+#[test]
+fn tool_result_hint_ttl_warns_and_empty_output_drops_hint() {
+    // The breakpoint maps but a hint TTL has no OpenAI equivalent.
+    let ttl = Message::tool(vec![
+        ContentBlock::tool_result_text(Some("c1".into()), "r")
+            .with_cache(CacheHint::with_ttl("5m")),
+    ]);
+    let built = build(&Request::with_messages(vec![ttl]));
+    let w = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::CacheTtlDropped)
+        .expect("hint TTL warns");
+    assert_eq!(w.location, "/input/0/output/0/prompt_cache_breakpoint");
+    assert_eq!(
+        body_of(&built)["input"][0]["output"][0]["prompt_cache_breakpoint"],
+        json!({"mode": "explicit"})
+    );
+
+    // With no output part to carry the breakpoint the hint drops.
+    let empty = Message::tool(vec![
+        ContentBlock::tool_result(Some("c2".into()), vec![]).with_cache(CacheHint::new()),
+    ]);
+    let built = build(&Request::with_messages(vec![empty]));
+    assert!(has_code(&built.warnings, &WarningCode::CacheHintDropped));
+    assert_eq!(body_of(&built)["input"][0]["output"], json!(""));
 }
 
 #[test]
@@ -919,6 +987,52 @@ fn parallel_tool_calls_requires_tools() {
 }
 
 #[test]
+fn all_foreign_tools_dropped_suppresses_tools_and_parallel() {
+    // Every tool is a foreign opaque: the wire has no `tools` key, so
+    // `parallel_tool_calls` is not emitted either.
+    let mut req = Request::with_messages(vec![Message::user_text("hi")]);
+    req.tools = Some(vec![Tool::opaque(
+        "anthropic_messages",
+        json!({"type": "computer_20250124"}),
+    )]);
+    req.parallel_tool_calls = Some(true);
+    let built = build(&req);
+    let body = body_of(&built);
+    assert!(body.get("tools").is_none());
+    assert!(body.get("parallel_tool_calls").is_none());
+    assert!(has_code(&built.warnings, &WarningCode::OpaqueDropped));
+    assert!(has_code(
+        &built.warnings,
+        &WarningCode::ParallelToolCallsIgnored
+    ));
+}
+
+#[test]
+fn explicitly_empty_tools_list_replays_verbatim() {
+    // IR `Some(vec![])` is user data and replays as `"tools": []` — it
+    // still counts as "no tools" for `parallel_tool_calls`.
+    let mut req = Request::with_messages(vec![Message::user_text("hi")]);
+    req.tools = Some(vec![]);
+    req.parallel_tool_calls = Some(true);
+    let built = build(&req);
+    let body = body_of(&built);
+    assert_eq!(body["tools"], json!([]));
+    assert!(body.get("parallel_tool_calls").is_none());
+    assert!(has_code(
+        &built.warnings,
+        &WarningCode::ParallelToolCallsIgnored
+    ));
+
+    // And the wire shape round-trips.
+    let (parsed, _) = request_to_ir(br#"{"input": "hi", "tools": []}"#).unwrap();
+    assert_eq!(parsed.tools, Some(vec![]));
+    let (body, ws) =
+        request_from_ir(&parsed, None, CallMode::Unary, &ConvertOptions::default()).unwrap();
+    assert!(ws.is_empty(), "{ws:?}");
+    assert_eq!(body["tools"], json!([]));
+}
+
+#[test]
 fn reasoning_mapping() {
     // enabled: false -> effort "none".
     let mut req = Request::with_messages(vec![Message::user_text("hi")]);
@@ -1117,21 +1231,30 @@ fn missing_thinking_with_tool_calls() {
     assert!(build(&off).warnings.is_empty());
 
     // fill_missing_thinking inserts plaintext thinking; on this
-    // signature-validated format it is foreign and still drops.
+    // signature-validated format it is foreign and still drops — the
+    // warning says so instead of reading as a successful repair.
     let mut fctx = ctx(CallMode::Unary);
     fctx.convert.fill_missing_thinking = Some("tool call".into());
     let built = OpenAiResponses.build_request(&req, &fctx).unwrap();
-    assert!(has_code(
-        &built.warnings,
-        &WarningCode::MissingThinkingFilled
-    ));
+    let filled = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::MissingThinkingFilled)
+        .expect("filled warning");
+    assert_eq!(
+        filled.message,
+        "inserted a placeholder thinking block into assistant message 1; this format drops the \
+         placeholder during serialization (no unsigned thinking channel) — set \
+         `thinking_as_text` to carry it as text"
+    );
     assert!(has_code(&built.warnings, &WarningCode::ThinkingDropped));
     assert!(!has_code(
         &built.warnings,
         &WarningCode::MissingThinkingWithToolCalls
     ));
 
-    // With thinking_as_text the filled text becomes raw reasoning text.
+    // With thinking_as_text the filled text becomes raw reasoning text
+    // and the warning has no drop disclaimer.
     fctx.convert.thinking_as_text = true;
     let built = OpenAiResponses.build_request(&req, &fctx).unwrap();
     let body = body_of(&built);
@@ -1140,6 +1263,15 @@ fn missing_thinking_with_tool_calls() {
         json!({"type": "reasoning", "summary": [], "content": [{"type": "reasoning_text", "text": "tool call"}]})
     );
     assert!(!has_code(&built.warnings, &WarningCode::ThinkingDropped));
+    let filled = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::MissingThinkingFilled)
+        .expect("filled warning");
+    assert_eq!(
+        filled.message,
+        "inserted a placeholder thinking block into assistant message 1"
+    );
 }
 
 #[test]
@@ -1617,6 +1749,94 @@ fn foreign_opaque_content_drops_with_warning() {
     );
 }
 
+#[test]
+fn all_blocks_dropped_assistant_message_omitted_with_warning() {
+    // A thinking-only assistant message whose block is foreign here
+    // serializes to zero items: the message is omitted and the omission
+    // is disclosed on top of the per-block warning.
+    let req = Request::with_messages(vec![
+        Message::user_text("hi"),
+        Message::assistant(vec![ContentBlock::thinking("chain").with_extra(
+            "anthropic_messages",
+            "redacted",
+            false,
+        )]),
+        Message::user_text("still there?"),
+    ]);
+    let built = build(&req);
+    let body = body_of(&built);
+    assert_eq!(body["input"].as_array().unwrap().len(), 2);
+    assert!(has_code(&built.warnings, &WarningCode::ThinkingDropped));
+    let w = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::EmptyMessageDropped)
+        .expect("omission disclosed");
+    assert_eq!(w.severity, WarningSeverity::Semantic);
+    assert_eq!(w.location, "/input");
+    assert!(w.message.contains("message 1"), "{}", w.message);
+}
+
+#[test]
+fn all_blocks_dropped_user_message_omitted_not_empty_item() {
+    // A user message holding only foreign opaques must not leave an empty
+    // `content` item behind: the item is omitted and warned.
+    let req = Request::with_messages(vec![
+        Message::user(vec![ContentBlock::opaque(
+            "google_generate_content",
+            json!({"executableCode": {}}),
+        )]),
+        Message::user_text("hi"),
+    ]);
+    let built = build(&req);
+    let body = body_of(&built);
+    assert_eq!(
+        body["input"],
+        json!([{"type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "hi"}]}])
+    );
+    assert!(has_code(&built.warnings, &WarningCode::OpaqueDropped));
+    let w = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::EmptyMessageDropped)
+        .expect("omission disclosed");
+    assert_eq!(w.location, "/input");
+    assert!(w.message.contains("message 0"), "{}", w.message);
+}
+
+#[test]
+fn all_blocks_dropped_tool_message_omitted_with_warning() {
+    // The same rule on the tool path: a tool message holding only foreign
+    // opaques contributes no `function_call_output` item.
+    let req = Request::with_messages(vec![Message::tool(vec![ContentBlock::opaque(
+        "anthropic_messages",
+        json!({"type": "tool_result", "tool_use_id": "t1"}),
+    )])]);
+    let built = build(&req);
+    assert!(body_of(&built).get("input").is_none());
+    assert!(has_code(&built.warnings, &WarningCode::OpaqueDropped));
+    assert!(has_code(&built.warnings, &WarningCode::EmptyMessageDropped));
+}
+
+#[test]
+fn truly_empty_messages_keep_their_wire_shape() {
+    // User-built zero-block messages are not the dropped-blocks case:
+    // user/system/developer replay as an empty `content` item;
+    // assistant/tool messages emit nothing — all without warnings.
+    let req = Request::with_messages(vec![
+        Message::user(vec![]),
+        Message::assistant(vec![]),
+        Message::tool(vec![]),
+    ]);
+    let built = build(&req);
+    assert!(built.warnings.is_empty(), "{:?}", built.warnings);
+    assert_eq!(
+        body_of(&built)["input"],
+        json!([{"type": "message", "role": "user", "content": []}])
+    );
+}
+
 // ---------------------------------------------------------------- responses
 
 #[test]
@@ -1730,8 +1950,8 @@ fn refusal_part_round_trips_via_marker() {
     );
     assert!(llm_api::ir::is_refusal_block(block));
 
-    let (body, ws) = request_from_ir(&req, Some("m"), CallMode::Unary, &ConvertOptions::default())
-        .unwrap();
+    let (body, ws) =
+        request_from_ir(&req, Some("m"), CallMode::Unary, &ConvertOptions::default()).unwrap();
     assert!(ws.is_empty(), "{ws:?}");
     assert_eq!(body["input"], json!([item]));
 }
@@ -1750,8 +1970,8 @@ fn stray_refusal_field_on_output_text_part_round_trips_verbatim() {
     assert!(matches!(block, ContentBlock::Text { .. }));
     assert!(!llm_api::ir::is_refusal_block(block));
 
-    let (body, ws) = request_from_ir(&req, Some("m"), CallMode::Unary, &ConvertOptions::default())
-        .unwrap();
+    let (body, ws) =
+        request_from_ir(&req, Some("m"), CallMode::Unary, &ConvertOptions::default()).unwrap();
     assert!(ws.is_empty(), "{ws:?}");
     assert_eq!(body["input"], json!([item]));
 
@@ -1766,6 +1986,39 @@ fn stray_refusal_field_on_output_text_part_round_trips_verbatim() {
 }
 
 #[test]
+fn custom_tool_call_derives_tool_use_stop_reason() {
+    // `custom_tool_call` awaits developer-supplied output exactly like
+    // `function_call` and upgrades `completed` → `ToolUse`; the item
+    // itself stays an `Opaque` block (not a typed `ToolCall`).
+    let body = json!({
+        "id": "resp_ct", "object": "response", "status": "completed", "model": "m",
+        "output": [
+            {"type": "message", "role": "assistant", "id": "msg_1", "status": "completed",
+             "content": [{"type": "output_text", "text": "running", "annotations": []}]},
+            {"type": "custom_tool_call", "id": "ctc_1", "call_id": "call_c1",
+             "name": "grep", "input": "-r foo"},
+        ],
+    });
+    let resp = response_to_ir(&serde_json::to_vec(&body).unwrap(), &meta_ok()).unwrap();
+    assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
+    assert_eq!(
+        resp.message.content[1],
+        ContentBlock::opaque(F, body["output"][1].clone())
+    );
+
+    // Other waiting-type items do not participate: `EndTurn` stands.
+    let body = json!({
+        "id": "resp_ap", "object": "response", "status": "completed", "model": "m",
+        "output": [
+            {"type": "mcp_approval_request", "id": "mcpr_1", "server_label": "s",
+             "name": "run", "arguments": "{}"},
+        ],
+    });
+    let resp = response_to_ir(&serde_json::to_vec(&body).unwrap(), &meta_ok()).unwrap();
+    assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
+}
+
+#[test]
 fn response_incomplete_reasons_map() {
     let resp = response_to_ir(&fixture("response_incomplete.json"), &meta_ok()).unwrap();
     assert_eq!(resp.stop_reason, Some(StopReason::MaxTokens));
@@ -1774,6 +2027,41 @@ fn response_incomplete_reasons_map() {
     let resp = response_to_ir(&fixture("response_content_filter.json"), &meta_ok()).unwrap();
     assert_eq!(resp.stop_reason, Some(StopReason::ContentFilter));
     assert!(resp.message.content.is_empty());
+}
+
+#[test]
+fn malformed_usage_degrades_to_none_with_warning() {
+    // A malformed usage object (float tokens) must not fail the billed
+    // 2xx response: usage degrades to `None` with a warning.
+    let body = json!({
+        "id": "resp_u", "object": "response", "status": "completed", "model": "m",
+        "output": [{"type": "message", "role": "assistant", "id": "msg_1",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "hi", "annotations": []}]}],
+        "usage": {"input_tokens": 12.5, "output_tokens": 3, "total_tokens": 15.5},
+    });
+    let resp = response_to_ir(&serde_json::to_vec(&body).unwrap(), &meta_ok()).unwrap();
+    assert_eq!(resp.text(), "hi");
+    assert!(resp.usage.is_none());
+    let w = resp
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::MalformedField)
+        .expect("usage warning");
+    assert_eq!(w.location, "/usage");
+    assert!(w.message.contains("usage"), "{}", w.message);
+    // The raw body still carries the original usage for inspection.
+    assert_eq!(resp.raw.as_ref().unwrap()["usage"]["input_tokens"], 12.5);
+
+    // A well-formed usage keeps parsing as before, warning-free.
+    let body = json!({
+        "id": "resp_u2", "object": "response", "status": "completed", "model": "m",
+        "output": [],
+        "usage": {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7},
+    });
+    let resp = response_to_ir(&serde_json::to_vec(&body).unwrap(), &meta_ok()).unwrap();
+    assert!(resp.warnings.is_empty(), "{:?}", resp.warnings);
+    assert_eq!(resp.usage.as_ref().unwrap().input_tokens, 3);
 }
 
 #[test]
@@ -2037,6 +2325,30 @@ fn parse_error_maps_openai_error_types() {
             429,
             r#"{"error": {"message": "slow", "type": "weird"}}"#,
             llm_api::ApiErrorKind::RateLimit,
+        ),
+        // A specific code refines a generic type (quota errors commonly
+        // ride `code` while `type` stays a broad bucket).
+        (
+            429,
+            r#"{"error": {"message": "quota", "type": "invalid_request_error", "code": "insufficient_quota"}}"#,
+            llm_api::ApiErrorKind::RateLimit,
+        ),
+        (
+            401,
+            r#"{"error": {"message": "key", "type": "invalid_request_error", "code": "invalid_api_key"}}"#,
+            llm_api::ApiErrorKind::Auth,
+        ),
+        // When the type misses the table, the code gets a round against
+        // the same table before the status fallback.
+        (
+            400,
+            r#"{"error": {"message": "boom", "type": "weird", "code": "server_error"}}"#,
+            llm_api::ApiErrorKind::ServerError,
+        ),
+        (
+            503,
+            r#"{"error": {"message": "busy", "code": "overloaded_error"}}"#,
+            llm_api::ApiErrorKind::Overloaded,
         ),
     ];
     for (status, body, expected) in cases {

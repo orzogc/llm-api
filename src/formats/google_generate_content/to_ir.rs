@@ -57,6 +57,12 @@ fn clamp_opt(v: Option<i64>) -> Option<u64> {
 /// Converts `usageMetadata` to unified usage (§ 8): `promptTokenCount`
 /// already includes cached tokens; `candidatesTokenCount` excludes thoughts,
 /// so `output_tokens` adds `thoughtsTokenCount` back in.
+///
+/// `toolUsePromptTokenCount` (server-side tool prompts, e.g. search
+/// grounding) is deliberately *not* folded into `input_tokens`: the official
+/// docs do not pin whether `promptTokenCount` already includes it, and
+/// folding it in would risk double counting. The field stays visible in
+/// [`Usage::raw`]. Revisit once live traffic settles the question.
 #[must_use]
 pub(crate) fn usage_from_metadata(u: &types::UsageMetadata) -> Usage {
     let mut usage = Usage {
@@ -71,6 +77,30 @@ pub(crate) fn usage_from_metadata(u: &types::UsageMetadata) -> Usage {
     };
     usage.raw = serde_json::to_value(u).ok();
     usage
+}
+
+/// Decodes a raw `usageMetadata` value leniently: a malformed value (e.g. a
+/// float count) degrades to `None` with a `MalformedField` warning — an
+/// already-billed response or stream must never fail wholesale over its
+/// usage block, and partial (silently zeroed) counts must not be fabricated
+/// either. The verbatim value stays reachable through the response/chunk
+/// raw data.
+pub(crate) fn usage_from_value(
+    value: &Value,
+    warnings: &mut Vec<ConversionWarning>,
+) -> Option<Usage> {
+    match serde_json::from_value::<types::UsageMetadata>(value.clone()) {
+        Ok(u) => Some(usage_from_metadata(&u)),
+        Err(e) => {
+            warn(
+                warnings,
+                WarningCode::MalformedField,
+                "/usageMetadata",
+                format!("usageMetadata could not be decoded and was dropped from `usage`: {e}"),
+            );
+            None
+        }
+    }
 }
 
 /// A model-side part classified for block building. Text-like parts may
@@ -730,7 +760,10 @@ pub fn response_to_ir(body: &[u8], meta: &ResponseMeta) -> Result<Response> {
     response.id = wire.response_id;
     response.model = wire.model_version;
     response.stop_reason = stop_reason;
-    response.usage = wire.usage_metadata.as_ref().map(usage_from_metadata);
+    response.usage = wire
+        .usage_metadata
+        .as_ref()
+        .and_then(|v| usage_from_value(v, &mut warnings));
     response.status = meta.status;
     response.headers = meta.headers.clone();
     response.raw = Some(raw);

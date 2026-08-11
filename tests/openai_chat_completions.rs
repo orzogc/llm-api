@@ -7,8 +7,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 
 use llm_api::formats::openai_chat_completions::{
-    OpenAiChatCompletions, request_from_ir, request_to_ir, response_to_ir,
-    text_block_reserved_key,
+    OpenAiChatCompletions, request_from_ir, request_to_ir, response_to_ir, text_block_reserved_key,
 };
 use llm_api::{
     ApiFormat, BuildCtx, BuiltRequest, CacheHint, CallMode, ContentBlock, ConversionDirection,
@@ -653,6 +652,109 @@ fn assistant_canonical_order_and_dropped_blocks_stay_quiet() {
 }
 
 #[test]
+fn empty_serialized_messages_are_omitted_with_warning() {
+    // A foreign thinking-only assistant turn (thinking_as_text off, no
+    // tool calls) serializes to zero wire content: the message is omitted
+    // and EmptyMessageDropped names the IR index.
+    let req = Request::with_messages(vec![
+        Message::user_text("q"),
+        Message::assistant(vec![ContentBlock::thinking("chain").with_extra(
+            "anthropic_messages",
+            "sig",
+            "s",
+        )]),
+        Message::user_text("again"),
+    ]);
+    let built = build(&req);
+    let body = body_of(&built);
+    assert_eq!(
+        body["messages"],
+        json!([
+            {"role": "user", "content": "q"},
+            {"role": "user", "content": "again"},
+        ])
+    );
+    assert!(has_code(&built.warnings, &WarningCode::ThinkingDropped));
+    let dropped: Vec<_> = built
+        .warnings
+        .iter()
+        .filter(|w| w.code == WarningCode::EmptyMessageDropped)
+        .collect();
+    assert_eq!(dropped.len(), 1, "{:?}", built.warnings);
+    assert_eq!(dropped[0].severity, WarningSeverity::Semantic);
+    assert_eq!(dropped[0].location, "/messages");
+    assert!(dropped[0].message.contains("message 1"), "{:?}", dropped[0]);
+
+    // The same rule covers user messages whose blocks all dropped and
+    // tool messages that produced no wire message.
+    let req = Request::with_messages(vec![Message::user(vec![ContentBlock::opaque(
+        "anthropic_messages",
+        json!({"type": "document"}),
+    )])]);
+    let built = build(&req);
+    assert_eq!(body_of(&built)["messages"], json!([]));
+    assert!(has_code(&built.warnings, &WarningCode::OpaqueDropped));
+    assert!(has_code(&built.warnings, &WarningCode::EmptyMessageDropped));
+
+    let req = Request::with_messages(vec![Message::tool(vec![ContentBlock::opaque(
+        "anthropic_messages",
+        json!({"type": "tool_result"}),
+    )])]);
+    let built = build(&req);
+    assert_eq!(body_of(&built)["messages"], json!([]));
+    assert!(has_code(&built.warnings, &WarningCode::EmptyMessageDropped));
+}
+
+#[test]
+fn empty_message_rule_spares_surviving_content() {
+    // tool_calls survive: the message is not empty.
+    let req = Request::with_messages(vec![
+        Message::assistant(vec![
+            ContentBlock::thinking("chain").with_extra("anthropic_messages", "sig", "s"),
+            ContentBlock::tool_call_with_id("c1", "f", "{}"),
+        ]),
+        Message::tool(vec![ContentBlock::tool_result_text(
+            Some("c1".into()),
+            "ok",
+        )]),
+    ]);
+    let built = build(&req);
+    assert!(!has_code(
+        &built.warnings,
+        &WarningCode::EmptyMessageDropped
+    ));
+    assert_eq!(
+        body_of(&built)["messages"][0]["tool_calls"][0]["id"],
+        json!("c1")
+    );
+
+    // A genuinely empty IR message (user-constructed) keeps the current
+    // encoding — the rule targets only conversion loss.
+    let req = Request::with_messages(vec![Message::assistant(vec![])]);
+    let built = build(&req);
+    assert!(built.warnings.is_empty(), "{:?}", built.warnings);
+    assert_eq!(body_of(&built)["messages"], json!([{"role": "assistant"}]));
+
+    // Message-extra fields rescue the message: the wire object still
+    // carries data (e.g. a replayed dialect field).
+    let mut msg = Message::assistant(vec![ContentBlock::thinking("chain").with_extra(
+        "anthropic_messages",
+        "sig",
+        "s",
+    )]);
+    msg.extra.set(F, "audio", json!({"id": "a1"}));
+    let built = build(&Request::with_messages(vec![msg]));
+    assert!(!has_code(
+        &built.warnings,
+        &WarningCode::EmptyMessageDropped
+    ));
+    assert_eq!(
+        body_of(&built)["messages"][0],
+        json!({"role": "assistant", "audio": {"id": "a1"}})
+    );
+}
+
+#[test]
 fn parsed_assistant_replays_without_order_warnings() {
     // The parse side rebuilds blocks in canonical channel order, so
     // same-format round trips add no order noise.
@@ -769,10 +871,13 @@ fn tool_message_images_drop_and_flags_warn() {
     ]);
     let built = build(&Request::with_messages(vec![tool]));
     let body = body_of(&built);
-    // Text is kept; both images drop with semantic warnings.
+    // Text is kept; both images drop with semantic warnings. The
+    // block-level cache hint lands on the last emitted part (the trailing
+    // images drop, so the text part carries it) — no CacheHintDropped.
     assert_eq!(
         body["messages"][0]["content"],
-        json!([{"type": "text", "text": "kept"}])
+        json!([{"type": "text", "text": "kept",
+                "prompt_cache_breakpoint": {"mode": "explicit"}}])
     );
     let images: Vec<_> = built
         .warnings
@@ -791,7 +896,7 @@ fn tool_message_images_drop_and_flags_warn() {
         .find(|w| w.code == WarningCode::IsErrorDropped)
         .unwrap();
     assert_eq!(e.severity, WarningSeverity::Semantic);
-    assert!(has_code(&built.warnings, &WarningCode::CacheHintDropped));
+    assert!(!has_code(&built.warnings, &WarningCode::CacheHintDropped));
 
     // Nested tool-output cache hints drop cosmetically (v1 rule); a single
     // hinted text still uses the string shorthand (no breakpoint channel).
@@ -813,6 +918,137 @@ fn tool_message_images_drop_and_flags_warn() {
         build_err(&Request::with_messages(vec![tool])),
         Error::Conversion(ConversionError::MissingRequired { .. })
     ));
+}
+
+#[test]
+fn tool_result_cache_hint_maps_to_last_part_breakpoint() {
+    // Multi-part content: only the last part carries the breakpoint.
+    let tool = Message::tool(vec![
+        ContentBlock::tool_result(
+            Some("c1".into()),
+            vec![ToolOutputBlock::text("one"), ToolOutputBlock::text("two")],
+        )
+        .with_cache(CacheHint::new()),
+    ]);
+    let built = build(&Request::with_messages(vec![tool]));
+    assert!(built.warnings.is_empty(), "{:?}", built.warnings);
+    assert_eq!(
+        body_of(&built)["messages"][0]["content"],
+        json!([
+            {"type": "text", "text": "one"},
+            {"type": "text", "text": "two",
+             "prompt_cache_breakpoint": {"mode": "explicit"}},
+        ])
+    );
+
+    // A single plain text needs the part-array form: the breakpoint has
+    // no string-shorthand channel (§ 1 canonicalization).
+    let tool = Message::tool(vec![
+        ContentBlock::tool_result_text(Some("c2".into()), "x").with_cache(CacheHint::new()),
+    ]);
+    let built = build(&Request::with_messages(vec![tool]));
+    assert!(built.warnings.is_empty(), "{:?}", built.warnings);
+    assert_eq!(
+        body_of(&built)["messages"][0]["content"],
+        json!([{"type": "text", "text": "x",
+                "prompt_cache_breakpoint": {"mode": "explicit"}}])
+    );
+
+    // The TTL has no OpenAI equivalent: breakpoint kept, TTL warned.
+    let tool = Message::tool(vec![
+        ContentBlock::tool_result_text(Some("c3".into()), "x")
+            .with_cache(CacheHint::with_ttl("5m")),
+    ]);
+    let built = build(&Request::with_messages(vec![tool]));
+    let w = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::CacheTtlDropped)
+        .unwrap();
+    assert_eq!(w.location, "/messages/0/content/0/prompt_cache_breakpoint");
+    assert_eq!(
+        body_of(&built)["messages"][0]["content"][0]["prompt_cache_breakpoint"],
+        json!({"mode": "explicit"})
+    );
+
+    // Empty content has no part to carry the hint: `content: ""` plus the
+    // original CacheHintDropped warning.
+    let tool = Message::tool(vec![
+        ContentBlock::tool_result(Some("c4".into()), vec![]).with_cache(CacheHint::new()),
+    ]);
+    let built = build(&Request::with_messages(vec![tool]));
+    assert_eq!(body_of(&built)["messages"][0]["content"], json!(""));
+    let w = built
+        .warnings
+        .iter()
+        .find(|w| w.code == WarningCode::CacheHintDropped)
+        .unwrap();
+    assert_eq!(w.location, "/messages/0");
+}
+
+#[test]
+fn tool_result_cache_hint_round_trips() {
+    // IR → wire → IR: the hint survives as the block-level cache and the
+    // rebuilt body is identical, warning-free on every hop.
+    let tool = Message::tool(vec![
+        ContentBlock::tool_result(
+            Some("c1".into()),
+            vec![ToolOutputBlock::text("one"), ToolOutputBlock::text("two")],
+        )
+        .with_cache(CacheHint::new()),
+    ]);
+    let (body, warnings) = from_ir_unary(&Request::with_messages(vec![tool]));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let (req, warnings) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let ContentBlock::ToolResult { cache, content, .. } = &req.messages[0].content[0] else {
+        panic!("expected tool result: {:?}", req.messages[0].content);
+    };
+    assert_eq!(cache, &Some(CacheHint::new()));
+    assert!(
+        content
+            .iter()
+            .all(|b| matches!(b, ToolOutputBlock::Text { extra, .. } if extra.is_empty())),
+        "{content:?}"
+    );
+    let (rebuilt, warnings) = from_ir_unary(&req);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(rebuilt["messages"], body["messages"]);
+
+    // Wire → IR → wire: a non-canonical breakpoint on the last part keeps
+    // its raw shape via the part extra; one on a non-last part stays
+    // verbatim (no block hint). Both replay identically.
+    let wire = json!({"messages": [{
+        "role": "tool", "tool_call_id": "c9",
+        "content": [
+            {"type": "text", "text": "a",
+             "prompt_cache_breakpoint": {"mode": "explicit"}},
+            {"type": "text", "text": "b",
+             "prompt_cache_breakpoint": {"mode": "explicit", "x": 1}},
+        ],
+    }]});
+    let (req, warnings) = request_to_ir(&serde_json::to_vec(&wire).unwrap()).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let ContentBlock::ToolResult { cache, content, .. } = &req.messages[0].content[0] else {
+        panic!("expected tool result");
+    };
+    assert_eq!(
+        cache,
+        &Some(CacheHint::new()),
+        "last-part breakpoint hoists"
+    );
+    assert_eq!(
+        content[0],
+        serde_json::from_value(json!({
+            "type": "text", "text": "a",
+            "extra": {F: {"prompt_cache_breakpoint": {"mode": "explicit"}}},
+        }))
+        .unwrap(),
+        "non-last breakpoints stay verbatim in the part extra"
+    );
+    let (rebuilt, warnings) = from_ir_unary(&req);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(rebuilt["messages"], wire["messages"]);
 }
 
 #[test]
@@ -902,6 +1138,30 @@ fn tools_map_nested_shape() {
         .find(|w| w.code == WarningCode::OpaqueDropped)
         .unwrap();
     assert_eq!(w.severity, WarningSeverity::Semantic);
+}
+
+#[test]
+fn explicit_empty_tools_round_trip_keeps_key() {
+    // An explicit `"tools": []` is faithful data: parse keeps `Some([])`
+    // and the rebuild replays the empty array (§ 1 canonicalization).
+    let wire = json!({"messages": [{"role": "user", "content": "q"}], "tools": []});
+    let (req, warnings) = request_to_ir(&serde_json::to_vec(&wire).unwrap()).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(req.tools, Some(vec![]));
+    let (body, warnings) = from_ir_unary(&req);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(body["tools"], json!([]));
+
+    // A non-empty IR list emptied by dropping foreign tools omits the key
+    // instead — the OpaqueDropped warning already discloses the loss.
+    let mut req = Request::with_messages(vec![Message::user_text("q")]);
+    req.tools = Some(vec![Tool::opaque(
+        "anthropic_messages",
+        json!({"type": "computer_20250124"}),
+    )]);
+    let (body, warnings) = from_ir_unary(&req);
+    assert!(body.get("tools").is_none(), "{body}");
+    assert!(has_code(&warnings, &WarningCode::OpaqueDropped));
 }
 
 #[test]
@@ -2121,6 +2381,45 @@ fn response_text_parses_envelope_blocks_and_usage() {
     assert!(usage.raw.is_some());
     assert!(resp.raw.is_some());
     assert!(resp.warnings.is_empty());
+}
+
+#[test]
+fn malformed_usage_degrades_to_none_with_warning() {
+    // A billed 2xx response must never fail over its usage: proxies have
+    // historically emitted float token counts. The response parses,
+    // usage degrades to None, and MalformedField points at /usage.
+    let body = |usage: Value| {
+        serde_json::to_vec(&json!({
+            "id": "x", "object": "chat.completion", "model": "m",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"},
+                         "finish_reason": "stop"}],
+            "usage": usage,
+        }))
+        .unwrap()
+    };
+    for usage in [
+        json!({"prompt_tokens": 12.5, "completion_tokens": 3}),
+        json!({"prompt_tokens": 1, "prompt_tokens_details": {"cached_tokens": "x"}}),
+        json!([1, 2]),
+        json!("busy"),
+    ] {
+        let resp = response_to_ir(&body(usage.clone()), &meta_ok()).unwrap();
+        assert_eq!(resp.text(), "hi", "{usage}");
+        assert!(resp.usage.is_none(), "{usage}");
+        let w = resp
+            .warnings
+            .iter()
+            .find(|w| w.code == WarningCode::MalformedField)
+            .unwrap_or_else(|| panic!("{usage}: {:?}", resp.warnings));
+        assert_eq!(w.location, "/usage");
+        // The raw value stays reachable through the response raw body.
+        assert_eq!(resp.raw.as_ref().unwrap()["usage"], usage);
+    }
+
+    // `usage: null` is the absent canonical form — silent.
+    let resp = response_to_ir(&body(Value::Null), &meta_ok()).unwrap();
+    assert!(resp.usage.is_none());
+    assert!(resp.warnings.is_empty(), "{:?}", resp.warnings);
 }
 
 #[test]

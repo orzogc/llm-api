@@ -18,7 +18,15 @@
 //! - Adjacent `User`/`Tool` messages merge into one `user` turn and adjacent
 //!   `Assistant` messages into one `model` turn — Google requires role
 //!   alternation; parsed mixed turns are split back apart carrying
-//!   turn-group metadata.
+//!   turn-group metadata. Wire turns are created lazily: a non-empty IR
+//!   message whose blocks all drop (foreign opaque/thinking) is omitted
+//!   entirely with an `EmptyMessageDropped` warning instead of emitting an
+//!   empty `parts` turn, and same-side neighbours merge across the gap; an
+//!   IR message with zero blocks still serializes as an empty turn
+//!   (faithful replay of the wire's own empty-content form).
+//! - A `tools` list whose entries were all dropped (foreign opaque tools)
+//!   omits the `tools` key — the `OpaqueDropped` warnings disclose the
+//!   drops; an explicitly empty IR tool list replays as `"tools": []`.
 //! - `ToolResult.is_error: true` maps to the documented
 //!   `functionResponse.response` failure key `{"error": …}` (and back);
 //!   `is_error: false` canonicalizes to the plain `{"output": …}` encoding.
@@ -28,6 +36,16 @@
 //!   `extra["google_generate_content"]["thoughtSignature"]`.
 //! - `thinkingBudget` is deliberately not modeled (design § 4.7); rewrite
 //!   `generationConfig.thinkingConfig` via `extra` where needed.
+//! - Usage: `input_tokens` maps `promptTokenCount` only —
+//!   `toolUsePromptTokenCount` is not folded in (double-count risk; the raw
+//!   field stays in [`crate::ir::Usage::raw`]); a malformed `usageMetadata`
+//!   degrades to no usage with a `MalformedField` warning instead of
+//!   failing the billed response or chunk.
+//! - Streaming: an error envelope (`data: {"error": {...}}`) on the 2xx
+//!   channel raises [`Error::Api`] (`error.code` → status when plausible,
+//!   gRPC `error.status` → kind); a chunk carrying no modeled signal at all
+//!   surfaces as an `Unknown` event with one `MalformedField` warning per
+//!   stream instead of being consumed silently.
 //! - Known representational limits: `extra` set on a *nested* tool-output
 //!   text block has no wire location on Google (the text is flattened into
 //!   `response`) and drops with an `ExtraDropped` warning; explicit
@@ -88,6 +106,45 @@ fn api_error_kind(grpc_status: &str, http_status: u16) -> ApiErrorKind {
     }
 }
 
+/// Refines an already-classified [`Error::Api`] in place: when the parsed
+/// body carries a gRPC `error.status` string, it overrides the plain
+/// HTTP-status classification.
+fn refine_api_error_kind(error: &mut Error, http_status: u16) {
+    if let Error::Api {
+        kind,
+        parsed: Some(parsed),
+        ..
+    } = error
+        && let Some(grpc) = parsed
+            .get("error")
+            .and_then(|e| e.get("status"))
+            .and_then(Value::as_str)
+    {
+        *kind = api_error_kind(grpc, http_status);
+    }
+}
+
+/// Classifies an error envelope (`data: {"error": {...}}`) received on the
+/// 2xx stream channel, reusing the non-2xx pipeline: `error.code` supplies
+/// the status when it is a plausible HTTP status (100..=599; otherwise the
+/// transport's 200 is kept), message extraction and body preservation come
+/// from [`generic_api_error`], and the gRPC `error.status` drives the kind
+/// exactly as in [`ApiFormat::parse_error`].
+pub(crate) fn stream_error(data: &str) -> Error {
+    let status = serde_json::from_str::<Value>(data)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.get("error"))
+        .and_then(|e| e.get("code"))
+        .and_then(Value::as_u64)
+        .and_then(|c| u16::try_from(c).ok())
+        .filter(|c| (100..=599).contains(c))
+        .unwrap_or(200);
+    let mut error = generic_api_error(status, &http::HeaderMap::new(), data.as_bytes());
+    refine_api_error_kind(&mut error, status);
+    error
+}
+
 impl ApiFormat for GoogleGenerateContent {
     fn id(&self) -> &str {
         ids::GOOGLE_GENERATE_CONTENT
@@ -132,18 +189,7 @@ impl ApiFormat for GoogleGenerateContent {
 
     fn parse_error(&self, status: u16, headers: &http::HeaderMap, body: &[u8]) -> Error {
         let mut error = generic_api_error(status, headers, body);
-        if let Error::Api {
-            kind,
-            parsed: Some(parsed),
-            ..
-        } = &mut error
-            && let Some(grpc) = parsed
-                .get("error")
-                .and_then(|e| e.get("status"))
-                .and_then(Value::as_str)
-        {
-            *kind = api_error_kind(grpc, status);
-        }
+        refine_api_error_kind(&mut error, status);
         error
     }
 

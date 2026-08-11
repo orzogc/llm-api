@@ -501,10 +501,16 @@ First-class block-level cache hints plus a top-level cache key:
   equivalent — warning); Google: warning. Anthropic accepts `cache_control`
   on every request block except thinking, so `ToolCall`/`ToolResult` hints map
   natively there; CC/Responses breakpoints exist only on content parts, so
-  hints on `ToolCall` blocks warn (cosmetic). Cache hints on **nested**
+  hints on `ToolCall` blocks warn (cosmetic), while a `ToolResult` hint maps
+  to `prompt_cache_breakpoint` on the **last emitted content part** of the
+  tool message / `function_call_output` item (the prefix ends where the
+  result ends — semantically the Anthropic breakpoint; a single-string
+  shorthand switches to the part-array form to carry it, and an empty
+  output keeps the drop warning). Cache hints on **nested**
   `ToolOutputBlock`s (inside a tool result) are dropped with a cosmetic
   warning on every target in v1 — the supported breakpoint channels are the
-  `ToolResult` block itself (Anthropic) and regular content parts (OpenAI);
+  `ToolResult` block itself (Anthropic, and via last-part mapping on
+  CC/Responses) and regular content parts (OpenAI);
   if implementation verifies nested support somewhere, relaxing this is
   non-breaking (fewer warnings).
 - `Request.cache_key` → OpenAI `prompt_cache_key` (both APIs); Anthropic and

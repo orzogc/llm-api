@@ -901,6 +901,236 @@ fn synthesized_blocks_for_item_done_without_added() {
 }
 
 #[test]
+fn custom_tool_call_in_terminal_snapshot_derives_tool_use() {
+    // `custom_tool_call` participates in the streaming stop-reason
+    // derivation exactly like `function_call`.
+    let item = json!({"type": "custom_tool_call", "id": "ctc_1", "call_id": "call_c1",
+                      "name": "grep", "input": "-r foo", "status": "completed"});
+    let (events, warnings, finish) = feed_frames(&[
+        json!({"type": "response.created", "response":
+               {"id": "resp_c1", "model": "gpt-5.1", "status": "in_progress", "output": []}}),
+        json!({"type": "response.output_item.added", "output_index": 0, "item": item.clone()}),
+        json!({"type": "response.output_item.done", "output_index": 0, "item": item.clone()}),
+        json!({"type": "response.completed", "response":
+               {"id": "resp_c1", "status": "completed", "output": [item],
+                "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}}}),
+    ]);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(finish.is_ok());
+    let resp = accumulate(&events);
+    assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
+    // The item itself is an Opaque block, not a typed ToolCall.
+    assert!(matches!(
+        &resp.message.content[0],
+        ContentBlock::Opaque { .. }
+    ));
+}
+
+#[test]
+fn sequence_number_regression_warns_once() {
+    let (_, warnings, finish) = feed_frames(&[
+        json!({"type": "response.created", "sequence_number": 1, "response":
+               {"id": "resp_q1", "model": "gpt-5.1", "status": "in_progress", "output": []}}),
+        json!({"type": "response.output_item.added", "sequence_number": 3, "output_index": 0,
+               "item": {"id": "msg_1", "type": "message", "role": "assistant",
+                        "status": "in_progress", "content": []}}),
+        // Regression: 3 → 2 warns once …
+        json!({"type": "response.content_part.added", "sequence_number": 2, "item_id": "msg_1",
+               "output_index": 0, "content_index": 0,
+               "part": {"type": "output_text", "text": "", "annotations": []}}),
+        // … and a later regression stays silent (once per stream).
+        json!({"type": "response.output_text.delta", "sequence_number": 1, "item_id": "msg_1",
+               "output_index": 0, "content_index": 0, "delta": "hi"}),
+        json!({"type": "response.completed", "sequence_number": 9, "response":
+               {"id": "resp_q1", "status": "completed", "output": [],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}}),
+    ]);
+    assert!(finish.is_ok());
+    let seq: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.location == "/sequence_number")
+        .collect();
+    assert_eq!(seq.len(), 1, "{warnings:?}");
+    assert_eq!(seq[0].code, WarningCode::MalformedField);
+    assert_eq!(
+        seq[0].message,
+        "sequence_number did not increase (prev 3, got 2); event order may be unreliable"
+    );
+}
+
+#[test]
+fn sequence_number_monotonic_or_absent_is_silent() {
+    // Strictly increasing numbers — including gaps — do not warn.
+    let (_, warnings, finish) = feed_frames(&[
+        json!({"type": "response.created", "sequence_number": 1, "response":
+               {"id": "resp_q2", "model": "gpt-5.1", "status": "in_progress", "output": []}}),
+        json!({"type": "response.completed", "sequence_number": 7, "response":
+               {"id": "resp_q2", "status": "completed", "output": [],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}}),
+    ]);
+    assert!(finish.is_ok());
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    // Events without the field skip the check entirely (an absent field
+    // between two present ones does not reset the tracker).
+    let (_, warnings, finish) = feed_frames(&[
+        json!({"type": "response.created", "sequence_number": 5, "response":
+               {"id": "resp_q3", "model": "gpt-5.1", "status": "in_progress", "output": []}}),
+        json!({"type": "response.in_progress", "response": {}}),
+        json!({"type": "response.completed", "sequence_number": 6, "response":
+               {"id": "resp_q3", "status": "completed", "output": [],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}}),
+    ]);
+    assert!(finish.is_ok());
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn duplicate_content_part_added_closes_old_block_first() {
+    let (events, warnings, finish) = feed_frames(&[
+        json!({"type": "response.created", "response":
+               {"id": "resp_d1", "model": "gpt-5.1", "status": "in_progress", "output": []}}),
+        json!({"type": "response.output_item.added", "output_index": 0,
+               "item": {"id": "msg_1", "type": "message", "role": "assistant",
+                        "status": "in_progress", "content": []}}),
+        json!({"type": "response.content_part.added", "item_id": "msg_1", "output_index": 0,
+               "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": []}}),
+        json!({"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0,
+               "content_index": 0, "delta": "a"}),
+        // Duplicate coordinates: the old open part closes before the new
+        // block starts.
+        json!({"type": "response.content_part.added", "item_id": "msg_1", "output_index": 0,
+               "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": []}}),
+        json!({"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0,
+               "content_index": 0, "delta": "b"}),
+        json!({"type": "response.completed", "response":
+               {"id": "resp_d1", "status": "completed", "output": [],
+                "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}}}),
+    ]);
+    assert!(finish.is_ok());
+    let dup: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.code == WarningCode::MalformedField)
+        .collect();
+    assert_eq!(dup.len(), 1, "{warnings:?}");
+    assert!(
+        dup[0].message.contains("duplicate content_part.added"),
+        "{}",
+        dup[0].message
+    );
+    // Old block 0 stops (content stands) before block 1 starts.
+    assert_eq!(ev(&events[3]), json!({"type": "block_stop", "index": 0}));
+    assert!(matches!(
+        &events[4],
+        StreamEvent::BlockStart { index: 1, .. }
+    ));
+    // No dangling open block: accumulation completes cleanly.
+    let resp = accumulate(&events);
+    assert_eq!(resp.message.content.len(), 2);
+    assert_eq!(resp.text(), "ab");
+}
+
+#[test]
+fn duplicate_output_item_added_closes_old_blocks_first() {
+    let (events, warnings, finish) = feed_frames(&[
+        json!({"type": "response.created", "response":
+               {"id": "resp_d2", "model": "gpt-5.1", "status": "in_progress", "output": []}}),
+        json!({"type": "response.output_item.added", "output_index": 0,
+               "item": {"id": "fc_1", "type": "function_call", "call_id": "c1",
+                        "name": "f", "arguments": ""}}),
+        // Duplicate output_index while the function_call is still open.
+        json!({"type": "response.output_item.added", "output_index": 0,
+               "item": {"id": "msg_1", "type": "message", "role": "assistant",
+                        "status": "in_progress", "content": []}}),
+        json!({"type": "response.content_part.added", "item_id": "msg_1", "output_index": 0,
+               "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": []}}),
+        json!({"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0,
+               "content_index": 0, "delta": "x"}),
+        json!({"type": "response.completed", "response":
+               {"id": "resp_d2", "status": "completed", "output": [],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}}),
+    ]);
+    assert!(finish.is_ok());
+    let dup: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.code == WarningCode::MalformedField)
+        .collect();
+    assert_eq!(dup.len(), 1, "{warnings:?}");
+    assert!(
+        dup[0].message.contains("duplicate output_item.added"),
+        "{}",
+        dup[0].message
+    );
+    assert_eq!(dup[0].location, "/output/0");
+    // The open tool-call block closes before anything of the new item.
+    assert_eq!(ev(&events[2]), json!({"type": "block_stop", "index": 0}));
+    let resp = accumulate(&events);
+    assert_eq!(resp.message.content.len(), 2);
+    assert!(matches!(
+        &resp.message.content[0],
+        ContentBlock::ToolCall { .. }
+    ));
+    assert_eq!(resp.text(), "x");
+}
+
+#[test]
+fn malformed_terminal_usage_degrades_with_warning() {
+    // Float token counts in the terminal snapshot must not fail the
+    // stream: usage degrades to `None` with a warning.
+    let (events, warnings, finish) = feed_frames(&[
+        json!({"type": "response.created", "response":
+               {"id": "resp_mu", "model": "gpt-5.1", "status": "in_progress", "output": []}}),
+        json!({"type": "response.completed", "response":
+               {"id": "resp_mu", "status": "completed", "output": [],
+                "usage": {"input_tokens": 1.5, "output_tokens": 2, "total_tokens": 3.5}}}),
+    ]);
+    assert!(finish.is_ok());
+    let w = warnings
+        .iter()
+        .find(|w| w.code == WarningCode::MalformedField)
+        .expect("usage warning");
+    assert_eq!(w.location, "/usage");
+    let StreamEvent::MessageDelta {
+        stop_reason, usage, ..
+    } = events
+        .iter()
+        .find(|e| matches!(e, StreamEvent::MessageDelta { .. }))
+        .expect("terminal delta")
+    else {
+        unreachable!()
+    };
+    assert_eq!(*stop_reason, Some(StopReason::EndTurn));
+    assert!(usage.is_none());
+}
+
+#[test]
+fn malformed_created_usage_degrades_with_warning() {
+    // The same leniency applies to the stream-start snapshot: a malformed
+    // `response.created` usage warns and degrades instead of vanishing.
+    let (events, warnings, finish) = feed_frames(&[
+        json!({"type": "response.created", "response":
+               {"id": "resp_cu", "model": "gpt-5.1", "status": "in_progress", "output": [],
+                "usage": {"input_tokens": "garbage"}}}),
+        json!({"type": "response.completed", "response":
+               {"id": "resp_cu", "status": "completed", "output": []}}),
+    ]);
+    assert!(finish.is_ok());
+    let w = warnings
+        .iter()
+        .find(|w| w.code == WarningCode::MalformedField)
+        .expect("usage warning");
+    assert_eq!(w.location, "/usage");
+    let StreamEvent::MessageStart { usage, .. } = events
+        .iter()
+        .find(|e| matches!(e, StreamEvent::MessageStart { .. }))
+        .expect("message start")
+    else {
+        unreachable!()
+    };
+    assert!(usage.is_none());
+}
+
+#[test]
 fn reasoning_text_streams_as_thinking_deltas() {
     // `response.reasoning_text.delta` is official raw chain of thought
     // (`content` reasoning_text parts) and must stream as `Thinking`

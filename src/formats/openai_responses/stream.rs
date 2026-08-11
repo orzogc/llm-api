@@ -31,6 +31,16 @@
 //! frame arriving after the terminal event (including `error` /
 //! `response.failed`) surfaces as [`StreamEvent::Unknown`] with an
 //! `UnknownStreamEvent` warning: the response is already complete.
+//!
+//! Defenses against non-compliant streams: a duplicate
+//! `output_item.added` / `content_part.added` at already-open
+//! coordinates first closes the old item/part with
+//! `BlockStop { block: None }` (start/stop stay paired), then opens the
+//! new block, warning `MalformedField`; `sequence_number` is checked for
+//! monotonicity — the first non-increasing value warns `MalformedField`
+//! once per stream (no reordering is attempted); a malformed terminal
+//! `usage` degrades to `None` with a `MalformedField` warning instead of
+//! failing the stream.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -126,6 +136,12 @@ pub struct ResponsesStreamParser {
     /// matching.
     item_ids: BTreeMap<u64, String>,
     warned_unknown: BTreeSet<String>,
+    /// Last `sequence_number` observed (events without the field skip the
+    /// check).
+    last_sequence: Option<i64>,
+    /// Whether the once-per-stream non-monotonic `sequence_number`
+    /// warning already fired.
+    sequence_warned: bool,
 }
 
 /// Wraps an unmodeled message content part into a minimal assistant
@@ -231,7 +247,12 @@ impl ResponsesStreamParser {
         self.items.clear();
     }
 
-    fn on_created(&mut self, payload: &Value, events: &mut Vec<StreamEvent>) {
+    fn on_created(
+        &mut self,
+        payload: &Value,
+        events: &mut Vec<StreamEvent>,
+        warnings: &mut Vec<ConversionWarning>,
+    ) {
         self.started = true;
         let resp = payload.get("response");
         events.push(StreamEvent::MessageStart {
@@ -243,18 +264,59 @@ impl ResponsesStreamParser {
                 .and_then(|r| r.get("model"))
                 .and_then(Value::as_str)
                 .map(str::to_owned),
-            usage: resp
-                .and_then(|r| r.get("usage"))
-                .and_then(to_ir::usage_from_value),
+            usage: to_ir::usage_lenient(resp.and_then(|r| r.get("usage")), warnings),
         });
     }
 
-    fn on_item_added(&mut self, payload: &Value, events: &mut Vec<StreamEvent>) {
+    /// Closes every open block of an item state with
+    /// `BlockStop { block: None }` (the accumulated content stands) —
+    /// the duplicate-`added` defense so real-time consumers never wait
+    /// on a silently replaced block.
+    fn close_item_blocks(state: &ItemState, events: &mut Vec<StreamEvent>) {
+        match state {
+            ItemState::Message { parts } => {
+                let mut indices: Vec<usize> = parts.values().map(|p| p.index).collect();
+                indices.sort_unstable();
+                for index in indices {
+                    events.push(StreamEvent::BlockStop { index, block: None });
+                }
+            }
+            ItemState::Reasoning { index, .. }
+            | ItemState::FunctionCall { index }
+            | ItemState::Opaque { index } => {
+                events.push(StreamEvent::BlockStop {
+                    index: *index,
+                    block: None,
+                });
+            }
+        }
+    }
+
+    fn on_item_added(
+        &mut self,
+        payload: &Value,
+        events: &mut Vec<StreamEvent>,
+        warnings: &mut Vec<ConversionWarning>,
+    ) {
         let Some(idx) = payload.get("output_index").and_then(Value::as_u64) else {
             return;
         };
         let item = payload.get("item").cloned().unwrap_or(Value::Null);
         self.ensure_started(events);
+        // A duplicate `output_item.added` for a still-open item: close the
+        // old item's blocks first (start/stop stay paired), then open the
+        // new one normally.
+        if let Some(old) = self.items.remove(&idx) {
+            warnings.push(warn(
+                WarningCode::MalformedField,
+                format!("/output/{idx}"),
+                format!(
+                    "duplicate output_item.added for output_index {idx}; \
+                     the previous open item was closed"
+                ),
+            ));
+            Self::close_item_blocks(&old, events);
+        }
         self.record_item(idx, item.get("id").and_then(Value::as_str));
         match item.get("type").and_then(Value::as_str) {
             Some("message") => {
@@ -382,6 +444,22 @@ impl ResponsesStreamParser {
             parts: BTreeMap::new(),
         });
         if let ItemState::Message { parts } = state {
+            // A duplicate `content_part.added` at the same coordinates:
+            // close the still-open old part before starting the new block.
+            if let Some(old) = parts.get(&ci) {
+                warnings.push(warn(
+                    WarningCode::MalformedField,
+                    format!("/output/{idx}"),
+                    format!(
+                        "duplicate content_part.added for output_index {idx}, \
+                         content_index {ci}; the previous open part was closed"
+                    ),
+                ));
+                events.push(StreamEvent::BlockStop {
+                    index: old.index,
+                    block: None,
+                });
+            }
             parts.insert(
                 ci,
                 PartState {
@@ -824,9 +902,7 @@ impl ResponsesStreamParser {
             self.synthesize_item(item, &format!("/output/{pos}"), events, warnings);
         }
 
-        let has_function_call = snapshot
-            .iter()
-            .any(|i| i.get("type").and_then(Value::as_str) == Some("function_call"));
+        let has_pending_tool_call = snapshot.iter().any(to_ir::awaits_tool_output);
         let (status, reason) = if incomplete {
             (
                 Some("incomplete"),
@@ -836,12 +912,38 @@ impl ResponsesStreamParser {
         } else {
             (Some("completed"), None)
         };
-        let stop_reason = to_ir::derive_stop_reason(status, reason, has_function_call);
-        let usage = resp
-            .and_then(|r| r.get("usage"))
-            .and_then(to_ir::usage_from_value);
+        let stop_reason = to_ir::derive_stop_reason(status, reason, has_pending_tool_call);
+        let usage = to_ir::usage_lenient(resp.and_then(|r| r.get("usage")), warnings);
         events.push(StreamEvent::MessageDelta { stop_reason, usage });
         events.push(StreamEvent::MessageStop);
+    }
+
+    /// Once-per-stream `sequence_number` monotonicity check: the official
+    /// counter is strictly increasing, so the first non-increasing value
+    /// warns that event order may be unreliable (no reordering or
+    /// dropping is attempted). Events without the field skip the check.
+    fn check_sequence(&mut self, payload: &Value, warnings: &mut Vec<ConversionWarning>) {
+        if self.sequence_warned {
+            return;
+        }
+        let Some(seq) = payload.get("sequence_number").and_then(Value::as_i64) else {
+            return;
+        };
+        if let Some(last) = self.last_sequence
+            && seq <= last
+        {
+            self.sequence_warned = true;
+            warnings.push(warn(
+                WarningCode::MalformedField,
+                "/sequence_number",
+                format!(
+                    "sequence_number did not increase (prev {last}, got {seq}); \
+                     event order may be unreliable"
+                ),
+            ));
+            return;
+        }
+        self.last_sequence = Some(seq);
     }
 
     fn on_unknown(
@@ -915,6 +1017,7 @@ impl StreamParser for ResponsesStreamParser {
                 return Ok((events, warnings));
             }
         };
+        self.check_sequence(&payload, &mut warnings);
         // The payload `type` mirrors the SSE event name and is
         // authoritative; fall back to the `event:` field.
         let event_type = payload
@@ -924,7 +1027,7 @@ impl StreamParser for ResponsesStreamParser {
             .unwrap_or_default()
             .to_owned();
         match event_type.as_str() {
-            "response.created" => self.on_created(&payload, &mut events),
+            "response.created" => self.on_created(&payload, &mut events, &mut warnings),
             // Lifecycle noise and `.done` duplicates of already-streamed
             // data are consumed silently (contract, "Response parsing").
             "response.queued"
@@ -935,7 +1038,9 @@ impl StreamParser for ResponsesStreamParser {
             | "response.reasoning_summary_text.done"
             | "response.reasoning_summary_part.done"
             | "response.reasoning_text.done" => {}
-            "response.output_item.added" => self.on_item_added(&payload, &mut events),
+            "response.output_item.added" => {
+                self.on_item_added(&payload, &mut events, &mut warnings);
+            }
             "response.content_part.added" => {
                 self.on_part_added(&payload, &mut events, &mut warnings);
             }

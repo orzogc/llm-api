@@ -219,10 +219,11 @@ Round-trip metadata flows **parse-attach → serialize-consume**.
   mismatch stays a hard `Error::Parse`; unmodeled members of a recognized
   delta (e.g. Anthropic `thinking_delta.estimated_tokens`) surface as an
   extra `BlockDelta::Other` (warned once per member name, transient —
-  never folded into the finalized block); a provider error frame inside a
-  2xx stream becomes `Error::Api` (Google `error` key, Anthropic `error`
-  event); a chunk with no modeled signal at all surfaces `Unknown` +
-  `MalformedField` (once per stream).
+  never folded into the finalized block); a **pre-terminal** provider
+  error frame inside a 2xx stream becomes `Error::Api` (Google `error`
+  key, Anthropic `error` event) — after the protocol terminator the
+  post-terminal downgrade above still wins; a chunk with no modeled
+  signal at all surfaces `Unknown` + `MalformedField` (once per stream).
 - Google blocked prompt (no candidates, `promptFeedback.blockReason`):
   empty assistant message, `stop_reason: Some(ContentFilter)`, body in
   `raw`; streaming: `MessageStart` (if needed) + `MessageDelta {
@@ -338,7 +339,8 @@ merge and hooks), then adapt:
 ## Models list (pins § 13)
 
 `build_models_request` → GET; OpenAI-family: single page (`cursor`
-ignored, next cursor `None`); Anthropic: `after_id=<cursor>` +
+ignored, next cursor `None`); Anthropic: `limit=1000` (protected query
+key, like Google's `pageSize`) + `after_id=<cursor>` +
 `has_more`/`last_id` (`has_more: true` with a missing/empty `last_id` is
 `Error::Parse` — malformed pagination must not silently truncate the
 list); Google: `pageSize=1000` + `pageToken=<cursor>` /

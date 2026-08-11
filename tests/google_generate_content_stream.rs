@@ -5,8 +5,8 @@
 use llm_api::formats::google_generate_content::GoogleGenerateContent;
 use llm_api::http::SseParser;
 use llm_api::{
-    Accumulator, ApiFormat, BlockDelta, ContentBlock, ConversionWarning, Error, StopReason,
-    StreamEvent, StreamItem, WarningCode,
+    Accumulator, ApiErrorKind, ApiFormat, BlockDelta, ContentBlock, ConversionWarning, Error,
+    StopReason, StreamEvent, StreamItem, WarningCode,
 };
 use serde_json::json;
 
@@ -406,6 +406,190 @@ fn unknown_payloads_and_post_terminal_chunks() {
     assert!(matches!(events[..], [StreamEvent::Unknown]));
     assert_eq!(warnings[0].code, WarningCode::UnknownStreamEvent);
     parser.finish().unwrap();
+}
+
+#[test]
+fn error_frames_raise_api_errors() {
+    let format = GoogleGenerateContent;
+
+    // First chunk: an error envelope becomes the API error it is.
+    let mut parser = format.stream_parser();
+    let frame = json!({"error": {"code": 429, "message": "quota", "status": "RESOURCE_EXHAUSTED"}});
+    let err = parser
+        .parse(&llm_api::http::SseEvent::new(None, frame.to_string()))
+        .unwrap_err();
+    let Error::Api {
+        status,
+        kind,
+        message,
+        parsed,
+        ..
+    } = err
+    else {
+        panic!("expected Error::Api, got {err:?}");
+    };
+    assert_eq!(status, 429);
+    assert_eq!(kind, ApiErrorKind::RateLimit);
+    assert_eq!(message, "quota");
+    assert!(parsed.unwrap().get("error").is_some());
+
+    // Mid-stream, after normal chunks, the frame still raises.
+    let mut parser = format.stream_parser();
+    let text = json!({
+        "candidates": [{"content": {"parts": [{"text": "partial"}], "role": "model"}, "index": 0}],
+        "responseId": "r-err",
+    });
+    let (events, warnings) = parser
+        .parse(&llm_api::http::SseEvent::new(None, text.to_string()))
+        .unwrap();
+    assert!(warnings.is_empty());
+    assert!(matches!(events[0], StreamEvent::MessageStart { .. }));
+    let err = parser
+        .parse(&llm_api::http::SseEvent::new(None, frame.to_string()))
+        .unwrap_err();
+    assert!(matches!(err, Error::Api { status: 429, .. }));
+
+    // Without a gRPC status string the numeric code alone classifies.
+    let mut parser = format.stream_parser();
+    let frame = json!({"error": {"code": 503, "message": "overloaded"}});
+    let err = parser
+        .parse(&llm_api::http::SseEvent::new(None, frame.to_string()))
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        Error::Api {
+            status: 503,
+            kind: ApiErrorKind::Overloaded,
+            ..
+        }
+    ));
+
+    // A gRPC numeric code that is not a plausible HTTP status falls back
+    // to the transport's 200; the gRPC status string still drives the kind.
+    let mut parser = format.stream_parser();
+    let frame = json!({"error": {"code": 13, "message": "boom", "status": "INTERNAL"}});
+    let err = parser
+        .parse(&llm_api::http::SseEvent::new(None, frame.to_string()))
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        Error::Api {
+            status: 200,
+            kind: ApiErrorKind::ServerError,
+            ..
+        }
+    ));
+
+    // After the protocol terminator an error frame downgrades like any
+    // other unattributable data instead of failing a complete stream.
+    let mut parser = format.stream_parser();
+    let terminal = json!({
+        "candidates": [{
+            "content": {"parts": [{"text": "hi"}], "role": "model"},
+            "finishReason": "STOP",
+            "index": 0,
+        }],
+        "responseId": "r-x",
+    });
+    parser
+        .parse(&llm_api::http::SseEvent::new(None, terminal.to_string()))
+        .unwrap();
+    let (events, warnings) = parser
+        .parse(&llm_api::http::SseEvent::new(
+            None,
+            json!({"error": {"code": 500}}).to_string(),
+        ))
+        .unwrap();
+    assert!(matches!(events[..], [StreamEvent::Unknown]));
+    assert_eq!(warnings[0].code, WarningCode::UnknownStreamEvent);
+    parser.finish().unwrap();
+}
+
+#[test]
+fn contentless_chunks_surface_as_unknown_with_one_warning() {
+    let stream = concat!(
+        "data: {}\n\n",
+        "data: {}\n\n",
+        r#"data: {"candidates":[{"content":{"parts":[{"text":"hi"}],"role":"model"},"finishReason":"STOP","index":0}],"responseId":"r-c"}"#,
+        "\n\n",
+    );
+    let (events, warnings, finish) = run_stream(stream);
+    finish.unwrap();
+    // Unknown per contentless chunk (so include_raw exposes each); the
+    // warning fires once per stream.
+    assert!(matches!(events[0], StreamEvent::Unknown));
+    assert!(matches!(events[1], StreamEvent::Unknown));
+    let empties: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.code == WarningCode::MalformedField)
+        .collect();
+    assert_eq!(empties.len(), 1, "{warnings:?}");
+    assert_eq!(empties[0].location, "/candidates");
+    // MessageStart waits for the first chunk carrying a modeled signal.
+    assert!(matches!(events[2], StreamEvent::MessageStart { .. }));
+    let resp = accumulate(&events);
+    assert_eq!(resp.text(), "hi");
+    assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
+}
+
+#[test]
+fn usage_only_chunks_are_not_flagged_as_contentless() {
+    let stream = concat!(
+        r#"data: {"candidates":[{"content":{"parts":[{"text":"a"}],"role":"model"},"index":0}],"responseId":"r-u2"}"#,
+        "\n\n",
+        r#"data: {"usageMetadata":{"promptTokenCount":3,"totalTokenCount":9}}"#,
+        "\n\n",
+        r#"data: {"candidates":[{"content":{"parts":[],"role":"model"},"finishReason":"STOP","index":0}],"responseId":"r-u2"}"#,
+        "\n\n",
+    );
+    let (events, warnings, finish) = run_stream(stream);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    finish.unwrap();
+    assert!(!events.iter().any(|e| matches!(e, StreamEvent::Unknown)));
+    let resp = accumulate(&events);
+    assert_eq!(resp.usage.as_ref().unwrap().input_tokens, 3);
+    assert_eq!(resp.usage.as_ref().unwrap().total_tokens, Some(9));
+}
+
+#[test]
+fn malformed_usage_in_a_chunk_degrades_without_killing_the_stream() {
+    // Malformed usage on the only (terminal) chunk: candidates still parse,
+    // usage degrades to none with a warning.
+    let stream = concat!(
+        r#"data: {"candidates":[{"content":{"parts":[{"text":"b"}],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":1.5},"responseId":"r-u3"}"#,
+        "\n\n",
+    );
+    let (events, warnings, finish) = run_stream(stream);
+    finish.unwrap();
+    let w = warnings
+        .iter()
+        .find(|w| w.code == WarningCode::MalformedField)
+        .unwrap_or_else(|| panic!("expected usage warning, got {warnings:?}"));
+    assert_eq!(w.location, "/usageMetadata");
+    let resp = accumulate(&events);
+    assert_eq!(resp.text(), "b");
+    assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
+    assert!(resp.usage.is_none());
+
+    // A malformed terminal snapshot must not zero out the last good one.
+    let stream = concat!(
+        r#"data: {"candidates":[{"content":{"parts":[{"text":"c"}],"role":"model"},"index":0}],"usageMetadata":{"promptTokenCount":4,"totalTokenCount":6},"responseId":"r-u4"}"#,
+        "\n\n",
+        r#"data: {"candidates":[{"content":{"parts":[],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":"oops"},"responseId":"r-u4"}"#,
+        "\n\n",
+    );
+    let (events, warnings, finish) = run_stream(stream);
+    finish.unwrap();
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|w| w.code == WarningCode::MalformedField)
+            .count(),
+        1
+    );
+    let resp = accumulate(&events);
+    assert_eq!(resp.usage.as_ref().unwrap().input_tokens, 4);
+    assert_eq!(resp.usage.as_ref().unwrap().total_tokens, Some(6));
 }
 
 #[test]

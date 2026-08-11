@@ -484,6 +484,73 @@ fn parse_unknown_role_kept_verbatim_and_round_trips() {
 }
 
 #[test]
+fn malformed_message_entries_degrade_to_opaque_passthrough() {
+    // Per-message leniency (aligned with the CC parser): one malformed
+    // entry degrades to a lone verbatim Opaque block with a warning; the
+    // healthy neighbours parse normally.
+    let body = json!({
+        "model": "m", "max_tokens": 5,
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+            {"role": "user"},                        // missing content
+            {"content": "orphan"},                   // missing role
+            {"role": "user", "content": 5},          // content of a wrong type
+            {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+        ],
+    });
+    let (req, warnings) = AnthropicMessages
+        .parse_request(&serde_json::to_vec(&body).unwrap())
+        .unwrap();
+    assert_eq!(req.messages.len(), 5);
+    assert!(matches!(&req.messages[0].content[0], ContentBlock::Text { text, .. } if text == "hi"));
+    assert_eq!(req.messages[4].role, Role::Assistant);
+    assert!(matches!(&req.messages[4].content[0], ContentBlock::Text { text, .. } if text == "ok"));
+    for (i, original) in [
+        (1, json!({"role": "user"})),
+        (2, json!({"content": "orphan"})),
+        (3, json!({"role": "user", "content": 5})),
+    ] {
+        assert_eq!(req.messages[i].role, Role::User);
+        match &req.messages[i].content[..] {
+            [ContentBlock::Opaque { format, value, .. }] => {
+                assert_eq!(format, FMT);
+                assert_eq!(*value, original);
+            }
+            other => panic!("unexpected content for {i}: {other:?}"),
+        }
+    }
+    let locations: Vec<&str> = warnings
+        .iter()
+        .filter(|w| w.code == WarningCode::MalformedField)
+        .map(|w| w.location.as_str())
+        .collect();
+    assert_eq!(locations, ["/messages/1", "/messages/2", "/messages/3"]);
+
+    // Role-bearing degraded entries rebuild verbatim as standalone wire
+    // messages (the unknown-role passthrough home).
+    let rebuilt = rebuild(&req, "m");
+    assert_eq!(rebuilt["messages"][1], json!({"role": "user"}));
+    assert_eq!(
+        rebuilt["messages"][3],
+        json!({"role": "user", "content": 5})
+    );
+
+    // A non-object entry takes the same path.
+    let body2 = json!({
+        "model": "m", "max_tokens": 5,
+        "messages": ["not a message"],
+    });
+    let (req2, warnings2) = AnthropicMessages
+        .parse_request(&serde_json::to_vec(&body2).unwrap())
+        .unwrap();
+    assert!(matches!(
+        &req2.messages[0].content[..],
+        [ContentBlock::Opaque { value, .. }] if *value == json!("not a message")
+    ));
+    assert_eq!(warnings2.len(), 1);
+}
+
+#[test]
 fn over_u32_numbers_warn_and_round_trip_via_extra() {
     // `max_tokens` / `top_k` above the IR's u32 range are not clamped: the
     // IR field stays unset, a MalformedField warning discloses it, and the
@@ -598,6 +665,46 @@ fn usage_input_sum_saturates_instead_of_overflowing() {
     let usage = resp.usage.as_ref().unwrap();
     assert_eq!(usage.input_tokens, u64::MAX);
     assert_eq!(usage.output_tokens, 1);
+}
+
+#[test]
+fn malformed_response_usage_degrades_with_warning() {
+    // The response is already billed: a usage object that fails the wire
+    // shape must not fail the response or zero the counts silently — the
+    // usage is dropped and disclosed.
+    let make = |usage: Value| {
+        json!({
+            "id": "m", "type": "message", "role": "assistant", "model": "x",
+            "content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn",
+            "usage": usage,
+        })
+    };
+    let resp = AnthropicMessages
+        .parse_response(
+            &serde_json::to_vec(&make(json!({"input_tokens": 12.5, "output_tokens": 3}))).unwrap(),
+            &meta(),
+        )
+        .unwrap();
+    assert_eq!(resp.text(), "hi");
+    assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
+    assert!(resp.usage.is_none());
+    assert_eq!(resp.warnings.len(), 1, "{:?}", resp.warnings);
+    assert_eq!(resp.warnings[0].code, WarningCode::MalformedField);
+    assert_eq!(resp.warnings[0].location, "/usage");
+
+    // A non-object usage degrades the same way.
+    let resp2 = AnthropicMessages
+        .parse_response(&serde_json::to_vec(&make(json!("lots"))).unwrap(), &meta())
+        .unwrap();
+    assert!(resp2.usage.is_none());
+    assert_eq!(resp2.warnings.len(), 1, "{:?}", resp2.warnings);
+
+    // `usage: null` stays silently absent (a well-formed "no usage").
+    let resp3 = AnthropicMessages
+        .parse_response(&serde_json::to_vec(&make(Value::Null)).unwrap(), &meta())
+        .unwrap();
+    assert!(resp3.usage.is_none());
+    assert!(resp3.warnings.is_empty(), "{:?}", resp3.warnings);
 }
 
 #[test]
@@ -830,7 +937,12 @@ fn models_request_and_response() {
         .build_models_request(&ctx_for("claude-sonnet-5"), None)
         .unwrap();
     assert_eq!(built.method.as_str(), "GET");
-    assert_eq!(built.url.to_string(), "https://api.anthropic.com/v1/models");
+    // The maximum page size keeps the listing to as few requests as
+    // possible (default `limit` is only 20).
+    assert_eq!(
+        built.url.to_string(),
+        "https://api.anthropic.com/v1/models?limit=1000"
+    );
     assert_eq!(
         built.headers.get("anthropic-version").unwrap(),
         "2023-06-01"
@@ -842,7 +954,7 @@ fn models_request_and_response() {
         .unwrap();
     assert_eq!(
         with_cursor.url.to_string(),
-        "https://api.anthropic.com/v1/models?after_id=claude-opus-4-6"
+        "https://api.anthropic.com/v1/models?limit=1000&after_id=claude-opus-4-6"
     );
 
     let (models, next) = AnthropicMessages
@@ -864,6 +976,36 @@ fn models_request_and_response() {
         .unwrap();
     assert!(models2.is_empty());
     assert_eq!(next2, None);
+}
+
+#[test]
+fn models_request_protects_pagination_keys() {
+    // limit/after_id are pagination-mechanism keys owned by the library; a
+    // user query key with the same name is a conflict, not a silent
+    // override.
+    let mut c = ctx_for("claude-sonnet-5");
+    c.extra_query.push(("limit".to_owned(), "5".to_owned()));
+    assert!(matches!(
+        AnthropicMessages.build_models_request(&c, None),
+        Err(Error::Conversion(ConversionError::ProtectedQueryKey { .. }))
+    ));
+
+    let mut c2 = ctx_for("claude-sonnet-5");
+    c2.extra_query
+        .push(("after_id".to_owned(), "m-0".to_owned()));
+    assert!(matches!(
+        AnthropicMessages.build_models_request(&c2, Some("m-1")),
+        Err(Error::Conversion(ConversionError::ProtectedQueryKey { .. }))
+    ));
+
+    // Unrelated user query keys still pass through.
+    let mut c3 = ctx_for("claude-sonnet-5");
+    c3.extra_query.push(("beta".to_owned(), "true".to_owned()));
+    let built = AnthropicMessages.build_models_request(&c3, None).unwrap();
+    assert_eq!(
+        built.url.to_string(),
+        "https://api.anthropic.com/v1/models?limit=1000&beta=true"
+    );
 }
 
 #[test]

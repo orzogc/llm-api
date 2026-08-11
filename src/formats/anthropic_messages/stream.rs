@@ -1,7 +1,7 @@
 //! Anthropic SSE events → unified [`StreamEvent`]s (near-direct mapping,
 //! § 9).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
 
@@ -69,6 +69,12 @@ pub(crate) struct AnthropicStreamParser {
     /// input-side fields).
     usage: Map<String, Value>,
     blocks: BTreeMap<usize, OpenBlock>,
+    /// Unmodeled (`Opaque`) block indices that already warned about a
+    /// known-kind delta addressed to them; every such delta still surfaces
+    /// as [`BlockDelta::Other`].
+    warned_opaque_deltas: BTreeSet<usize>,
+    /// Member names of recognized deltas already warned as unmodeled.
+    warned_delta_members: BTreeSet<String>,
     terminated: bool,
 }
 
@@ -78,8 +84,15 @@ impl AnthropicStreamParser {
     }
 
     /// Overlays `delta` usage fields onto the cached snapshot and returns
-    /// the unified cumulative usage.
-    fn merge_usage(&mut self, delta: Option<&Map<String, Value>>) -> Option<crate::ir::Usage> {
+    /// the unified cumulative usage. A snapshot that fails the wire shape
+    /// degrades to `None` with a warning — never a dead stream, never
+    /// silent zeros; the overlay is kept, so a later valid cumulative
+    /// snapshot heals subsequent events.
+    fn merge_usage(
+        &mut self,
+        delta: Option<&Map<String, Value>>,
+        warnings: &mut Vec<ConversionWarning>,
+    ) -> Option<crate::ir::Usage> {
         if let Some(delta) = delta {
             for (k, v) in delta {
                 self.usage.insert(k.clone(), v.clone());
@@ -89,8 +102,17 @@ impl AnthropicStreamParser {
             return None;
         }
         let raw = Value::Object(self.usage.clone());
-        let wire: UsageWire = serde_json::from_value(raw.clone()).unwrap_or_default();
-        Some(unify_usage(&wire, raw))
+        match serde_json::from_value::<UsageWire>(raw.clone()) {
+            Ok(wire) => Some(unify_usage(&wire, raw)),
+            Err(e) => {
+                warnings.push(pwarn(
+                    WarningCode::MalformedField,
+                    "/usage",
+                    format!("usage failed to parse and was omitted from this event: {e}"),
+                ));
+                None
+            }
+        }
     }
 
     fn start_block(
@@ -230,13 +252,16 @@ impl AnthropicStreamParser {
         start
     }
 
+    /// Applies one `content_block_delta`. Usually yields one delta; a
+    /// recognized delta carrying unmodeled members yields a trailing
+    /// [`BlockDelta::Other`] with those members.
     fn apply_delta(
         &mut self,
         index: usize,
         delta: &Value,
         raw: &str,
         warnings: &mut Vec<ConversionWarning>,
-    ) -> Result<BlockDelta> {
+    ) -> Result<Vec<BlockDelta>> {
         let Some(open) = self.blocks.get_mut(&index) else {
             return Err(perr(
                 format!("content_block_delta for unknown block index {index}"),
@@ -250,11 +275,20 @@ impl AnthropicStreamParser {
                 raw,
             )
         };
+        let members = &mut self.warned_delta_members;
         match (open, kind) {
             (OpenBlock::Text { text, .. }, "text_delta") => {
                 let fragment = delta.get("text").and_then(Value::as_str).unwrap_or("");
                 text.push_str(fragment);
-                Ok(BlockDelta::Text(fragment.to_owned()))
+                let mut out = vec![BlockDelta::Text(fragment.to_owned())];
+                out.extend(surface_unmodeled_members(
+                    delta,
+                    kind,
+                    &["text"],
+                    members,
+                    warnings,
+                ));
+                Ok(out)
             }
             (OpenBlock::Text { citations, .. }, "citations_delta") => {
                 // Recognized but unmodeled: surfaced as Other and folded
@@ -262,17 +296,33 @@ impl AnthropicStreamParser {
                 if let Some(c) = delta.get("citation") {
                     citations.push(c.clone());
                 }
-                Ok(BlockDelta::Other(delta.clone()))
+                Ok(vec![BlockDelta::Other(delta.clone())])
             }
             (OpenBlock::Thinking { text, .. }, "thinking_delta") => {
                 let fragment = delta.get("thinking").and_then(Value::as_str).unwrap_or("");
                 text.push_str(fragment);
-                Ok(BlockDelta::Thinking(fragment.to_owned()))
+                let mut out = vec![BlockDelta::Thinking(fragment.to_owned())];
+                out.extend(surface_unmodeled_members(
+                    delta,
+                    kind,
+                    &["thinking"],
+                    members,
+                    warnings,
+                ));
+                Ok(out)
             }
             (OpenBlock::Thinking { signature, .. }, "signature_delta") => {
                 let fragment = delta.get("signature").and_then(Value::as_str).unwrap_or("");
                 signature.push_str(fragment);
-                Ok(BlockDelta::Signature(fragment.to_owned()))
+                let mut out = vec![BlockDelta::Signature(fragment.to_owned())];
+                out.extend(surface_unmodeled_members(
+                    delta,
+                    kind,
+                    &["signature"],
+                    members,
+                    warnings,
+                ));
+                Ok(out)
             }
             (OpenBlock::ToolUse { json, .. }, "input_json_delta") => {
                 let fragment = delta
@@ -280,7 +330,15 @@ impl AnthropicStreamParser {
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 json.push_str(fragment);
-                Ok(BlockDelta::ToolArguments(fragment.to_owned()))
+                let mut out = vec![BlockDelta::ToolArguments(fragment.to_owned())];
+                out.extend(surface_unmodeled_members(
+                    delta,
+                    kind,
+                    &["partial_json"],
+                    members,
+                    warnings,
+                ));
+                Ok(out)
             }
             (OpenBlock::Opaque { json, .. }, "input_json_delta") => {
                 // Server-side tool use streams input fragments into an
@@ -290,7 +348,7 @@ impl AnthropicStreamParser {
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 json.push_str(fragment);
-                Ok(BlockDelta::Other(delta.clone()))
+                Ok(vec![BlockDelta::Other(delta.clone())])
             }
             (OpenBlock::Opaque { value, .. }, "compaction_delta") => {
                 if value.is_object() {
@@ -302,7 +360,26 @@ impl AnthropicStreamParser {
                         value["encrypted_content"] = enc.clone();
                     }
                 }
-                Ok(BlockDelta::Other(delta.clone()))
+                Ok(vec![BlockDelta::Other(delta.clone())])
+            }
+            (
+                OpenBlock::Opaque { .. },
+                "text_delta" | "thinking_delta" | "signature_delta" | "citations_delta",
+            ) => {
+                // The block's shape is unknown, so nothing is folded (no
+                // content is fabricated); the delta is surfaced verbatim
+                // and the degrade is disclosed once per block.
+                if self.warned_opaque_deltas.insert(index) {
+                    warnings.push(pwarn(
+                        WarningCode::MalformedField,
+                        "/delta",
+                        format!(
+                            "known delta `{kind}` addressed to an unmodeled block; \
+                             surfaced without folding"
+                        ),
+                    ));
+                }
+                Ok(vec![BlockDelta::Other(delta.clone())])
             }
             (
                 _,
@@ -317,7 +394,7 @@ impl AnthropicStreamParser {
                     "/delta",
                     format!("unknown content_block_delta type `{other}`"),
                 ));
-                Ok(BlockDelta::Other(delta.clone()))
+                Ok(vec![BlockDelta::Other(delta.clone())])
             }
         }
     }
@@ -414,6 +491,41 @@ impl AnthropicStreamParser {
     }
 }
 
+/// Surfaces members of a recognized delta beyond `type` and its consumed
+/// keys as one extra [`BlockDelta::Other`] (payload `{"type": <kind>,
+/// ...members}`). Transient by design: the members are not folded into the
+/// finalized block. Warns once per member name per stream.
+fn surface_unmodeled_members(
+    delta: &Value,
+    kind: &str,
+    consumed: &[&str],
+    warned: &mut BTreeSet<String>,
+    warnings: &mut Vec<ConversionWarning>,
+) -> Option<BlockDelta> {
+    let obj = delta.as_object()?;
+    let rest: Map<String, Value> = obj
+        .iter()
+        .filter(|(k, _)| k.as_str() != "type" && !consumed.contains(&k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    if rest.is_empty() {
+        return None;
+    }
+    for name in rest.keys() {
+        if warned.insert(name.clone()) {
+            warnings.push(pwarn(
+                WarningCode::MalformedField,
+                "/delta",
+                format!("unmodeled `{name}` member on `{kind}` surfaced as a block delta"),
+            ));
+        }
+    }
+    let mut payload = Map::new();
+    payload.insert("type".to_owned(), Value::from(kind));
+    payload.extend(rest);
+    Some(BlockDelta::Other(Value::Object(payload)))
+}
+
 /// Fallback for a known-type block that fails its shape: keep it opaque.
 fn opaque_open(
     content_block: Value,
@@ -468,12 +580,19 @@ impl StreamParser for AnthropicStreamParser {
             "message_start" => {
                 let start: MessageStartEvent = serde_json::from_value(data)
                     .map_err(|e| perr(format!("invalid message_start: {e}"), &event.data))?;
-                if let Some(usage) = &start.message.usage
-                    && let Ok(Value::Object(map)) = serde_json::to_value(usage)
-                {
-                    self.usage = map;
+                // The raw usage seeds the snapshot only when it is an
+                // object; anything else degrades to a warning (the stream
+                // itself stays alive).
+                match start.message.usage {
+                    Some(Value::Object(map)) => self.usage = map,
+                    None | Some(Value::Null) => {}
+                    Some(_) => warnings.push(pwarn(
+                        WarningCode::MalformedField,
+                        "/usage",
+                        "message_start usage is not a JSON object; ignored",
+                    )),
                 }
-                let usage = self.merge_usage(None);
+                let usage = self.merge_usage(None, &mut warnings);
                 vec![StreamEvent::MessageStart {
                     id: start.message.id,
                     model: start.message.model,
@@ -492,11 +611,13 @@ impl StreamParser for AnthropicStreamParser {
             "content_block_delta" => {
                 let ev: ContentBlockDeltaEvent = serde_json::from_value(data)
                     .map_err(|e| perr(format!("invalid content_block_delta: {e}"), &event.data))?;
-                let delta = self.apply_delta(ev.index, &ev.delta, &event.data, &mut warnings)?;
-                vec![StreamEvent::BlockDelta {
-                    index: ev.index,
-                    delta,
-                }]
+                self.apply_delta(ev.index, &ev.delta, &event.data, &mut warnings)?
+                    .into_iter()
+                    .map(|delta| StreamEvent::BlockDelta {
+                        index: ev.index,
+                        delta,
+                    })
+                    .collect()
             }
             "content_block_stop" => {
                 let ev: ContentBlockStopEvent = serde_json::from_value(data)
@@ -510,7 +631,7 @@ impl StreamParser for AnthropicStreamParser {
             "message_delta" => {
                 let ev: MessageDeltaEvent = serde_json::from_value(data)
                     .map_err(|e| perr(format!("invalid message_delta: {e}"), &event.data))?;
-                let usage = self.merge_usage(ev.usage.as_ref());
+                let usage = self.merge_usage(ev.usage.as_ref(), &mut warnings);
                 let stop_reason = ev
                     .delta
                     .stop_reason

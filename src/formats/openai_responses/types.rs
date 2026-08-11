@@ -320,7 +320,9 @@ pub struct Response {
     /// Output items, kept raw for manual dispatch on `type`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub output: Vec<Value>,
-    /// Token usage.
+    /// Token usage. The response parser splits this field off and parses
+    /// it in a second, lenient stage so a malformed usage object degrades
+    /// to `None` (with a warning) instead of failing the 2xx response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
     /// Unknown fields.

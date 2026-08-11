@@ -23,6 +23,13 @@
 //!   gives every `function_call_output` its own `Tool` message. A
 //!   `message` item with an unknown role parses to an `Opaque` block
 //!   (`MalformedField` warning) and is re-emitted verbatim, in place.
+//! - A non-empty IR message whose blocks all dropped (foreign thinking,
+//!   foreign opaques, …) contributes no wire content and is omitted from
+//!   `input` with an `EmptyMessageDropped` warning on top of the
+//!   per-block ones. Truly empty IR messages keep their wire shape:
+//!   user/system/developer replay as a `message` item with an empty
+//!   `content` array; empty assistant/tool messages emit nothing,
+//!   silently.
 //! - `max_output_tokens` / `temperature` / `top_p` / `metadata` /
 //!   `prompt_cache_key` map directly; `stop_sequences` is dropped with a
 //!   semantic warning; `top_k` / `seed` / penalties drop with cosmetic
@@ -34,12 +41,20 @@
 //! - Tools (§ 4.5): flat `{type: "function", name, description,
 //!   parameters, strict}`; `parameters` and `strict` are
 //!   required-but-nullable upstream and always serialize (`null` when
-//!   unset). Hosted/built-in tools are `Tool::Opaque`.
+//!   unset). Hosted/built-in tools are `Tool::Opaque`. An explicitly
+//!   empty IR tool list replays as `"tools": []`; a non-empty list whose
+//!   members were all dropped omits the key — and `parallel_tool_calls`
+//!   follows the tools actually emitted, warning `ParallelToolCallsIgnored`
+//!   when none are.
 //! - Cache hints (§ 4.8): input content parts get
 //!   `prompt_cache_breakpoint: {"mode": "explicit"}` (hint TTLs warn —
 //!   OpenAI TTLs are request-level `prompt_cache_options.ttl`, settable
-//!   via `extra`). Hints on `ToolCall` / `ToolResult` blocks, assistant
-//!   text and nested tool-output blocks drop with cosmetic warnings.
+//!   via `extra`). A hint on a `ToolResult` block becomes a breakpoint on
+//!   the last part of its `function_call_output.output` array (output
+//!   parts are input parts upstream), forcing the array form past the
+//!   single-text string shorthand; with no part to carry it the hint
+//!   drops. Hints on `ToolCall` blocks, assistant text and nested
+//!   tool-output blocks drop with cosmetic warnings.
 //!
 //! # `extra` namespace conventions
 //!
@@ -80,6 +95,24 @@
 //!
 //! # Notes
 //!
+//! - Stop-reason derivation (§ 8): `status: "completed"` upgrades to
+//!   `ToolUse` when the output contains items awaiting developer-supplied
+//!   output — `function_call` or `custom_tool_call` (the official docs
+//!   call the latter "analogous" to the former). A `custom_tool_call`
+//!   itself still parses as an `Opaque` block, so `ToolUse` can co-occur
+//!   with call items visible only as `Opaque` (no typed `ToolCall`
+//!   block). Other waiting-type items (`mcp_approval_request`,
+//!   `local_shell_call`, …) do not participate and surface as `Opaque` —
+//!   callers driving those flows must inspect the blocks themselves.
+//! - A malformed `usage` object (e.g. non-integer token counts) degrades
+//!   to `Usage: None` with a `MalformedField` warning at `/usage`, in the
+//!   non-streaming response and the terminal stream snapshot alike — a
+//!   billed 2xx response never fails, and is never silently zeroed, over
+//!   its usage.
+//! - The official reference marks the `reasoning` item `id` required, but
+//!   `thinking_as_text` output and hand-built signed blocks without a
+//!   stored id serialize id-less: the library never fabricates ids and
+//!   lets the upstream adjudicate (see `types::ReasoningItem::id`).
 //! - `reasoning.encrypted_content` is populated by default on
 //!   `POST /v1/responses` per current official docs; for `store: false` /
 //!   ZDR setups the `include` flag is still relevant. The library never
@@ -244,16 +277,36 @@ impl ApiFormat for OpenAiResponses {
             .as_ref()
             .and_then(|v| serde_json::from_value::<types::ErrorBody>(v.clone()).ok())
             .and_then(|b| b.error);
-        let kind = match detail.as_ref().and_then(|d| d.error_type.as_deref()) {
-            Some("invalid_request_error") => ApiErrorKind::InvalidRequest,
-            Some("authentication_error") => ApiErrorKind::Auth,
-            Some("permission_error") => ApiErrorKind::PermissionDenied,
-            Some("not_found_error") => ApiErrorKind::NotFound,
-            Some("rate_limit_error" | "insufficient_quota" | "tokens") => ApiErrorKind::RateLimit,
-            Some("overloaded_error") => ApiErrorKind::Overloaded,
-            Some("server_error") => ApiErrorKind::ServerError,
-            _ => ApiErrorKind::from_status(status),
+        let error_type = detail.as_ref().and_then(|d| d.error_type.as_deref());
+        let code = detail.as_ref().and_then(|d| d.code.as_deref());
+        // The shared `error.type` mapping, also applied to `error.code`
+        // when the type misses.
+        let table = |s: &str| match s {
+            "invalid_request_error" => Some(ApiErrorKind::InvalidRequest),
+            "authentication_error" => Some(ApiErrorKind::Auth),
+            "permission_error" => Some(ApiErrorKind::PermissionDenied),
+            "not_found_error" => Some(ApiErrorKind::NotFound),
+            "rate_limit_error" | "insufficient_quota" | "tokens" => Some(ApiErrorKind::RateLimit),
+            "overloaded_error" => Some(ApiErrorKind::Overloaded),
+            "server_error" => Some(ApiErrorKind::ServerError),
+            _ => None,
         };
+        // Codes refine types (`openai_chat_completions` parity): OpenAI
+        // reports e.g. auth failures as `invalid_request_error` with
+        // `code: "invalid_api_key"` and quota exhaustion with
+        // `code: "insufficient_quota"`.
+        let refined = match code {
+            Some("invalid_api_key" | "invalid_organization" | "account_deactivated") => {
+                Some(ApiErrorKind::Auth)
+            }
+            Some("model_not_found") => Some(ApiErrorKind::NotFound),
+            Some("insufficient_quota" | "rate_limit_exceeded") => Some(ApiErrorKind::RateLimit),
+            _ => None,
+        };
+        let kind = refined
+            .or_else(|| error_type.and_then(table))
+            .or_else(|| code.and_then(table))
+            .unwrap_or_else(|| ApiErrorKind::from_status(status));
         let message = detail
             .as_ref()
             .and_then(|d| d.message.clone())

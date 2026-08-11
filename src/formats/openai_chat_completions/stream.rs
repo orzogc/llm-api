@@ -29,10 +29,17 @@
 //!   and an unknown or non-string declared `type` switches the call to
 //!   mirror mode — its payloads accumulate silently and fold verbatim
 //!   into the block extra, like the non-streaming verbatim entry mirror.
+//! - The channel fields are consumed only in their modeled shape (string
+//!   `content` / thinking field / `refusal`, array `tool_calls`; `null`
+//!   is the absent canonical form): any other value warns
+//!   `MalformedField` and stays an unknown delta field, taking the
+//!   unknown-field path below — nothing is silently dropped.
 //! - A choice `finish_reason` closes all open blocks and emits
 //!   `MessageDelta { stop_reason }`; a non-null chunk `usage` (the
 //!   `include_usage` final chunk, or dialects that attach usage to the
-//!   finish chunk) emits a `MessageDelta` usage snapshot.
+//!   finish chunk) emits a `MessageDelta` usage snapshot — a malformed
+//!   `usage` value degrades to no snapshot with a `MalformedField`
+//!   warning.
 //! - The literal `data: [DONE]` terminator emits `MessageStop`; a stream
 //!   that ends without it fails [`StreamParser::finish`] with
 //!   [`Error::TruncatedStream`], and anything received after it (data
@@ -51,7 +58,12 @@
 //!   message, the wire level they arrived at. Fields repeating across
 //!   chunks merge under Chat Completions delta semantics: strings
 //!   concatenate, arrays append, objects merge per key recursively,
-//!   anything else replaces (last wins).
+//!   anything else replaces (last wins). Unknown fields *inside*
+//!   `tool_calls[]` fragments follow a different rule — entry-level and
+//!   payload-level unknowns replace by key across fragments (last wins):
+//!   the wire defines no incremental semantics at that level, and
+//!   concatenating a static member re-sent on several fragments would
+//!   corrupt it (see [`ToolCallState`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -265,7 +277,12 @@ struct ToolCallState {
     mirror: Option<MirrorState>,
     /// Unknown entry-level fragment fields, mirrored into the finalized
     /// block extra (`function` / `custom` unknowns nested under their
-    /// payload key).
+    /// payload key). Repeats across fragments replace by key (last wins)
+    /// — deliberately not the delta-level concat/append rule of
+    /// [`merge_unknown_fields`]: the wire documents no incremental
+    /// semantics for entry-level unknowns, and a static member re-sent on
+    /// several fragments would corrupt under concatenation
+    /// (`"abc"` + `"abc"` = `"abcabc"`).
     extra: Map<String, Value>,
 }
 
@@ -788,15 +805,39 @@ impl ChatCompletionsStreamParser {
                 ));
             }
         }
-        if let Some(s) = delta.get("content").and_then(Value::as_str) {
-            self.channel_delta(Channel::Content, s, events, warnings);
+        // The `content` / `refusal` channels and `tool_calls` mirror the
+        // thinking-field handling above: `null` is tier-1 silence, the
+        // modeled shape drives the channel, and any other value warns and
+        // stays an unknown delta field for the leftover scan below —
+        // nothing is silently dropped.
+        for (channel, key) in [(Channel::Content, "content"), (Channel::Refusal, "refusal")] {
+            match delta.get(key) {
+                None | Some(Value::Null) => {}
+                Some(Value::String(s)) => {
+                    self.channel_delta(channel, s, events, warnings);
+                }
+                Some(_) => {
+                    warnings.push(warn(
+                        WarningCode::MalformedField,
+                        format!("/choices/0/delta/{key}"),
+                        format!("non-string `{key}` kept verbatim as an unknown delta field"),
+                    ));
+                }
+            }
         }
-        if let Some(s) = delta.get("refusal").and_then(Value::as_str) {
-            self.channel_delta(Channel::Refusal, s, events, warnings);
-        }
-        if let Some(entries) = delta.get("tool_calls").and_then(Value::as_array) {
-            for (position, fragment) in entries.iter().enumerate() {
-                self.on_tool_call_fragment(fragment, position, events, warnings);
+        match delta.get("tool_calls") {
+            None | Some(Value::Null) => {}
+            Some(Value::Array(entries)) => {
+                for (position, fragment) in entries.iter().enumerate() {
+                    self.on_tool_call_fragment(fragment, position, events, warnings);
+                }
+            }
+            Some(_) => {
+                warnings.push(warn(
+                    WarningCode::MalformedField,
+                    "/choices/0/delta/tool_calls",
+                    "non-array `tool_calls` kept verbatim as an unknown delta field",
+                ));
             }
         }
         // Unknown delta fields: surface on the current channel block when
@@ -805,13 +846,20 @@ impl ChatCompletionsStreamParser {
         let mut leftover = Map::new();
         if let Some(obj) = delta.as_object() {
             for (key, value) in obj {
-                // The modeled keys; with a custom `reasoning_field` a wire
-                // `reasoning_content` is an ordinary unknown field and
-                // takes the leftover fold below. The configured field is
-                // consumed only when it carried thinking text — a
-                // non-string value (warned above) stays an unknown field.
-                let modeled = matches!(key.as_str(), "role" | "content" | "refusal" | "tool_calls")
-                    || (*key == self.reasoning_field && value.is_string());
+                // The modeled keys are consumed only when the value has
+                // the modeled shape — the malformed values warned above
+                // stay unknown fields and take the leftover fold below.
+                // `role` consumes any value: it is envelope membership
+                // (the accumulated message is assistant by construction)
+                // and the value itself is never used. With a custom
+                // `reasoning_field` a wire `reasoning_content` is an
+                // ordinary unknown field.
+                let modeled = match key.as_str() {
+                    "role" => true,
+                    "content" | "refusal" => value.is_string(),
+                    "tool_calls" => value.is_array(),
+                    _ => *key == self.reasoning_field && value.is_string(),
+                };
                 if modeled || value.is_null() {
                     continue;
                 }
@@ -942,7 +990,9 @@ fn route_payload(
     extend_nested_extra(state, kind.key(), unknowns);
 }
 
-/// Merges payload members into the object mirrored at `state.extra[key]`.
+/// Merges payload members into the object mirrored at `state.extra[key]`,
+/// replacing by key (last wins, like every entry-level mirror — see
+/// [`ToolCallState::extra`]).
 fn extend_nested_extra(state: &mut ToolCallState, key: &str, members: Map<String, Value>) {
     if members.is_empty() {
         return;
@@ -956,9 +1006,11 @@ fn extend_nested_extra(state: &mut ToolCallState, key: &str, members: Map<String
     }
 }
 
-/// Copies unmodeled entry-level fragment fields into the tool-call state;
-/// `id`, `type` and the payload objects have dedicated handling
-/// (`declared_type` and [`route_payload`]).
+/// Copies unmodeled entry-level fragment fields into the tool-call state,
+/// replacing by key (last wins — see [`ToolCallState::extra`] for why the
+/// delta-level concat/append rule does not apply here); `id`, `type` and
+/// the payload objects have dedicated handling (`declared_type` and
+/// [`route_payload`]).
 fn collect_fragment_extras(fragment: &Value, state: &mut ToolCallState) {
     let Some(obj) = fragment.as_object() else {
         return;
@@ -1170,7 +1222,13 @@ impl StreamParser for ChatCompletionsStreamParser {
             }
         }
 
-        let usage = chunk.get("usage").and_then(to_ir::usage_from_value);
+        // A `null` usage rides every content chunk (known-ignorable); a
+        // present value that fails to parse warns — the `include_usage`
+        // final chunk is billed data and must not vanish silently.
+        let usage = match chunk.get("usage") {
+            None | Some(Value::Null) => None,
+            Some(value) => to_ir::lenient_usage(value, &mut warnings),
+        };
         if let Some(reason) = finish_reason {
             self.close_open_blocks(&mut events, &mut warnings);
             events.push(StreamEvent::message_delta(

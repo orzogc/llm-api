@@ -101,8 +101,13 @@ pub fn request_to_ir(body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)> {
 pub fn response_to_ir(body: &[u8], meta: &ResponseMeta) -> Result<Response> {
     let raw: Value =
         serde_json::from_slice(body).map_err(|e| parse_failure("response", e, body))?;
+    // Two-stage parse: `usage` is split off and parsed leniently below so
+    // a malformed usage object degrades to `None` with a warning instead
+    // of failing the whole (already billed) 2xx response.
+    let mut envelope = raw.clone();
+    let usage_value = envelope.as_object_mut().and_then(|o| o.remove("usage"));
     let wire: types::Response =
-        serde_json::from_value(raw.clone()).map_err(|e| parse_failure("response", e, body))?;
+        serde_json::from_value(envelope).map_err(|e| parse_failure("response", e, body))?;
     if wire.status.as_deref() == Some("failed") {
         return Err(failed_response_error(
             meta.status,
@@ -115,10 +120,10 @@ pub fn response_to_ir(body: &[u8], meta: &ResponseMeta) -> Result<Response> {
     }
     let mut warnings = Vec::new();
     let mut blocks = Vec::new();
-    let mut has_function_call = false;
+    let mut has_pending_tool_call = false;
     for (i, item) in wire.output.iter().enumerate() {
-        if item.get("type").and_then(Value::as_str) == Some("function_call") {
-            has_function_call = true;
+        if awaits_tool_output(item) {
+            has_pending_tool_call = true;
         }
         blocks.extend(assistant_item_to_blocks(
             item,
@@ -126,20 +131,21 @@ pub fn response_to_ir(body: &[u8], meta: &ResponseMeta) -> Result<Response> {
             &mut warnings,
         ));
     }
+    let usage = usage_lenient(usage_value.as_ref(), &mut warnings);
     let message = Message::assistant(blocks);
     let stop_reason = derive_stop_reason(
         wire.status.as_deref(),
         wire.incomplete_details
             .as_ref()
             .and_then(|d| d.reason.as_deref()),
-        has_function_call,
+        has_pending_tool_call,
     );
     let stop_reason = normalize_stop_reason(&message, stop_reason);
     let mut response = Response::new(message);
     response.id = wire.id;
     response.model = wire.model;
     response.stop_reason = stop_reason;
-    response.usage = wire.usage.as_ref().map(usage_to_ir);
+    response.usage = usage;
     response.status = meta.status;
     response.headers = meta.headers.clone();
     response.raw = Some(raw);
@@ -147,13 +153,26 @@ pub fn response_to_ir(body: &[u8], meta: &ResponseMeta) -> Result<Response> {
     Ok(response)
 }
 
+/// Whether an output item is a call awaiting developer-supplied output —
+/// `function_call` or `custom_tool_call` ("analogous to `function_call`"
+/// per the official reference). These drive the § 8 `EndTurn` → `ToolUse`
+/// upgrade; other waiting-type items (`mcp_approval_request`,
+/// `local_shell_call`, …) stay `Opaque` and do not participate.
+pub(crate) fn awaits_tool_output(item: &Value) -> bool {
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("function_call" | "custom_tool_call")
+    )
+}
+
 /// § 8 stop-reason derivation for the Responses API: `status` +
-/// `incomplete_details.reason` + the presence of `function_call` output
-/// items. The core `normalize_stop_reason` still runs afterwards.
+/// `incomplete_details.reason` + the presence of output items awaiting
+/// developer-supplied output (see [`awaits_tool_output`]). The core
+/// `normalize_stop_reason` still runs afterwards.
 pub(crate) fn derive_stop_reason(
     status: Option<&str>,
     incomplete_reason: Option<&str>,
-    has_function_call: bool,
+    has_pending_tool_call: bool,
 ) -> Option<StopReason> {
     let base = match status {
         Some("completed") => Some(StopReason::EndTurn),
@@ -166,7 +185,7 @@ pub(crate) fn derive_stop_reason(
         Some("in_progress" | "queued") | None => None,
         Some(other) => Some(StopReason::Other(other.to_owned())),
     };
-    if base == Some(StopReason::EndTurn) && has_function_call {
+    if base == Some(StopReason::EndTurn) && has_pending_tool_call {
         Some(StopReason::ToolUse)
     } else {
         base
@@ -228,14 +247,30 @@ pub(crate) fn usage_to_ir(u: &types::Usage) -> Usage {
     }
 }
 
-/// Parses a usage object out of a raw JSON value, ignoring non-objects.
-pub(crate) fn usage_from_value(value: &Value) -> Option<Usage> {
-    if !value.is_object() {
+/// Lenient usage parse (§ 8 degradation): absent or `null` is `None`
+/// silently; any other shape that fails the typed parse degrades to
+/// `None` with a `MalformedField` warning at `/usage`. A billed 2xx
+/// response or stream never fails — and is never silently zeroed — over
+/// its usage object.
+pub(crate) fn usage_lenient(
+    value: Option<&Value>,
+    warnings: &mut Vec<ConversionWarning>,
+) -> Option<Usage> {
+    let value = value?;
+    if value.is_null() {
         return None;
     }
-    serde_json::from_value::<types::Usage>(value.clone())
-        .ok()
-        .map(|u| usage_to_ir(&u))
+    match serde_json::from_value::<types::Usage>(value.clone()) {
+        Ok(u) => Some(usage_to_ir(&u)),
+        Err(e) => {
+            warnings.push(warn(
+                WarningCode::MalformedField,
+                "/usage",
+                format!("`usage` failed to parse and was dropped: {e}"),
+            ));
+            None
+        }
+    }
 }
 
 /// Which IR home an input item belongs to.

@@ -34,6 +34,26 @@
 //!   the marker is consumed on re-serialization.
 //! - Unmodeled content blocks (`document`, `server_tool_use`, tool-result
 //!   variants, …) are preserved in place as `Opaque` nodes.
+//! - `parse_request` handles `messages[]` entries one by one: a malformed
+//!   entry degrades to a lone verbatim `Opaque` block with a warning
+//!   instead of failing the whole request.
+//! - A non-empty IR message that serializes to zero wire content (e.g. a
+//!   foreign thinking-only turn) is omitted from `messages` with an
+//!   `EmptyMessageDropped` warning; a truly empty IR message still
+//!   serializes as `content: []`.
+//! - `usage` parses leniently on responses and streams: a malformed usage
+//!   degrades to no usage plus a `MalformedField` warning (the streaming
+//!   snapshot heals on later valid cumulative usage); `count_tokens` stays
+//!   fail-loud.
+//! - Streaming: a known delta addressed to an unmodeled block, and
+//!   unmodeled members of recognized deltas, surface as
+//!   [`crate::ir::BlockDelta::Other`] with warnings instead of failing the
+//!   stream; a delta kind mismatched against a known-shape block is still a
+//!   protocol error.
+//! - `InvalidBlockForRole` locations are IR coordinates
+//!   (`/messages/{i}/content/{j}`, or `/system/{i}` for `Request.system`).
+//! - The models listing requests `limit=1000` per page; `limit`/`after_id`
+//!   are protected query keys.
 
 use serde_json::Value;
 
@@ -144,11 +164,20 @@ impl ApiFormat for AnthropicMessages {
     }
 
     fn build_models_request(&self, ctx: &BuildCtx, cursor: Option<&str>) -> Result<BuiltRequest> {
-        let mut extra_query = ctx.extra_query.clone();
+        // limit/after_id are pagination-mechanism keys owned by the
+        // library (§ 13); user query keys with the same names conflict.
+        let mut protected: Vec<(&str, &str)> = vec![("limit", "1000")];
         if let Some(cursor) = cursor {
-            extra_query.push(("after_id".to_owned(), cursor.to_owned()));
+            protected.push(("after_id", cursor));
         }
-        let url = build_url(&ctx.url, "models", &ctx.model, None, &[], &extra_query)?;
+        let url = build_url(
+            &ctx.url,
+            "models",
+            &ctx.model,
+            None,
+            &protected,
+            &ctx.extra_query,
+        )?;
         let mut built = BuiltRequest::get(url);
         apply_default_headers(&ctx.format_options.anthropic, &mut built.headers)?;
         built.auth = Some(auth_scheme(&ctx.format_options.anthropic));

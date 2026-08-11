@@ -18,9 +18,11 @@ pub struct MessagesRequest {
     /// Model id or alias.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// The conversation.
+    /// The conversation (entries kept raw: each one parses leniently, so a
+    /// malformed message degrades to an opaque passthrough instead of
+    /// failing the whole request).
     #[serde(default)]
-    pub messages: Vec<MessageParam>,
+    pub messages: Vec<Value>,
     /// Maximum tokens to generate (required upstream).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
@@ -373,9 +375,11 @@ pub struct MessagesResponse {
     /// Matched custom stop sequence, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_sequence: Option<String>,
-    /// Token accounting.
+    /// Token accounting (kept raw: a usage object that fails the
+    /// [`UsageWire`] shape degrades to a warning with no usage instead of
+    /// failing an already-billed response or stream).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<UsageWire>,
+    pub usage: Option<Value>,
     /// Unknown fields (e.g. `stop_details`, `container`), preserved.
     #[serde(flatten)]
     pub extra: Map<String, Value>,

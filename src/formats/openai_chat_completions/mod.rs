@@ -48,9 +48,19 @@
 //!   rides block `extra` as `{"image_url": {"detail": …}}`.
 //! - Cache hints (§ 4.8): input content parts get
 //!   `prompt_cache_breakpoint: {"mode": "explicit"}`; hint TTLs warn
-//!   (`CacheTtlDropped`). Hints on `ToolCall` / `ToolResult` blocks,
+//!   (`CacheTtlDropped`). A `ToolResult` block hint becomes a breakpoint
+//!   on the last emitted content part of its tool message (every input
+//!   part accepts one upstream; parsing hoists it back), dropping with a
+//!   warning only when no part can carry it. Hints on `ToolCall` blocks,
 //!   assistant text and nested tool-output blocks drop with cosmetic
 //!   warnings. `Request.cache_key` → `prompt_cache_key`.
+//! - A non-empty IR message that serializes to zero wire content — every
+//!   block dropped, e.g. a foreign thinking-only assistant turn without
+//!   `thinking_as_text` — is omitted from `messages` with an
+//!   `EmptyMessageDropped` warning (semantic); genuinely empty IR
+//!   messages and verbatim whole-message Opaque replays pass through
+//!   unchanged. Messages with `tool_calls` or any surviving field are
+//!   never dropped.
 //! - Streaming builds set `stream: true` and inject
 //!   `stream_options: {"include_usage": true}` per
 //!   [`OpenAiChatCompletionsOptions::inject_include_usage`].
@@ -110,11 +120,41 @@
 //!   `User` with a warning. A message holding exactly one such Opaque node
 //!   (an object with a `role`) re-emits verbatim.
 //!
+//! # Response parsing (§ 8)
+//!
+//! `finish_reason` maps `stop` / `length` / `tool_calls` /
+//! `content_filter` per the § 8 table. The deprecated `function_call`
+//! value maps to `StopReason::Other("function_call")`, not `ToolUse`: the
+//! legacy channel is unmodeled — no `ToolCall` block is produced — so
+//! `Other` keeps the wire value without fabricating a tool-use stop that
+//! has no typed call attached. The channel itself is asymmetric between
+//! modes: a non-streaming `function_call` message field rides the
+//! assistant message extra and replays verbatim, while a stream
+//! delivering only `function_call` deltas (no text channel open) surfaces
+//! them as unknown events with one warning — the call data then survives
+//! only via the raw payloads (`include_raw`); with a text channel open
+//! the deltas fold into the block like any unknown delta field and replay
+//! on the message.
+//!
+//! Malformed values degrade, disclosed, instead of failing or vanishing:
+//! a non-string `content` / thinking field / `refusal` or a non-array
+//! `tool_calls` warns `MalformedField` and stays verbatim — in the
+//! message extra when parsing, as an unknown delta field when streaming
+//! (see [`ChatCompletionsStreamParser`]). A malformed `usage` object
+//! (float token counts from proxies, wrong shapes) never fails the billed
+//! 2xx response or chunk: it degrades to `usage: None` with a
+//! `MalformedField` warning, non-streaming and streaming alike.
+//!
 //! # Canonicalizations (§ 1)
 //!
 //! String content shorthands re-serialize as a string only for a single
 //! plain, non-empty `Text` block (no cache hint, no namespace extra) —
-//! everything else uses the part-array form; a string `stop` becomes a
+//! everything else uses the part-array form; a tool message whose
+//! `ToolResult` carries a cache hint always uses the part-array form (the
+//! breakpoint needs a part to sit on), overriding the string shorthand;
+//! an explicitly empty IR tool list replays as `"tools": []`, while a
+//! non-empty list whose entries were all dropped (foreign `Tool::Opaque`)
+//! omits the key; a string `stop` becomes a
 //! one-element array; legacy `max_tokens` becomes `max_completion_tokens`;
 //! `model`, `stream` and `stream_options` are configuration, not IR data,
 //! and are consumed on parse (`stream_options` members warn

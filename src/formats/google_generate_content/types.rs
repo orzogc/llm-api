@@ -401,9 +401,12 @@ pub struct GenerateContentResponse {
     /// Prompt content-filter feedback (set when the prompt is blocked).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_feedback: Option<PromptFeedback>,
-    /// Token usage for the request.
+    /// Token usage for the request. Kept as a raw value and decoded in a
+    /// second step ([`UsageMetadata`]) so a malformed usage block degrades
+    /// to a warning instead of failing the whole already-billed response
+    /// or stream chunk (§ 8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage_metadata: Option<UsageMetadata>,
+    pub usage_metadata: Option<Value>,
     /// Model version used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_version: Option<String>,

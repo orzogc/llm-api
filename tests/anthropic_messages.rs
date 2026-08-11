@@ -361,6 +361,81 @@ fn role_block_validity_is_structural() {
 }
 
 #[test]
+fn invalid_block_for_role_uses_ir_coordinates() {
+    // A hoisted leading System message shifts wire indices down; the error
+    // still points at the offending block's IR coordinate.
+    let r = req(vec![
+        Message::system_text("lead"),
+        Message::user_text("q"),
+        Message::assistant(vec![ContentBlock::tool_result_text(Some("t".into()), "x")]),
+    ]);
+    match AnthropicMessages.build_request(&r, &ctx()).unwrap_err() {
+        Error::Conversion(ConversionError::InvalidBlockForRole { role, location, .. }) => {
+            assert_eq!(role, Role::Assistant);
+            assert_eq!(location, "/messages/2/content/0");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    // Turn-group re-merge packs Tool + User into one wire message; the
+    // location stays IR-relative (wire would say /messages/2/content/2).
+    let r2 = req(vec![
+        Message::user_text("q"),
+        Message::assistant(vec![ContentBlock::tool_call_with_id("t1", "f", "{}")]),
+        Message::tool(vec![ContentBlock::tool_result_text(
+            Some("t1".into()),
+            "ok",
+        )])
+        .with_turn_group(1),
+        Message::user(vec![
+            ContentBlock::text("continue"),
+            ContentBlock::tool_call("g", "{}"),
+        ])
+        .with_turn_group(1),
+    ]);
+    match AnthropicMessages.build_request(&r2, &ctx()).unwrap_err() {
+        Error::Conversion(ConversionError::InvalidBlockForRole { role, location, .. }) => {
+            assert_eq!(role, Role::User);
+            assert_eq!(location, "/messages/3/content/1");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    // A hoisted System message's own invalid block: IR coordinates too
+    // (the wire location would be inside the top-level system array).
+    let r3 = req(vec![
+        Message::new(
+            Role::System,
+            vec![
+                ContentBlock::text("rules"),
+                ContentBlock::image_url("https://x/y.png"),
+            ],
+        ),
+        Message::user_text("q"),
+    ]);
+    match AnthropicMessages.build_request(&r3, &ctx()).unwrap_err() {
+        Error::Conversion(ConversionError::InvalidBlockForRole { role, location, .. }) => {
+            assert_eq!(role, Role::System);
+            assert_eq!(location, "/messages/0/content/1");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    // `Request.system` blocks report their own IR coordinate.
+    let mut r4 = req(vec![Message::user_text("q")]);
+    r4.system = Some(vec![
+        ContentBlock::text("ok"),
+        ContentBlock::image_url("https://x/y.png"),
+    ]);
+    match AnthropicMessages.build_request(&r4, &ctx()).unwrap_err() {
+        Error::Conversion(ConversionError::InvalidBlockForRole { location, .. }) => {
+            assert_eq!(location, "/system/1");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
 fn image_sources_map_and_assistant_images_drop() {
     let r = req(vec![Message::user(vec![
         ContentBlock::image_url("https://x/y.png"),
@@ -1259,6 +1334,114 @@ fn missing_thinking_with_tool_calls() {
         .insert(0, ContentBlock::thinking_signed("t", "s"));
     let (_, w3) = build(&r2);
     assert!(find(&w3, &WarningCode::MissingThinkingWithToolCalls).is_none());
+}
+
+#[test]
+fn empty_serialized_messages_are_omitted_with_warning() {
+    // A foreign thinking-only assistant turn (thinking_as_text off)
+    // serializes to zero blocks: the wire message is omitted instead of
+    // sending `content: []`, and the omission is disclosed.
+    let foreign =
+        ContentBlock::thinking_signed("t", "s").with_extra("openai_responses", "id", "rs_1");
+    let r = req(vec![
+        Message::user_text("q"),
+        Message::assistant(vec![foreign]),
+        Message::user_text("next"),
+    ]);
+    let (body, warnings) = build(&r);
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert_eq!(
+        messages[0]["content"],
+        json!([{"type": "text", "text": "q"}])
+    );
+    assert_eq!(
+        messages[1]["content"],
+        json!([{"type": "text", "text": "next"}])
+    );
+    let dropped: Vec<&ConversionWarning> = warnings
+        .iter()
+        .filter(|w| w.code == WarningCode::EmptyMessageDropped)
+        .collect();
+    assert_eq!(dropped.len(), 1, "{warnings:?}");
+    assert_eq!(dropped[0].location, "/messages");
+    assert_eq!(dropped[0].severity, WarningSeverity::Semantic);
+    assert!(
+        dropped[0].message.contains("IR message(s) 1"),
+        "{}",
+        dropped[0].message
+    );
+    // The block-level drop is disclosed too, re-addressed to the container
+    // (its positional wire location no longer exists).
+    let td = find(&warnings, &WarningCode::ThinkingDropped).unwrap();
+    assert_eq!(td.location, "/messages");
+
+    // Native thinking is unaffected.
+    let r2 = req(vec![
+        Message::user_text("q"),
+        Message::assistant(vec![ContentBlock::thinking_signed("t", "sig")]),
+        Message::user_text("next"),
+    ]);
+    let (body2, w2) = build(&r2);
+    assert_eq!(body2["messages"].as_array().unwrap().len(), 3);
+    assert!(find(&w2, &WarningCode::EmptyMessageDropped).is_none());
+
+    // A truly empty IR message still serializes as `content: []`, silently.
+    let r3 = req(vec![Message::user_text("q"), Message::user(vec![])]);
+    let (body3, w3) = build(&r3);
+    assert_eq!(body3["messages"][1], json!({"role": "user", "content": []}));
+    assert!(find(&w3, &WarningCode::EmptyMessageDropped).is_none());
+
+    // All wire messages omitted: the empty array is sent as-is (nothing is
+    // fabricated); the block- and message-level warnings disclose why.
+    let r4 = req(vec![Message::user(vec![ContentBlock::opaque(
+        "openai_responses",
+        json!({"x": 1}),
+    )])]);
+    let (body4, w4) = build(&r4);
+    assert_eq!(body4["messages"], json!([]));
+    assert!(find(&w4, &WarningCode::OpaqueDropped).is_some());
+    assert!(find(&w4, &WarningCode::EmptyMessageDropped).is_some());
+}
+
+#[test]
+fn merged_wire_message_omitted_only_when_fully_empty() {
+    // Same-role merge folds an unsigned foreign thinking-only message into
+    // its neighbour: with surviving neighbour content the wire message is
+    // kept, no omission.
+    let foreign = || ContentBlock::thinking("t").with_extra("openai_responses", "id", "x");
+    let mut c = ctx();
+    c.format_options.anthropic.merge_consecutive_roles = true;
+    let r = req(vec![
+        Message::user_text("q"),
+        Message::assistant(vec![foreign()]),
+        Message::assistant_text("more"),
+    ]);
+    let (body, warnings) = build_with(&r, &c);
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(
+        messages[1]["content"],
+        json!([{"type": "text", "text": "more"}])
+    );
+    assert!(find(&warnings, &WarningCode::EmptyMessageDropped).is_none());
+
+    // When the merged wire message ends up fully empty it is omitted; the
+    // warning names the non-empty IR message that lost its content (the
+    // truly empty neighbour is not blamed).
+    let r2 = req(vec![
+        Message::user_text("q"),
+        Message::assistant(vec![foreign()]),
+        Message::assistant(vec![]),
+    ]);
+    let (body2, w2) = build_with(&r2, &c);
+    assert_eq!(body2["messages"].as_array().unwrap().len(), 1);
+    let dropped = find(&w2, &WarningCode::EmptyMessageDropped).unwrap();
+    assert!(
+        dropped.message.contains("IR message(s) 1"),
+        "{}",
+        dropped.message
+    );
 }
 
 #[test]

@@ -366,6 +366,332 @@ fn server_tool_stream_stays_opaque_and_folds_input() {
 }
 
 #[test]
+fn known_delta_on_opaque_block_surfaces_without_failing() {
+    // A known-kind delta addressed to an unmodeled block cannot be folded
+    // (the block's shape is unknown; nothing is fabricated) but must not
+    // kill the stream: it surfaces as Other with one warning per block.
+    let mut parser = AnthropicMessages.stream_parser();
+    let (_, ws) = parser
+        .parse(&SseEvent::new(
+            Some("content_block_start"),
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"future_block","x":1}}"#,
+        ))
+        .unwrap();
+    assert!(ws.is_empty(), "{ws:?}");
+    let (events, ws) = parser
+        .parse(&SseEvent::new(
+            Some("content_block_delta"),
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#,
+        ))
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        &events[0],
+        StreamEvent::BlockDelta { index: 0, delta: BlockDelta::Other(v), .. }
+            if *v == json!({"type": "text_delta", "text": "hi"})
+    ));
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert_eq!(ws[0].code, WarningCode::MalformedField);
+    assert_eq!(ws[0].location, "/delta");
+    assert!(ws[0].message.contains("text_delta"), "{}", ws[0].message);
+    // Further known deltas on the same block still surface, without
+    // repeating the warning.
+    for delta in [
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"t"}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"s"}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{}}}"#,
+    ] {
+        let (events, ws) = parser
+            .parse(&SseEvent::new(Some("content_block_delta"), delta))
+            .unwrap();
+        assert!(matches!(
+            &events[0],
+            StreamEvent::BlockDelta {
+                delta: BlockDelta::Other(_),
+                ..
+            }
+        ));
+        assert!(ws.is_empty(), "{ws:?}");
+    }
+    // Nothing was folded into the block.
+    let (events, ws) = parser
+        .parse(&SseEvent::new(
+            Some("content_block_stop"),
+            r#"{"type":"content_block_stop","index":0}"#,
+        ))
+        .unwrap();
+    assert!(ws.is_empty(), "{ws:?}");
+    match &events[0] {
+        StreamEvent::BlockStop {
+            block: Some(ContentBlock::Opaque { value, .. }),
+            ..
+        } => assert_eq!(*value, json!({"type": "future_block", "x": 1})),
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    // A known-type block whose shape failed to parse opens as Opaque too
+    // (with its own warning) and benefits from the same degrade; the
+    // dedup set is per block index.
+    let (_, ws) = parser
+        .parse(&SseEvent::new(
+            Some("content_block_start"),
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"text"}}"#,
+        ))
+        .unwrap();
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert_eq!(ws[0].location, "/content_block_start/1");
+    let (events, ws) = parser
+        .parse(&SseEvent::new(
+            Some("content_block_delta"),
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"x"}}"#,
+        ))
+        .unwrap();
+    assert!(matches!(
+        &events[0],
+        StreamEvent::BlockDelta {
+            delta: BlockDelta::Other(_),
+            ..
+        }
+    ));
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert_eq!(ws[0].code, WarningCode::MalformedField);
+
+    // The stream still terminates cleanly.
+    parser
+        .parse(&SseEvent::new(
+            Some("content_block_stop"),
+            r#"{"type":"content_block_stop","index":1}"#,
+        ))
+        .unwrap();
+    let (events, _) = parser
+        .parse(&SseEvent::new(
+            Some("message_stop"),
+            r#"{"type":"message_stop"}"#,
+        ))
+        .unwrap();
+    assert_eq!(events, vec![StreamEvent::MessageStop]);
+    assert!(parser.finish().is_ok());
+}
+
+#[test]
+fn unmodeled_delta_members_surface_as_extra_other() {
+    // Members of a recognized delta beyond its consumed keys surface as a
+    // trailing Other event (transient: never folded into the block), with
+    // one warning per member name per stream.
+    let mut parser = AnthropicMessages.stream_parser();
+    parser
+        .parse(&SseEvent::new(
+            Some("content_block_start"),
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}"#,
+        ))
+        .unwrap();
+    let (events, ws) = parser
+        .parse(&SseEvent::new(
+            Some("content_block_delta"),
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"a","estimated_tokens":42}}"#,
+        ))
+        .unwrap();
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert!(matches!(
+        &events[0],
+        StreamEvent::BlockDelta { index: 0, delta: BlockDelta::Thinking(s), .. } if s == "a"
+    ));
+    assert!(matches!(
+        &events[1],
+        StreamEvent::BlockDelta { index: 0, delta: BlockDelta::Other(v), .. }
+            if *v == json!({"type": "thinking_delta", "estimated_tokens": 42})
+    ));
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert_eq!(ws[0].code, WarningCode::MalformedField);
+    assert_eq!(ws[0].location, "/delta");
+    assert!(
+        ws[0].message.contains("estimated_tokens"),
+        "{}",
+        ws[0].message
+    );
+    // The same member on a later delta still surfaces but no longer warns.
+    let (events, ws) = parser
+        .parse(&SseEvent::new(
+            Some("content_block_delta"),
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"b","estimated_tokens":43}}"#,
+        ))
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(matches!(
+        &events[1],
+        StreamEvent::BlockDelta { delta: BlockDelta::Other(v), .. }
+            if v["estimated_tokens"] == json!(43)
+    ));
+    assert!(ws.is_empty(), "{ws:?}");
+    // A delta without extra members behaves exactly as before.
+    let (events, ws) = parser
+        .parse(&SseEvent::new(
+            Some("content_block_delta"),
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"c"}}"#,
+        ))
+        .unwrap();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert!(matches!(
+        &events[0],
+        StreamEvent::BlockDelta { index: 0, delta: BlockDelta::Thinking(s), .. } if s == "c"
+    ));
+    assert!(ws.is_empty(), "{ws:?}");
+    // A new member name warns once, on any recognized delta kind.
+    let (events, ws) = parser
+        .parse(&SseEvent::new(
+            Some("content_block_delta"),
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"S","foo":1}}"#,
+        ))
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(matches!(
+        &events[0],
+        StreamEvent::BlockDelta {
+            delta: BlockDelta::Signature(s),
+            ..
+        } if s == "S"
+    ));
+    assert!(matches!(
+        &events[1],
+        StreamEvent::BlockDelta { delta: BlockDelta::Other(v), .. }
+            if *v == json!({"type": "signature_delta", "foo": 1})
+    ));
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(ws[0].message.contains("foo"), "{}", ws[0].message);
+    // The finalized block carries none of the transient members.
+    let (events, ws) = parser
+        .parse(&SseEvent::new(
+            Some("content_block_stop"),
+            r#"{"type":"content_block_stop","index":0}"#,
+        ))
+        .unwrap();
+    assert!(ws.is_empty(), "{ws:?}");
+    match &events[0] {
+        StreamEvent::BlockStop {
+            block:
+                Some(ContentBlock::Thinking {
+                    text,
+                    signature,
+                    extra,
+                    ..
+                }),
+            ..
+        } => {
+            assert_eq!(text.as_deref(), Some("abc"));
+            assert_eq!(signature.as_deref(), Some("S"));
+            assert!(extra.get(FMT).is_none(), "{extra:?}");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn malformed_usage_degrades_and_heals() {
+    // message_start with a usage that fails the wire shape: the stream
+    // survives, the event carries no usage and the degrade is disclosed.
+    let mut parser = AnthropicMessages.stream_parser();
+    let (events, ws) = parser
+        .parse(&SseEvent::new(
+            Some("message_start"),
+            json!({"type": "message_start", "message": {
+                "id": "msg_1", "model": "m",
+                "usage": {"input_tokens": 12.5},
+            }})
+            .to_string(),
+        ))
+        .unwrap();
+    assert!(matches!(
+        &events[0],
+        StreamEvent::MessageStart { usage: None, .. }
+    ));
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert_eq!(ws[0].code, WarningCode::MalformedField);
+    assert_eq!(ws[0].location, "/usage");
+
+    // The snapshot overlay lets a later valid cumulative usage heal it.
+    let (events, ws) = parser
+        .parse(&SseEvent::new(
+            Some("message_delta"),
+            json!({"type": "message_delta", "delta": {},
+                   "usage": {"input_tokens": 20, "output_tokens": 5}})
+            .to_string(),
+        ))
+        .unwrap();
+    assert!(ws.is_empty(), "{ws:?}");
+    match &events[0] {
+        StreamEvent::MessageDelta { usage: Some(u), .. } => {
+            assert_eq!(u.input_tokens, 20);
+            assert_eq!(u.output_tokens, 5);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    // A malformed message_delta usage degrades that event only…
+    let (events, ws) = parser
+        .parse(&SseEvent::new(
+            Some("message_delta"),
+            json!({"type": "message_delta", "delta": {},
+                   "usage": {"output_tokens": "x"}})
+            .to_string(),
+        ))
+        .unwrap();
+    assert!(matches!(
+        &events[0],
+        StreamEvent::MessageDelta { usage: None, .. }
+    ));
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert_eq!(ws[0].location, "/usage");
+
+    // …and the next valid cumulative snapshot recovers.
+    let (events, ws) = parser
+        .parse(&SseEvent::new(
+            Some("message_delta"),
+            json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+                   "usage": {"output_tokens": 7}})
+            .to_string(),
+        ))
+        .unwrap();
+    assert!(ws.is_empty(), "{ws:?}");
+    match &events[0] {
+        StreamEvent::MessageDelta { usage: Some(u), .. } => {
+            assert_eq!(u.input_tokens, 20);
+            assert_eq!(u.output_tokens, 7);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    parser
+        .parse(&SseEvent::new(
+            Some("message_stop"),
+            r#"{"type":"message_stop"}"#,
+        ))
+        .unwrap();
+    assert!(parser.finish().is_ok());
+
+    // A non-object message_start usage cannot seed the snapshot: warned,
+    // ignored, stream alive.
+    let mut parser2 = AnthropicMessages.stream_parser();
+    let (events, ws) = parser2
+        .parse(&SseEvent::new(
+            Some("message_start"),
+            json!({"type": "message_start", "message": {
+                "id": "msg_2", "model": "m", "usage": 5,
+            }})
+            .to_string(),
+        ))
+        .unwrap();
+    assert!(matches!(
+        &events[0],
+        StreamEvent::MessageStart { usage: None, .. }
+    ));
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert!(
+        ws[0].message.contains("not a JSON object"),
+        "{}",
+        ws[0].message
+    );
+}
+
+#[test]
 fn error_event_fails_the_stream() {
     let err = feed("stream_error.sse").unwrap_err();
     match err {
