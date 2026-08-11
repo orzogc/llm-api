@@ -75,6 +75,9 @@ pub(crate) struct AnthropicStreamParser {
     warned_opaque_deltas: BTreeSet<usize>,
     /// Member names of recognized deltas already warned as unmodeled.
     warned_delta_members: BTreeSet<String>,
+    /// Whether the missing-core-fields usage warning already fired (once
+    /// per stream — every usage-bearing event would repeat it otherwise).
+    warned_usage_core: bool,
     terminated: bool,
 }
 
@@ -85,9 +88,11 @@ impl AnthropicStreamParser {
 
     /// Overlays `delta` usage fields onto the cached snapshot and returns
     /// the unified cumulative usage. A snapshot that fails the wire shape
-    /// degrades to `None` with a warning — never a dead stream, never
-    /// silent zeros; the overlay is kept, so a later valid cumulative
-    /// snapshot heals subsequent events.
+    /// — or that still lacks the wire-required `input_tokens` /
+    /// `output_tokens` (a compliant `message_start` seeds both; deltas
+    /// may omit the input side) — degrades to `None` with a warning —
+    /// never a dead stream, never silent zeros; the overlay is kept, so a
+    /// later valid cumulative snapshot heals subsequent events.
     fn merge_usage(
         &mut self,
         delta: Option<&Map<String, Value>>,
@@ -103,7 +108,21 @@ impl AnthropicStreamParser {
         }
         let raw = Value::Object(self.usage.clone());
         match serde_json::from_value::<UsageWire>(raw.clone()) {
-            Ok(wire) => Some(unify_usage(&wire, raw)),
+            Ok(wire) if wire.input_tokens.is_some() && wire.output_tokens.is_some() => {
+                Some(unify_usage(&wire, raw))
+            }
+            Ok(_) => {
+                if !self.warned_usage_core {
+                    self.warned_usage_core = true;
+                    warnings.push(pwarn(
+                        WarningCode::MalformedField,
+                        "/usage",
+                        "cumulative `usage` lacks the required `input_tokens`/`output_tokens` \
+                         and was omitted; core counts are never silently zeroed",
+                    ));
+                }
+                None
+            }
             Err(e) => {
                 warnings.push(pwarn(
                     WarningCode::MalformedField,

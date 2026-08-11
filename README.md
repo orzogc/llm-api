@@ -56,6 +56,13 @@ reachable.
 `reasoning`, `thinking`, …). Third-party formats can be added by
 implementing the public `ApiFormat` trait.
 
+Responses caveat: `StopReason::ToolUse` is derived from `function_call` /
+`custom_tool_call` output items only. Other awaiting items
+(`local_shell_call`, `apply_patch_call`, `mcp_approval_request`, …) ride
+along as `Opaque` blocks and do **not** flip the stop reason — an agent
+loop using those built-in/local tools must inspect the `Opaque` items (or
+`Response::raw`) instead of relying on `StopReason::ToolUse` alone.
+
 ## Installation
 
 ```toml

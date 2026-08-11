@@ -201,13 +201,20 @@ Round-trip metadata flows **parse-attach → serialize-consume**.
   Google `output_tokens` = `candidatesTokenCount + thoughtsTokenCount` and
   `input_tokens` = `promptTokenCount + toolUsePromptTokenCount`
   (live-verified: the tool-use term is outside `promptTokenCount`, inside
-  `totalTokenCount`). Keep the provider object in `Usage.raw`. Usage parses leniently on
+  `totalTokenCount`). Keep the provider object in `Usage.raw` **verbatim**
+  (the wire value, never a typed re-serialization; Anthropic streaming:
+  the cumulative overlay object). Usage parses leniently on
   every path (non-streaming, stream start, stream deltas, terminal
-  snapshots): a malformed usage object degrades to `usage: None` +
+  snapshots): a malformed usage object — including one missing its
+  wire-required core fields (OpenAI `prompt_tokens`/`completion_tokens`,
+  Responses/Anthropic `input_tokens`/`output_tokens`; **not** Google,
+  whose proto3 zero-omission legitimately reads missing as 0) — degrades
+  to `usage: None` +
   `MalformedField` — never fail the billed response/stream, never zero a
-  field silently. Anthropic's cumulative overlay keeps merging raw
-  fields, so a later well-formed snapshot self-heals. Count-tokens stays
-  fail-loud (§ 13) — the count is the payload.
+  core field silently. Anthropic's cumulative overlay keeps merging raw
+  fields (the core-field check runs on the overlaid snapshot, warned once
+  per stream), so a later well-formed snapshot self-heals. Count-tokens
+  stays fail-loud (§ 13) — the count is the payload.
 - Responses stop-reason derivation counts `function_call` **and**
   `custom_tool_call` output items as tool use (both await
   developer-supplied outputs; the latter stays an `Opaque` block). Other

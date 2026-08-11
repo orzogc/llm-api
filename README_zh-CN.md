@@ -46,6 +46,12 @@ API 格式之间的**双向转换**，以及**可插拔的 HTTP 传输层**。�
 `OpenAiChatCompletionsOptions.reasoning_field` 配置，以适配使用 `reasoning`、
 `thinking` 等字段的方言。第三方格式可通过实现公开的 `ApiFormat` trait 接入。
 
+Responses 注意事项：`StopReason::ToolUse` 只由 `function_call` /
+`custom_tool_call` 输出 item 推导。其他等待型 item（`local_shell_call`、
+`apply_patch_call`、`mcp_approval_request` 等）以 `Opaque` 块随行，**不会**
+翻转停止原因——使用这类内建/本地工具的 agent 循环必须检查 `Opaque` item
+（或 `Response::raw`），不能只依赖 `StopReason::ToolUse`。
+
 ## 安装
 
 ```toml

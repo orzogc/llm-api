@@ -107,7 +107,9 @@ pub struct Usage {
     /// Reasoning/thinking tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
-    /// The original provider usage object.
+    /// The provider usage object as received, verbatim. For incrementally
+    /// streamed usage (Anthropic), this is the cumulative overlay of the
+    /// provider's usage frames rather than any single frame.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<Value>,
 }

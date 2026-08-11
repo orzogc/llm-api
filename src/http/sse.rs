@@ -40,8 +40,9 @@ impl SseEvent {
 /// protocol overhead included — is chunking-sensitive: byte-wise delivery
 /// can trip the guard on a line that a single-chunk push parses whole.
 ///
-/// The cap bounds what the parser accumulates and retains (the joined
-/// data, the unfinished line) — not the instantaneous peak, which also
+/// The cap bounds everything the parser accumulates and retains — the
+/// joined data, the unfinished line, and the stored `event:`/`id:` values
+/// (`id` persists across events) — not the instantaneous peak, which also
 /// spans the chunk currently being pushed: the caller chooses chunk
 /// granularity, and the transport's own allocation of that chunk is
 /// outside the parser's control. A cap error discards the buffered input
@@ -112,20 +113,18 @@ impl SseParser {
             // else: an empty buffer or a partial BOM prefix — undecided,
             // wait for more bytes.
         }
-        // Drain complete lines first (the per-event data cap is enforced
-        // inside `process_line`), then check what remains: `buf` now holds
-        // only the current unfinished line, so this is a flood guard against
-        // a stream that never sends a newline — it keeps accumulating across
+        // Drain complete lines first (the per-event data cap and the
+        // stored `event:`/`id:` metadata cap are enforced inside
+        // `process_line`; complete comment/unknown-field lines retain
+        // nothing), then check what remains: `buf` now holds only the
+        // current unfinished line, so this is a flood guard against a
+        // stream that never sends a newline — it keeps accumulating across
         // pushes — and never trips on a chunk that carries several small
-        // complete events. Known trade-off: a giant non-`data` line
-        // (`event:`, `id:`, comment) that arrives complete within one chunk
-        // is consumed into parser state unchecked — the § 12 cap is defined
-        // over joined `data:` lines only. Conversely, when the cap is
-        // smaller than an unfinished line's raw length (field name and
-        // colon included), the outcome depends on chunking: byte-wise
-        // delivery trips this guard before the line completes while a
-        // single-chunk push parses it whole — conservative, and required
-        // for flood protection.
+        // complete events. When the cap is smaller than an unfinished
+        // line's raw length (field name and colon included), the outcome
+        // depends on chunking: byte-wise delivery trips this guard before
+        // the line completes while a single-chunk push parses it whole —
+        // conservative, and required for flood protection.
         let (events, failed) = self.drain_lines(false);
         if let Some(e) = failed {
             return (events, Some(self.fail_reset(e)));
@@ -240,6 +239,20 @@ impl SseParser {
         }
     }
 
+    /// A metadata-line overflow: an `event:`/`id:` value larger than the
+    /// cap would otherwise persist unbounded in parser state. `prefix`
+    /// carries the value's first `limit` bytes; nothing was stored.
+    fn metadata_cap_error(&self, value: &str) -> Error {
+        let end = self.max_event.min(value.len());
+        Error::BodyTooLarge {
+            kind: BodyKind::SseEvent,
+            limit: self.max_event,
+            status: None,
+            headers: None,
+            prefix: bytes::Bytes::copy_from_slice(&value.as_bytes()[..end]),
+        }
+    }
+
     fn drain_lines(&mut self, eof: bool) -> (Vec<SseEvent>, Option<Error>) {
         // Process complete lines straight out of the taken buffer: no
         // staging copies (only an invalid-UTF-8 line allocates, for the
@@ -316,8 +329,20 @@ impl SseParser {
                 self.data.push_str(value);
                 self.data.push('\n');
             }
-            "event" => self.event = Some(value.to_owned()),
+            "event" => {
+                // Stored metadata folds into the § 12 cap: `event`/`id`
+                // values persist in parser state (`id` across events), so
+                // an oversized value is a cap error like oversized data —
+                // never unbounded retained state.
+                if value.len() > self.max_event {
+                    return Err(self.metadata_cap_error(value));
+                }
+                self.event = Some(value.to_owned());
+            }
             "id" => {
+                if value.len() > self.max_event {
+                    return Err(self.metadata_cap_error(value));
+                }
                 if !value.contains('\0') {
                     self.id = Some(value.to_owned());
                 }
@@ -616,6 +641,37 @@ mod tests {
             .unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "a");
+    }
+
+    #[test]
+    fn metadata_lines_fold_into_the_cap() {
+        // Stored `event:`/`id:` values count against the cap even when
+        // the line arrives complete within one chunk — parser-retained
+        // state is bounded regardless of chunking.
+        let mut p = SseParser::new(8);
+        let err = p.push(b"event: 0123456789abcdef\ndata:a\n\n").unwrap_err();
+        match err {
+            Error::BodyTooLarge { prefix, limit, .. } => {
+                assert_eq!(limit, 8);
+                assert_eq!(prefix.len(), 8, "prefix must not exceed the limit");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        // Error recovery: nothing was stored, later pushes parse afresh.
+        let events = collect(&mut p, &["data:ok\n\n"]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "ok");
+
+        let mut p = SseParser::new(8);
+        let err = p.push(b"id: 0123456789abcdef\n").unwrap_err();
+        assert!(matches!(err, Error::BodyTooLarge { .. }));
+        let events = collect(&mut p, &["id: 7\ndata:a\n\n"]);
+        assert_eq!(events[0].id.as_deref(), Some("7"));
+
+        // A value exactly at the cap still parses.
+        let mut p = SseParser::new(8);
+        let events = collect(&mut p, &["event: 12345678\ndata:a\n\n"]);
+        assert_eq!(events[0].event.as_deref(), Some("12345678"));
     }
 
     #[test]

@@ -121,13 +121,14 @@ pub struct Limits {
     /// Default: 8 MiB.
     pub max_error_body: usize,
     /// Cap on one complete logical SSE event (joined `data:` lines).
-    /// Also bounds the current unfinished raw line as a flood guard, so a
-    /// cap smaller than a line's raw length (field name and colon
-    /// included) may reject byte-wise delivery that a single-chunk push
-    /// would parse whole. Parser-retained data stays within the cap; the
-    /// chunk currently being pushed is additionally buffered whole (a cap
-    /// error discards the buffered input — the error's `prefix` is the
-    /// only retained copy). Default: 64 MiB.
+    /// Also bounds the stored `event:`/`id:` metadata values and the
+    /// current unfinished raw line (flood guard), so a cap smaller than a
+    /// line's raw length (field name and colon included) may reject
+    /// byte-wise delivery that a single-chunk push would parse whole.
+    /// Parser-retained data stays within the cap; the chunk currently
+    /// being pushed is additionally buffered whole (a cap error discards
+    /// the buffered input — the error's `prefix` is the only retained
+    /// copy). Default: 64 MiB.
     pub max_sse_event: usize,
     /// Cap on [`super::Client::list_models`] auto-pagination — the
     /// runaway guard: a malicious or broken server returning a fresh

@@ -476,7 +476,8 @@ pub struct UsageMetadata {
     /// Thought tokens (thinking models).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thoughts_token_count: Option<i64>,
-    /// Total token count (prompt + thoughts + candidates).
+    /// Total token count (prompt + tool-use prompt + thoughts +
+    /// candidates; live-verified).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_token_count: Option<i64>,
     /// Unknown fields (per-modality breakdowns, `serviceTier`, …).

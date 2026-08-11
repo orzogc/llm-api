@@ -135,13 +135,16 @@ pub(crate) fn build_body(
     if let Some(format) = &req.output_format {
         body.insert("response_format".to_owned(), build_response_format(format));
     }
+    // Whether any tool actually reached the wire — an explicitly empty IR
+    // list replays as `"tools": []` (faithful), while a non-empty list
+    // whose entries were all dropped (foreign `Tool::Opaque`, already
+    // disclosed by `OpaqueDropped`) omits the key; `parallel_tool_calls`
+    // follows the emitted tools, not the IR list.
+    let mut has_tools = false;
     if let Some(tools) = &req.tools {
         let built = build_tools(tools, &mut warnings, &mut log);
-        // An explicitly empty IR tool list replays as `"tools": []`; a
-        // non-empty list whose entries were all dropped (foreign
-        // `Tool::Opaque`) omits the key instead — the `OpaqueDropped`
-        // warnings already disclose the loss.
-        if !built.is_empty() || tools.is_empty() {
+        has_tools = !built.is_empty();
+        if has_tools || tools.is_empty() {
             body.insert("tools".to_owned(), Value::Array(built));
         }
     }
@@ -149,7 +152,6 @@ pub(crate) fn build_body(
         body.insert("tool_choice".to_owned(), build_tool_choice(choice));
     }
     if let Some(parallel) = req.parallel_tool_calls {
-        let has_tools = req.tools.as_ref().is_some_and(|t| !t.is_empty());
         if has_tools {
             body.insert("parallel_tool_calls".to_owned(), Value::from(parallel));
         } else {

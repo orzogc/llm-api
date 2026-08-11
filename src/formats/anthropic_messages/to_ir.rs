@@ -762,12 +762,24 @@ pub(crate) fn parse_response_body(body: &[u8], meta: &ResponseMeta) -> Result<Re
     let stop_reason = wire.stop_reason.as_deref().map(StopReason::from_str_lossy);
     let stop_reason = normalize_stop_reason(&message, stop_reason);
     // Two-stage usage parse: the response is already billed, so a usage
-    // object that fails the wire shape degrades to no usage plus a warning —
-    // never a failed response, never silent zeros.
+    // object that fails the wire shape — or lacks the wire-required
+    // `input_tokens`/`output_tokens` — degrades to no usage plus a
+    // warning — never a failed response, never silent zeros.
     let usage = match &wire.usage {
         None | Some(Value::Null) => None,
         Some(uraw) => match serde_json::from_value::<UsageWire>(uraw.clone()) {
-            Ok(u) => Some(unify_usage(&u, uraw.clone())),
+            Ok(u) if u.input_tokens.is_some() && u.output_tokens.is_some() => {
+                Some(unify_usage(&u, uraw.clone()))
+            }
+            Ok(_) => {
+                warnings.push(pwarn(
+                    WarningCode::MalformedField,
+                    "/usage",
+                    "`usage` lacks the required `input_tokens`/`output_tokens` and was \
+                     dropped; core counts are never silently zeroed",
+                ));
+                None
+            }
             Err(e) => {
                 warnings.push(pwarn(
                     WarningCode::MalformedField,

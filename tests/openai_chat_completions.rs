@@ -1165,6 +1165,25 @@ fn explicit_empty_tools_round_trip_keeps_key() {
 }
 
 #[test]
+fn all_foreign_tools_dropped_suppresses_parallel_tool_calls() {
+    // `parallel_tool_calls` follows the emitted tools, not the IR list:
+    // when every tool is a dropped foreign opaque the wire has no `tools`
+    // key, so the flag is withheld with a warning (same rule as
+    // openai_responses).
+    let mut req = Request::with_messages(vec![Message::user_text("q")]);
+    req.tools = Some(vec![Tool::opaque(
+        "anthropic_messages",
+        json!({"type": "computer_20250124"}),
+    )]);
+    req.parallel_tool_calls = Some(true);
+    let (body, warnings) = from_ir_unary(&req);
+    assert!(body.get("tools").is_none(), "{body}");
+    assert!(body.get("parallel_tool_calls").is_none(), "{body}");
+    assert!(has_code(&warnings, &WarningCode::OpaqueDropped));
+    assert!(has_code(&warnings, &WarningCode::ParallelToolCallsIgnored));
+}
+
+#[test]
 fn tool_choice_forms() {
     for (choice, expected) in [
         (ToolChoice::Auto, json!("auto")),
@@ -2402,6 +2421,10 @@ fn malformed_usage_degrades_to_none_with_warning() {
         json!({"prompt_tokens": 1, "prompt_tokens_details": {"cached_tokens": "x"}}),
         json!([1, 2]),
         json!("busy"),
+        // Missing/null core fields (wire-required) never read as zero.
+        json!({}),
+        json!({"completion_tokens": 5, "total_tokens": 5}),
+        json!({"prompt_tokens": null, "completion_tokens": 5}),
     ] {
         let resp = response_to_ir(&body(usage.clone()), &meta_ok()).unwrap();
         assert_eq!(resp.text(), "hi", "{usage}");
@@ -2420,6 +2443,16 @@ fn malformed_usage_degrades_to_none_with_warning() {
     let resp = response_to_ir(&body(Value::Null), &meta_ok()).unwrap();
     assert!(resp.usage.is_none());
     assert!(resp.warnings.is_empty(), "{:?}", resp.warnings);
+
+    // Well-formed usage keeps the wire value verbatim in `Usage.raw` —
+    // a typed re-serialization would drop the null-valued known field
+    // and reorder keys.
+    let original = json!({"total_tokens": null, "prompt_tokens": 1, "completion_tokens": 2});
+    let resp = response_to_ir(&body(original.clone()), &meta_ok()).unwrap();
+    let usage = resp.usage.as_ref().unwrap();
+    assert_eq!(usage.raw.as_ref().unwrap(), &original);
+    assert_eq!((usage.input_tokens, usage.output_tokens), (1, 2));
+    assert_eq!(usage.total_tokens, None);
 }
 
 #[test]

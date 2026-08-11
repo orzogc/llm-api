@@ -225,8 +225,10 @@ pub(crate) fn failed_response_error(
 }
 
 /// Maps the wire usage object to the unified [`Usage`] (§ 8):
-/// `input_tokens` already includes cached tokens.
-pub(crate) fn usage_to_ir(u: &types::Usage) -> Usage {
+/// `input_tokens` already includes cached tokens. `raw` is the wire value
+/// verbatim (never a re-serialization). The core-field unwraps are
+/// unreachable zeros — [`usage_lenient`] rejects usage without them.
+pub(crate) fn usage_to_ir(u: &types::Usage, raw: Value) -> Usage {
     Usage {
         input_tokens: u.input_tokens.unwrap_or(0),
         output_tokens: u.output_tokens.unwrap_or(0),
@@ -243,15 +245,16 @@ pub(crate) fn usage_to_ir(u: &types::Usage) -> Usage {
             .output_tokens_details
             .as_ref()
             .and_then(|d| d.reasoning_tokens),
-        raw: serde_json::to_value(u).ok(),
+        raw: Some(raw),
     }
 }
 
 /// Lenient usage parse (§ 8 degradation): absent or `null` is `None`
-/// silently; any other shape that fails the typed parse degrades to
+/// silently; any other shape that fails the typed parse — or an object
+/// missing the wire-required `input_tokens`/`output_tokens` — degrades to
 /// `None` with a `MalformedField` warning at `/usage`. A billed 2xx
-/// response or stream never fails — and is never silently zeroed — over
-/// its usage object.
+/// response or stream never fails — and a core count never silently reads
+/// as zero — over its usage object.
 pub(crate) fn usage_lenient(
     value: Option<&Value>,
     warnings: &mut Vec<ConversionWarning>,
@@ -261,7 +264,18 @@ pub(crate) fn usage_lenient(
         return None;
     }
     match serde_json::from_value::<types::Usage>(value.clone()) {
-        Ok(u) => Some(usage_to_ir(&u)),
+        Ok(u) if u.input_tokens.is_some() && u.output_tokens.is_some() => {
+            Some(usage_to_ir(&u, value.clone()))
+        }
+        Ok(_) => {
+            warnings.push(warn(
+                WarningCode::MalformedField,
+                "/usage",
+                "`usage` lacks the required `input_tokens`/`output_tokens` and was \
+                 dropped; core counts are never silently zeroed",
+            ));
+            None
+        }
         Err(e) => {
             warnings.push(warn(
                 WarningCode::MalformedField,

@@ -935,9 +935,15 @@ Google `thoughtsTokenCount`.
 
 Usage parses leniently on every path (non-streaming and streaming): a
 malformed usage object — a gateway sending fractional token counts, wrong
-types — degrades to `usage: None` with a `MalformedField` warning. It never
+types, or an object missing its wire-required core token fields (OpenAI
+`prompt_tokens`/`completion_tokens`, Responses/Anthropic
+`input_tokens`/`output_tokens`) — degrades to `usage: None` with a
+`MalformedField` warning. It never
 fails an otherwise-good billed response or stream, and never silently
-zeroes a field. (Count-tokens responses are the deliberate opposite: § 13
+zeroes a field. Two pinned qualifications: Google's proto3 zero-omission
+means a missing count legitimately reads as 0 (no core-field requirement
+there), and Anthropic's streamed usage is judged on the cumulative
+overlay (deltas may omit the input side that `message_start` seeded). (Count-tokens responses are the deliberate opposite: § 13
 pins them fail-loud, since the count *is* the payload.) Google's
 `input_tokens` additionally folds in `toolUsePromptTokenCount` (server-side
 tool prompts — search grounding, code execution): live verification shows
@@ -1510,11 +1516,6 @@ pub enum ApiErrorKind { InvalidRequest, Auth, PermissionDenied, NotFound,
   already implemented in v1).
 - Audio/video/document content blocks; image generation.
 - Structured-output schema subset validation (deliberately absent today).
-- A dedicated SSE line/metadata cap (a `max_sse_line` limit, or folding
-  persistent parser state — `event:`/`id:` values — into `max_sse_event`):
-  today a giant non-data line that arrives complete within one transport
-  chunk is consumed into parser state unchecked, bounded in practice by the
-  transport's chunk size (see the trade-off note in `http/sse.rs`).
 - SSE input-slice parsing: `SseParser::push` still buffers the incoming
   chunk whole before line scanning — the last library-side chunk-scale copy
   (the data cap is checked before any copy into the joined data, and capped

@@ -2053,6 +2053,35 @@ fn malformed_usage_degrades_to_none_with_warning() {
     // The raw body still carries the original usage for inspection.
     assert_eq!(resp.raw.as_ref().unwrap()["usage"]["input_tokens"], 12.5);
 
+    // Missing/null wire-required core fields never read as zero either.
+    for usage in [
+        json!({}),
+        json!({"output_tokens": 3}),
+        json!({"input_tokens": null, "output_tokens": 3}),
+    ] {
+        let mut body = body.clone();
+        body["usage"] = usage.clone();
+        let resp = response_to_ir(&serde_json::to_vec(&body).unwrap(), &meta_ok()).unwrap();
+        assert!(resp.usage.is_none(), "{usage}");
+        let w = resp
+            .warnings
+            .iter()
+            .find(|w| w.code == WarningCode::MalformedField)
+            .unwrap_or_else(|| panic!("{usage}: {:?}", resp.warnings));
+        assert_eq!(w.location, "/usage");
+    }
+
+    // Well-formed usage keeps the wire value verbatim in `Usage.raw` — a
+    // typed re-serialization would drop the null-valued known field.
+    let original = json!({"input_tokens": 1, "output_tokens": 2, "total_tokens": null});
+    let mut ok_body = body.clone();
+    ok_body["usage"] = original.clone();
+    let resp = response_to_ir(&serde_json::to_vec(&ok_body).unwrap(), &meta_ok()).unwrap();
+    assert_eq!(
+        resp.usage.as_ref().unwrap().raw.as_ref().unwrap(),
+        &original
+    );
+
     // A well-formed usage keeps parsing as before, warning-free.
     let body = json!({
         "id": "resp_u2", "object": "response", "status": "completed", "model": "m",

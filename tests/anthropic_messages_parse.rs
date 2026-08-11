@@ -668,6 +668,31 @@ fn usage_input_sum_saturates_instead_of_overflowing() {
 }
 
 #[test]
+fn usage_missing_core_fields_degrades_with_warning() {
+    // The wire requires `input_tokens`/`output_tokens`; an object missing
+    // or nulling them must not read as zero — usage drops with a warning.
+    for usage in [
+        json!({}),
+        json!({"output_tokens": 3}),
+        json!({"input_tokens": null, "output_tokens": 3}),
+        json!({"input_tokens": 3, "cache_read_input_tokens": 1}),
+    ] {
+        let body = json!({
+            "id": "m", "type": "message", "role": "assistant", "model": "x",
+            "content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn",
+            "usage": usage,
+        });
+        let resp = AnthropicMessages
+            .parse_response(&serde_json::to_vec(&body).unwrap(), &meta())
+            .unwrap();
+        assert!(resp.usage.is_none(), "{usage}");
+        assert_eq!(resp.warnings.len(), 1, "{usage}: {:?}", resp.warnings);
+        assert_eq!(resp.warnings[0].code, WarningCode::MalformedField);
+        assert_eq!(resp.warnings[0].location, "/usage");
+    }
+}
+
+#[test]
 fn malformed_response_usage_degrades_with_warning() {
     // The response is already billed: a usage object that fails the wire
     // shape must not fail the response or zero the counts silently — the

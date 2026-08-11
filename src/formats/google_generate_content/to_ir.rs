@@ -63,8 +63,8 @@ fn clamp_opt(v: Option<i64>) -> Option<u64> {
 /// live-verified: prompt + candidates + thoughts + toolUse == total. Both
 /// are field-semantics alignment (addition), not value conversion.
 #[must_use]
-pub(crate) fn usage_from_metadata(u: &types::UsageMetadata) -> Usage {
-    let mut usage = Usage {
+pub(crate) fn usage_from_metadata(u: &types::UsageMetadata, raw: Value) -> Usage {
+    Usage {
         // Saturating so misbehaving provider counts cannot overflow a sum.
         input_tokens: clamp(u.prompt_token_count)
             .saturating_add(clamp(u.tool_use_prompt_token_count)),
@@ -73,10 +73,10 @@ pub(crate) fn usage_from_metadata(u: &types::UsageMetadata) -> Usage {
         total_tokens: clamp_opt(u.total_token_count),
         cache_read_tokens: clamp_opt(u.cached_content_token_count),
         reasoning_tokens: clamp_opt(u.thoughts_token_count),
+        // The wire value verbatim (never a re-serialization).
+        raw: Some(raw),
         ..Usage::default()
-    };
-    usage.raw = serde_json::to_value(u).ok();
-    usage
+    }
 }
 
 /// Decodes a raw `usageMetadata` value leniently: a malformed value (e.g. a
@@ -90,7 +90,7 @@ pub(crate) fn usage_from_value(
     warnings: &mut Vec<ConversionWarning>,
 ) -> Option<Usage> {
     match serde_json::from_value::<types::UsageMetadata>(value.clone()) {
-        Ok(u) => Some(usage_from_metadata(&u)),
+        Ok(u) => Some(usage_from_metadata(&u, value.clone())),
         Err(e) => {
             warn(
                 warnings,

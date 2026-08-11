@@ -122,10 +122,11 @@ impl AuthHeader {
 ///
 /// Chunk sizing: deliver the response body in moderately sized chunks
 /// (network-buffer granularity). The size caps
-/// ([`crate::client::Limits`]) bound the data the library accumulates,
-/// while its peak memory scales with the largest single chunk — a
-/// transport that yields a whole body as one chunk forfeits that
-/// bounding.
+/// ([`crate::client::Limits`]) bound the data the library accumulates and
+/// retains, while its **peak** memory additionally scales with the
+/// largest single chunk (a pushed chunk is buffered whole while it is
+/// processed) — a transport that yields a whole body as one chunk keeps
+/// retained state capped but forfeits the peak-memory bound.
 pub trait HttpClient: Send + Sync {
     /// Sends the request, returning response head plus body stream.
     fn send(

@@ -2037,6 +2037,26 @@ fn null_channel_values_stay_silent() {
 // ----------------------------------------------- malformed usage (R5)
 
 #[test]
+fn usage_chunk_missing_core_fields_warns_and_drops_snapshot() {
+    // The include_usage final chunk with the wire-required core fields
+    // missing: warned, never zeroed.
+    let (events, warnings) = run_chunks(&[
+        json!({"id": "c", "choices": [{"index": 0,
+            "delta": {"role": "assistant", "content": "hi"}, "finish_reason": null}]}),
+        json!({"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+        json!({"id": "c", "choices": [], "usage": {"prompt_tokens": 2}}),
+    ]);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, WarningCode::MalformedField);
+    assert_eq!(warnings[0].location, "/usage");
+    assert!(
+        events
+            .iter()
+            .all(|e| !matches!(e, StreamEvent::MessageDelta { usage: Some(_), .. }))
+    );
+}
+
+#[test]
 fn malformed_usage_chunk_warns_and_drops_snapshot() {
     // The include_usage final chunk (empty choices) with a malformed
     // usage: warned, no usage snapshot emitted, stream completes.

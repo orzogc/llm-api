@@ -586,6 +586,58 @@ fn unmodeled_delta_members_surface_as_extra_other() {
 }
 
 #[test]
+fn usage_missing_core_fields_warns_once_and_heals() {
+    // A snapshot that never saw the wire-required core fields (dialect
+    // stream: no usage on message_start, output-only deltas) is omitted
+    // with a single per-stream warning — never zeroed — and a later
+    // complete cumulative snapshot heals it.
+    let mut parser = AnthropicMessages.stream_parser();
+    let (_, ws) = parser
+        .parse(&SseEvent::new(
+            Some("message_start"),
+            json!({"type": "message_start", "message": {"id": "msg_1", "model": "m"}}).to_string(),
+        ))
+        .unwrap();
+    assert!(ws.is_empty(), "{ws:?}");
+
+    let delta = |usage: Value| {
+        SseEvent::new(
+            Some("message_delta"),
+            json!({"type": "message_delta", "delta": {}, "usage": usage}).to_string(),
+        )
+    };
+    let (events, ws) = parser.parse(&delta(json!({"output_tokens": 2}))).unwrap();
+    assert!(matches!(
+        &events[0],
+        StreamEvent::MessageDelta { usage: None, .. }
+    ));
+    assert_eq!(ws.len(), 1, "{ws:?}");
+    assert_eq!(ws[0].code, WarningCode::MalformedField);
+    assert_eq!(ws[0].location, "/usage");
+
+    // The second incomplete snapshot stays quiet (once per stream).
+    let (events, ws) = parser.parse(&delta(json!({"output_tokens": 3}))).unwrap();
+    assert!(matches!(
+        &events[0],
+        StreamEvent::MessageDelta { usage: None, .. }
+    ));
+    assert!(ws.is_empty(), "{ws:?}");
+
+    // A complete cumulative snapshot heals the overlay.
+    let (events, ws) = parser
+        .parse(&delta(json!({"input_tokens": 7, "output_tokens": 4})))
+        .unwrap();
+    let StreamEvent::MessageDelta {
+        usage: Some(usage), ..
+    } = &events[0]
+    else {
+        panic!("expected usage: {events:?}");
+    };
+    assert_eq!((usage.input_tokens, usage.output_tokens), (7, 4));
+    assert!(ws.is_empty(), "{ws:?}");
+}
+
+#[test]
 fn malformed_usage_degrades_and_heals() {
     // message_start with a usage that fails the wire shape: the stream
     // survives, the event carries no usage and the degrade is disclosed.
@@ -789,7 +841,7 @@ fn post_terminal_data_does_not_turn_the_stream_fatal() {
             "message_start",
             json!({"type": "message_start", "message": {
                 "id": "msg_1", "model": "claude-sonnet-5",
-                "usage": {"input_tokens": 3},
+                "usage": {"input_tokens": 3, "output_tokens": 1},
             }})
             .to_string(),
         ),

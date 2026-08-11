@@ -976,8 +976,10 @@ fn content_part_to_block(
 }
 
 /// Maps the wire usage object to the unified [`Usage`] (§ 8):
-/// `prompt_tokens` already includes cached tokens.
-pub(crate) fn usage_to_ir(u: &types::Usage) -> Usage {
+/// `prompt_tokens` already includes cached tokens. `raw` is the wire value
+/// verbatim (never a re-serialization). The core-field unwraps are
+/// unreachable zeros — [`lenient_usage`] rejects usage without them.
+pub(crate) fn usage_to_ir(u: &types::Usage, raw: Value) -> Usage {
     Usage {
         input_tokens: u.prompt_tokens.unwrap_or(0),
         output_tokens: u.completion_tokens.unwrap_or(0),
@@ -994,28 +996,42 @@ pub(crate) fn usage_to_ir(u: &types::Usage) -> Usage {
             .completion_tokens_details
             .as_ref()
             .and_then(|d| d.reasoning_tokens),
-        raw: serde_json::to_value(u).ok(),
+        raw: Some(raw),
     }
 }
 
 /// Parses a present, non-`null` wire `usage` value leniently — shared by
 /// the response and stream paths: a malformed value (float token counts
-/// from proxies, wrong shapes) degrades to `None` with a `MalformedField`
-/// warning. A billed 2xx response must never fail, and usage must never
-/// silently vanish, over a malformed `usage` object.
+/// from proxies, wrong shapes, or an object missing the wire-required
+/// `prompt_tokens`/`completion_tokens`) degrades to `None` with a
+/// `MalformedField` warning. A billed 2xx response must never fail, and a
+/// core count must never silently read as zero, over a bad `usage` object.
 pub(crate) fn lenient_usage(value: &Value, warnings: &mut Vec<ConversionWarning>) -> Option<Usage> {
-    let usage = value
+    let parsed = value
         .as_object()
-        .and_then(|_| serde_json::from_value::<types::Usage>(value.clone()).ok())
-        .map(|u| usage_to_ir(&u));
-    if usage.is_none() {
-        warnings.push(warn(
-            WarningCode::MalformedField,
-            "/usage",
-            "malformed `usage` was dropped; the response parses without token usage",
-        ));
+        .and_then(|_| serde_json::from_value::<types::Usage>(value.clone()).ok());
+    match parsed {
+        Some(u) if u.prompt_tokens.is_some() && u.completion_tokens.is_some() => {
+            Some(usage_to_ir(&u, value.clone()))
+        }
+        Some(_) => {
+            warnings.push(warn(
+                WarningCode::MalformedField,
+                "/usage",
+                "`usage` lacks the required `prompt_tokens`/`completion_tokens` and was \
+                 dropped; core counts are never silently zeroed",
+            ));
+            None
+        }
+        None => {
+            warnings.push(warn(
+                WarningCode::MalformedField,
+                "/usage",
+                "malformed `usage` was dropped; the response parses without token usage",
+            ));
+            None
+        }
     }
-    usage
 }
 
 /// Removes and returns a string value from a map, leaving non-strings in
