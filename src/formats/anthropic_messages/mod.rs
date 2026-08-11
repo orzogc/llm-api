@@ -253,6 +253,15 @@ impl ApiFormat for AnthropicMessages {
             message: format!("invalid count_tokens response: {e}"),
             raw: bytes::Bytes::copy_from_slice(body),
         })?;
+        // A count response without `input_tokens` is malformed — a silent
+        // zero must not stand in for a real count (the wire type's serde
+        // default exists only for lenient construction).
+        if raw.get("input_tokens").is_none() {
+            return Err(Error::Parse {
+                message: "count_tokens response is missing `input_tokens`".to_owned(),
+                raw: bytes::Bytes::copy_from_slice(body),
+            });
+        }
         let wire: types::CountTokensResponse =
             serde_json::from_value(raw.clone()).map_err(|e| Error::Parse {
                 message: format!("invalid count_tokens response: {e}"),

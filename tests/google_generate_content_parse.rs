@@ -1114,9 +1114,23 @@ fn count_tokens_response_parses() {
     );
     assert!(count.warnings.is_empty());
 
-    // proto3 omits zero counts: an empty body means zero tokens.
+    // proto3 omits zero counts: an empty body means zero tokens, and an
+    // explicit zero parses the same.
     let count = format.parse_count_tokens_response(b"{}").unwrap();
     assert_eq!(count.input_tokens, 0);
+    let count = format
+        .parse_count_tokens_response(br#"{"totalTokens": 0}"#)
+        .unwrap();
+    assert_eq!(count.input_tokens, 0);
+
+    // A negative count is malformed — never a silent zero.
+    let err = format
+        .parse_count_tokens_response(br#"{"totalTokens": -5}"#)
+        .unwrap_err();
+    match err {
+        Error::Parse { message, .. } => assert!(message.contains("negative"), "{message}"),
+        other => panic!("unexpected: {other:?}"),
+    }
 }
 
 // -------------------------------------------------------------------- errors

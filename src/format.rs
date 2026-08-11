@@ -569,12 +569,15 @@ pub fn build_url(
     let substitute = |template: &str| -> Result<String> {
         let mut out = template.to_owned();
         if out.contains("{model}") {
-            if model.starts_with("tunedModels/") {
+            // Strip first, then reject: `models/tunedModels/x` names the
+            // same tuned resource and must not slip through into a broken
+            // percent-encoded path (design § 12).
+            let stripped = model.strip_prefix("models/").unwrap_or(model);
+            if stripped.starts_with("tunedModels/") {
                 return Err(Error::NotSupported(
                     "Google tuned models (`tunedModels/…`) are out of scope for v1",
                 ));
             }
-            let stripped = model.strip_prefix("models/").unwrap_or(model);
             if stripped.is_empty() {
                 return Err(ConversionError::missing("model name", "/").into());
             }
@@ -744,6 +747,21 @@ mod tests {
         let base = EndpointUrl::base("https://gl/v1beta").unwrap();
         let err = build_url(&base, "models/{model}", "tunedModels/x", None, &[], &[]).unwrap_err();
         assert!(matches!(err, Error::NotSupported(_)));
+
+        // A `models/` prefix names the same tuned resource: stripped first,
+        // then rejected — chat and count templates alike.
+        for template in ["models/{model}:{method}", "models/{model}:countTokens"] {
+            let err = build_url(
+                &base,
+                template,
+                "models/tunedModels/x",
+                Some("generateContent"),
+                &[],
+                &[],
+            )
+            .unwrap_err();
+            assert!(matches!(err, Error::NotSupported(_)), "{template}");
+        }
     }
 
     #[test]

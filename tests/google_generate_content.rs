@@ -94,6 +94,14 @@ fn model_prefix_stripped_and_tuned_models_rejected() {
         Err(Error::NotSupported(_))
     ));
 
+    // The `models/` prefix is stripped before the tuned-model check: the
+    // prefixed spelling names the same resource and is rejected too.
+    c.model = "models/tunedModels/my-tune".to_owned();
+    assert!(matches!(
+        format.build_request(&req, &c),
+        Err(Error::NotSupported(_))
+    ));
+
     c.model = String::new();
     assert!(matches!(
         format.build_request(&req, &c),
@@ -967,6 +975,58 @@ fn thinking_provenance_controls_serialization() {
         json!({"text": "planning", "thought": true})
     );
     let w = find(&warnings, &WarningCode::ThinkingSignatureDropped);
+    assert_eq!(w.severity, WarningSeverity::Semantic);
+}
+
+#[test]
+fn empty_namespaces_carry_no_thinking_provenance() {
+    // An empty foreign namespace (created but never written) carries no
+    // provenance: the signed block stays native — no ThinkingDropped.
+    let mut block = ContentBlock::thinking_signed("planning", "sig");
+    if let ContentBlock::Thinking { extra, .. } = &mut block {
+        extra.namespace_mut("anthropic_messages");
+    }
+    let req = Request::with_messages(vec![
+        Message::user_text("hi"),
+        Message::assistant(vec![block]),
+    ]);
+    let (body, warnings) = build(&req);
+    assert_eq!(
+        body["contents"][1]["parts"][0],
+        json!({"text": "planning", "thought": true, "thoughtSignature": "sig"})
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    // An empty own namespace is no different: the optimistic-replay arm
+    // (signature, no non-empty namespace) keeps the block native.
+    let mut block = ContentBlock::thinking_signed("planning", "sig");
+    if let ContentBlock::Thinking { extra, .. } = &mut block {
+        extra.namespace_mut(FMT);
+    }
+    let req = Request::with_messages(vec![
+        Message::user_text("hi"),
+        Message::assistant(vec![block]),
+    ]);
+    let (body, warnings) = build(&req);
+    assert_eq!(
+        body["contents"][1]["parts"][0],
+        json!({"text": "planning", "thought": true, "thoughtSignature": "sig"})
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    // Signature-less with only an empty own namespace: no provenance at
+    // all, so it is plaintext-only thinking — dropped with a warning.
+    let mut block = ContentBlock::thinking("planning");
+    if let ContentBlock::Thinking { extra, .. } = &mut block {
+        extra.namespace_mut(FMT);
+    }
+    let req = Request::with_messages(vec![
+        Message::user_text("hi"),
+        Message::assistant(vec![block, ContentBlock::text("a")]),
+    ]);
+    let (body, warnings) = build(&req);
+    assert_eq!(body["contents"][1]["parts"], json!([{"text": "a"}]));
+    let w = find(&warnings, &WarningCode::ThinkingDropped);
     assert_eq!(w.severity, WarningSeverity::Semantic);
 }
 

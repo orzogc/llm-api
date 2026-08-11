@@ -50,7 +50,10 @@ API 格式之间的**双向转换**，以及**可插拔的 HTTP 传输层**。�
 ```toml
 [dependencies]
 llm-api = "0.1"            # 含基于 reqwest 的默认传输层
+reqwest = "0.13"           # 下方示例交给 `Client::new` 的 HTTP 栈
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serde_json = "1"           # 仅 `extra`/hooks 示例需要（`json!`）
+futures-util = "0.3"       # 仅流式示例需要（`StreamExt`）
 
 # 或者只要纯数据层（无 IO、无 tokio、无 TLS）：
 # llm-api = { version = "0.1", default-features = false }
@@ -245,7 +248,9 @@ API key 与请求分开传递，因此它不会出现在你的代码可能记录
 - [`docs/impl_contract.md`](docs/impl_contract.md)——叠加在设计之上、约束
   各格式实现的统一决策。
 - 本 README 中的所有代码片段都由
-  [`tests/readme_examples.rs`](tests/readme_examples.rs) 做编译校验。
+  [`tests/readme_examples.rs`](tests/readme_examples.rs) 做编译校验；安装
+  一节还会由 [`tests/downstream_readme.rs`](tests/downstream_readme.rs)
+  以真实下游 crate 的方式做编译校验。
 
 ## 许可证
 

@@ -1935,6 +1935,16 @@ fn count_tokens_response_parses() {
             .parse_count_tokens_response(b"not json")
             .is_err()
     );
+    // A missing count is a loud parse error (the wire field is required),
+    // and a negative one fails the u64 parse — never a silent zero.
+    assert!(matches!(
+        OpenAiResponses.parse_count_tokens_response(br#"{"object": "response.input_tokens"}"#),
+        Err(Error::Parse { .. })
+    ));
+    assert!(matches!(
+        OpenAiResponses.parse_count_tokens_response(br#"{"input_tokens": -3}"#),
+        Err(Error::Parse { .. })
+    ));
 }
 
 // ---------------------------------------------------------------- errors

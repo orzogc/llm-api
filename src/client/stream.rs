@@ -9,7 +9,7 @@ use futures_core::Stream;
 
 use crate::convert::{ConversionWarning, WarningCode};
 use crate::error::{Error, Result};
-use crate::format::StreamParser;
+use crate::format::{ApiFormat, StreamParser};
 use crate::http::{BodyStream, SseEvent, SseParser};
 use crate::ir::{Accumulator, Response, StreamEvent, StreamItem};
 
@@ -52,6 +52,9 @@ pub struct StreamHandle {
     body: BodyStream,
     sse: SseParser,
     parser: Box<dyn StreamParser>,
+    /// Canonical id of the chat endpoint's format, for warnings the
+    /// handle produces itself.
+    format_id: String,
     queue: VecDeque<Result<StreamItem>>,
     pending_warnings: Vec<ConversionWarning>,
     /// The parser delivered its protocol terminator (`MessageStop`): the
@@ -62,14 +65,16 @@ pub struct StreamHandle {
 }
 
 impl StreamHandle {
-    /// Wraps an accepted (2xx) streaming response.
+    /// Wraps an accepted (2xx) streaming response. `format` supplies the
+    /// stream parser and the canonical id carried by handle-produced
+    /// warnings.
     pub(crate) fn new(
         status: u16,
         headers: http::HeaderMap,
         build_warnings: Vec<ConversionWarning>,
         body: BodyStream,
         sse: SseParser,
-        parser: Box<dyn StreamParser>,
+        format: &dyn ApiFormat,
         include_raw: bool,
     ) -> Self {
         Self {
@@ -79,7 +84,8 @@ impl StreamHandle {
             include_raw,
             body,
             sse,
-            parser,
+            parser: format.stream_parser(),
+            format_id: format.id().to_owned(),
             queue: VecDeque::new(),
             pending_warnings: Vec::new(),
             protocol_terminal: false,
@@ -177,7 +183,7 @@ impl StreamHandle {
     fn post_terminal_warning(&mut self, error: &Error) {
         self.pending_warnings.push(ConversionWarning::from_format(
             WarningCode::PostTerminalStreamFailure,
-            "",
+            self.format_id.clone(),
             "",
             format!("stream failure after the protocol terminator: {error}"),
         ));

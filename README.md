@@ -59,7 +59,10 @@ public `ApiFormat` trait.
 ```toml
 [dependencies]
 llm-api = "0.1"            # includes the reqwest-based default transport
+reqwest = "0.13"           # the HTTP stack handed to `Client::new` below
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serde_json = "1"           # only for the `extra` / hooks examples (`json!`)
+futures-util = "0.3"       # only for the streaming example (`StreamExt`)
 
 # Pure data layer instead (no IO, no tokio, no TLS):
 # llm-api = { version = "0.1", default-features = false }
@@ -261,7 +264,9 @@ marks the injected header sensitive.
 - [`docs/impl_contract.md`](docs/impl_contract.md) — binding cross-format
   implementation decisions layered on top of the design.
 - Every code snippet in this README is compile-checked by
-  [`tests/readme_examples.rs`](tests/readme_examples.rs).
+  [`tests/readme_examples.rs`](tests/readme_examples.rs), and the
+  installation section is compile-checked as a real downstream crate by
+  [`tests/downstream_readme.rs`](tests/downstream_readme.rs).
 
 ## License
 

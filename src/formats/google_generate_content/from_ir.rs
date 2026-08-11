@@ -556,8 +556,14 @@ fn serialize_thinking(
     ptr: &str,
     warnings: &mut Vec<ConversionWarning>,
 ) -> Option<Value> {
-    let has_any_namespace = extra.formats().next().is_some();
-    let native = extra.get(ID).is_some() || (signature.is_some() && !has_any_namespace);
+    // Native iff the block has a non-empty namespace of this format — an
+    // empty namespace carries no provenance — or it has a signature and no
+    // non-empty format namespace at all (optimistic replay).
+    let has_own = extra.get(ID).is_some_and(|ns| !ns.is_empty());
+    let has_any_namespace = extra
+        .formats()
+        .any(|f| extra.get(f).is_some_and(|ns| !ns.is_empty()));
+    let native = has_own || (signature.is_some() && !has_any_namespace);
     if native {
         let mut part = Map::new();
         part.insert("text".to_owned(), json!(text.clone().unwrap_or_default()));

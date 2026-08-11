@@ -580,6 +580,54 @@ fn thinking_provenance_rules() {
 }
 
 #[test]
+fn empty_namespaces_carry_no_thinking_provenance() {
+    // An empty foreign namespace (created but never written) carries no
+    // provenance: the signed block stays native — no ThinkingDropped.
+    let mut block = ContentBlock::thinking_signed("t", "sig");
+    if let ContentBlock::Thinking { extra, .. } = &mut block {
+        extra.namespace_mut("openai_responses");
+    }
+    let r = req(vec![Message::assistant(vec![block])]);
+    let (body, warnings) = build(&r);
+    assert_eq!(
+        body["messages"][0]["content"][0],
+        json!({"type": "thinking", "thinking": "t", "signature": "sig"})
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    // An empty own namespace is no different: the optimistic-replay arm
+    // (signature, no non-empty namespace) keeps the block native.
+    let mut block = ContentBlock::thinking_signed("t", "sig");
+    if let ContentBlock::Thinking { extra, .. } = &mut block {
+        extra.namespace_mut(FMT);
+    }
+    let r = req(vec![Message::assistant(vec![block])]);
+    let (body, warnings) = build(&r);
+    assert_eq!(
+        body["messages"][0]["content"][0],
+        json!({"type": "thinking", "thinking": "t", "signature": "sig"})
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    // Signature-less with only an empty own namespace: no provenance at
+    // all, so it is plaintext-only thinking — dropped with a warning.
+    let mut block = ContentBlock::thinking("t");
+    if let ContentBlock::Thinking { extra, .. } = &mut block {
+        extra.namespace_mut(FMT);
+    }
+    let r = req(vec![Message::assistant(vec![
+        block,
+        ContentBlock::text("a"),
+    ])]);
+    let (body, warnings) = build(&r);
+    assert_eq!(
+        body["messages"][0]["content"],
+        json!([{"type": "text", "text": "a"}])
+    );
+    assert!(find(&warnings, &WarningCode::ThinkingDropped).is_some());
+}
+
+#[test]
 fn tools_map_with_synthesized_empty_schema() {
     let mut r = req(vec![Message::user_text("hi")]);
     r.tools = Some(vec![

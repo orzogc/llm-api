@@ -1198,7 +1198,8 @@ pub enum Override<T> { Inherit, Set(T), Disable }
   models list `models` on all four. `{model}` is percent-encoded as a single
   path segment after stripping a leading `models/` prefix; Google
   `tunedModels/…` resource names are out of scope for v1 and return
-  `Error::NotSupported` instead of producing a broken URL (tuned models are
+  `Error::NotSupported` instead of producing a broken URL —
+  `models/tunedModels/…` is rejected the same way, after the strip (tuned models are
   excluded entirely, § 2 — Vertex tuned endpoints are a different
   resource/auth scheme, not a `tunedModels/…` path). `Full` serves nonstandard
   paths (`/chat`, `/completions`, bare

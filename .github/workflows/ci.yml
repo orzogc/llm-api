@@ -40,6 +40,11 @@ jobs:
         run: cargo test --all-features
       - name: Test (pure data layer)
         run: cargo test --no-default-features
+      - name: Downstream README check
+        # `#[ignore]`d locally (nested cargo, may download); run it here so
+        # the README installation section provably compiles for downstream
+        # users.
+        run: cargo test --test downstream_readme -- --ignored
       - name: Clippy (all features)
         run: cargo clippy --all-features --all-targets -- -D warnings
       - name: Clippy (pure data layer)

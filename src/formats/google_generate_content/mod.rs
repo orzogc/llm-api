@@ -252,11 +252,17 @@ impl ApiFormat for GoogleGenerateContent {
                 message: format!("invalid Google countTokens response: {e}"),
                 raw: Bytes::copy_from_slice(body),
             })?;
-        let mut count = TokenCount::new(
-            wire.total_tokens
-                .and_then(|t| u64::try_from(t).ok())
-                .unwrap_or(0),
-        );
+        let total = match wire.total_tokens {
+            // proto3 JSON omits zero-valued fields: an absent totalTokens
+            // is the wire encoding of zero, not malformed data (same
+            // reading as § 8 usage counts).
+            None => 0,
+            Some(t) => u64::try_from(t).map_err(|_| Error::Parse {
+                message: format!("Google countTokens response has a negative totalTokens: {t}"),
+                raw: Bytes::copy_from_slice(body),
+            })?,
+        };
+        let mut count = TokenCount::new(total);
         count.raw = Some(raw);
         Ok(count)
     }

@@ -975,4 +975,28 @@ fn count_tokens_response_parses() {
         count.raw.as_ref().unwrap()["context_management"]["original_input_tokens"],
         json!(0)
     );
+
+    // An explicit zero is a valid count.
+    let count = AnthropicMessages
+        .parse_count_tokens_response(br#"{"input_tokens": 0}"#)
+        .unwrap();
+    assert_eq!(count.input_tokens, 0);
+
+    // A missing count is malformed — never a silent zero (unlike Google,
+    // Anthropic is not proto3: absence does not encode zero).
+    let err = AnthropicMessages
+        .parse_count_tokens_response(b"{}")
+        .unwrap_err();
+    match err {
+        Error::Parse { message, .. } => {
+            assert!(message.contains("missing `input_tokens`"), "{message}");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    // A negative count fails the wire parse (u64).
+    assert!(matches!(
+        AnthropicMessages.parse_count_tokens_response(br#"{"input_tokens": -1}"#),
+        Err(Error::Parse { .. })
+    ));
 }

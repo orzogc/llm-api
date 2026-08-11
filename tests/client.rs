@@ -1341,12 +1341,19 @@ async fn stream_transport_error_mid_stream_terminates() {
     assert!(matches!(&items[1], Err(Error::Transport(e)) if e.kind == HttpErrorKind::Body));
 }
 
-/// Counts `PostTerminalStreamFailure` warnings on a response.
+/// Counts `PostTerminalStreamFailure` warnings on a response, asserting
+/// each carries the chat format's canonical id.
 fn post_terminal_warnings(response: &Response) -> usize {
     response
         .warnings
         .iter()
         .filter(|w| w.code == WarningCode::PostTerminalStreamFailure)
+        .inspect(|w| {
+            assert_eq!(
+                w.format, "mock",
+                "handle-produced warnings must carry the format id"
+            );
+        })
         .count()
 }
 
@@ -1386,6 +1393,7 @@ async fn stream_post_terminal_transport_error_downgrades_to_warning() {
         carrier.warnings[0].code,
         WarningCode::PostTerminalStreamFailure
     );
+    assert_eq!(carrier.warnings[0].format, "mock");
 
     // collect() view: the completed response stands, warning attached.
     let (client, _) = scripted(script());

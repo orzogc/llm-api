@@ -1089,10 +1089,13 @@ fn convert_thinking(
     warnings: &mut Vec<ConversionWarning>,
     log: &mut MergeLog,
 ) -> Result<Option<Value>> {
-    // Native iff the block has this format's namespace, or it has a
-    // signature and no format namespace at all (optimistic replay).
-    let has_own_ns = extra.get(FMT).is_some();
-    let has_any_ns = extra.formats().next().is_some();
+    // Native iff the block has a non-empty namespace of this format — an
+    // empty namespace carries no provenance — or it has a signature and no
+    // non-empty format namespace at all (optimistic replay).
+    let has_own_ns = extra.get(FMT).is_some_and(|ns| !ns.is_empty());
+    let has_any_ns = extra
+        .formats()
+        .any(|f| extra.get(f).is_some_and(|ns| !ns.is_empty()));
     let native = has_own_ns || (signature.is_some() && !has_any_ns);
     if native {
         let redacted = extra

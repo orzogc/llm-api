@@ -74,9 +74,12 @@ dropped with a cosmetic `StreamOptionsDropped` warning (not mirrored into
 ## Thinking provenance (pins § 4.4)
 
 - A `Thinking` block is **native** to target format F iff its `extra` has
-  namespace F, or it has a signature and *no* format namespace at all
-  (optimistic replay: provenance unknowable, upstream validates
-  signatures authoritatively). Parsers must store any structure needed for
+  a **non-empty** namespace F, or it has a signature and no non-empty
+  format namespace at all (optimistic replay: provenance unknowable,
+  upstream validates signatures authoritatively). An empty namespace
+  carries no provenance — `namespace_mut` creates on demand and
+  `Extra::is_empty` already treats all-empty as empty, so all four
+  formats test non-emptiness. Parsers must store any structure needed for
   reconstruction in their namespace (Responses `id`/`summary`; Anthropic
   `redacted: true` for `redacted_thinking`, whose `data` goes to
   `signature`; Google tool-call-part `thoughtSignature` rides the
@@ -270,6 +273,13 @@ merge and hooks), then adapt:
   Responses maps onto the `input_tokens` body.
 - Warnings ride `BuiltRequest.warnings`; the client copies them into
   `TokenCount.warnings`.
+- Count-response parsing must not silently zero the core field. Google:
+  a negative `totalTokens` is `Error::Parse`; a **missing** one (or `{}`)
+  is the legal proto3 zero-omission encoding and parses to 0 (same
+  reading as § 8 usage). Anthropic: a missing `input_tokens` is
+  `Error::Parse` (not proto3 — missing ≠ zero); negatives fail serde.
+  Responses: `input_tokens` is required on the wire — missing/negative
+  fail serde (`Error::Parse`).
 
 ## Models list (pins § 13)
 

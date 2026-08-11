@@ -133,7 +133,7 @@ impl Client {
             d.warnings,
             d.body,
             SseParser::new(provider.limits.max_sse_event),
-            provider.chat.format.stream_parser(),
+            provider.chat.format.as_ref(),
             opts.include_raw,
         ))
     }
