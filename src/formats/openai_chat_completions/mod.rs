@@ -56,8 +56,13 @@
 //!
 //! # Thinking provenance (§ 4.4, implementation contract)
 //!
-//! The thinking channel here is the plaintext `reasoning_content` field
-//! (DeepSeek dialect). A `Thinking` block is native iff its `extra`
+//! The thinking channel here is a plaintext wire field, by default
+//! `reasoning_content` (DeepSeek dialect). Dialects using another name
+//! (`reasoning`, `thinking`, …) configure it via
+//! [`OpenAiChatCompletionsOptions::reasoning_field`] (§ 12); the
+//! configured name is the single authority on both sides — under a custom
+//! name a wire `reasoning_content` is an ordinary unknown field. A
+//! `Thinking` block is native iff its `extra`
 //! carries this namespace or no format namespace at all — plaintext
 //! thinking with no provenance is native to Chat Completions. Native
 //! blocks emit their text (several join with `"\n\n"` — the wire field is
@@ -130,8 +135,8 @@ use serde_json::Value;
 use crate::convert::{ConversionWarning, ConvertOptions};
 use crate::error::{ApiErrorKind, Error, Result, retry_after_from_headers};
 use crate::format::{
-    ApiFormat, AuthScheme, BuildCtx, BuiltRequest, CallMode, OpenAiChatCompletionsOptions,
-    ResponseMeta, StreamParser, build_url, finalize_request, ids,
+    ApiFormat, AuthScheme, BuildCtx, BuiltRequest, CallMode, FormatOptions,
+    OpenAiChatCompletionsOptions, ResponseMeta, StreamParser, build_url, finalize_request, ids,
 };
 use crate::ir::{Request, Response};
 use crate::models::{Model, system_time_from_unix_seconds};
@@ -141,6 +146,46 @@ pub use to_ir::{request_to_ir, response_to_ir};
 
 /// This format's canonical id (`extra` namespace key).
 pub(crate) const FORMAT: &str = ids::OPENAI_CHAT_COMPLETIONS;
+
+/// The default wire field of the plaintext thinking channel (§ 12,
+/// [`OpenAiChatCompletionsOptions::reasoning_field`]).
+pub(crate) const DEFAULT_REASONING_FIELD: &str = "reasoning_content";
+
+/// Modeled assistant-message / stream-delta wire keys the configured
+/// `reasoning_field` may not collide with: the typed message fields plus
+/// the deprecated channels the wire reserves (`function_call`, `audio`).
+const RESERVED_MESSAGE_KEYS: &[&str] = &[
+    "role",
+    "content",
+    "refusal",
+    "tool_calls",
+    "tool_call_id",
+    "name",
+    "function_call",
+    "audio",
+];
+
+/// Validates [`OpenAiChatCompletionsOptions::reasoning_field`]: the
+/// thinking channel needs a dedicated, non-empty field name. Shared by
+/// the build, parse and stream entry points so all three fail alike.
+pub(crate) fn validate_reasoning_field(field: &str) -> Result<()> {
+    if field.is_empty() {
+        return Err(crate::error::ConversionError::other(
+            "`reasoning_field` is empty; the Chat Completions thinking channel needs a wire \
+             field name (default `reasoning_content`)",
+        )
+        .into());
+    }
+    if RESERVED_MESSAGE_KEYS.contains(&field) {
+        return Err(crate::error::ConversionError::other(format!(
+            "`reasoning_field` `{field}` collides with the modeled Chat Completions wire \
+             field of the same name; the thinking channel needs a dedicated field \
+             (default `reasoning_content`)"
+        ))
+        .into());
+    }
+    Ok(())
+}
 
 /// Reserved keys of the `openai_chat_completions` namespace on `ToolCall`
 /// blocks (see the module docs).
@@ -238,6 +283,15 @@ impl ApiFormat for OpenAiChatCompletions {
         response_to_ir(body, meta)
     }
 
+    fn parse_response_with(
+        &self,
+        body: &[u8],
+        meta: &ResponseMeta,
+        options: &FormatOptions,
+    ) -> Result<Response> {
+        to_ir::response_to_ir_with(body, meta, &options.openai_chat_completions)
+    }
+
     fn parse_error(&self, status: u16, headers: &http::HeaderMap, body: &[u8]) -> Error {
         let parsed: Option<Value> = serde_json::from_slice(body).ok();
         let detail = parsed
@@ -289,8 +343,22 @@ impl ApiFormat for OpenAiChatCompletions {
         Box::new(ChatCompletionsStreamParser::new())
     }
 
+    fn stream_parser_with(&self, options: &FormatOptions) -> Box<dyn StreamParser> {
+        Box::new(ChatCompletionsStreamParser::with_options(
+            &options.openai_chat_completions,
+        ))
+    }
+
     fn parse_request(&self, body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)> {
         request_to_ir(body)
+    }
+
+    fn parse_request_with(
+        &self,
+        body: &[u8],
+        options: &FormatOptions,
+    ) -> Result<(Request, Vec<ConversionWarning>)> {
+        to_ir::request_to_ir_with(body, &options.openai_chat_completions)
     }
 
     fn build_models_request(&self, ctx: &BuildCtx, _cursor: Option<&str>) -> Result<BuiltRequest> {

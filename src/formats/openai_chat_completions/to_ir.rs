@@ -5,14 +5,16 @@ use serde_json::{Map, Value, json};
 
 use crate::convert::{ConversionWarning, WarningCode};
 use crate::error::{Error, Result};
-use crate::format::{ResponseMeta, parse_data_url};
+use crate::format::{OpenAiChatCompletionsOptions, ResponseMeta, parse_data_url};
 use crate::ir::{
     CacheHint, ContentBlock, Effort, Extra, FunctionTool, ImageSource, Message, OutputFormat,
     Reasoning, Request, Response, Role, StopReason, Tool, ToolChoice, ToolOutputBlock, Usage,
     normalize_stop_reason,
 };
 
-use super::{FORMAT, tool_call_reserved_key, types};
+use super::{
+    DEFAULT_REASONING_FIELD, FORMAT, tool_call_reserved_key, types, validate_reasoning_field,
+};
 
 /// Parse-side warning shorthand.
 fn warn(
@@ -43,6 +45,17 @@ fn parse_failure(what: &str, error: impl std::fmt::Display, body: &[u8]) -> Erro
 /// re-injects). Leading `system` messages stay in-array (no hoisting to
 /// `Request.system`, implementation contract).
 pub fn request_to_ir(body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)> {
+    request_to_ir_with(body, &OpenAiChatCompletionsOptions::default())
+}
+
+/// [`request_to_ir`] with format options: assistant-history thinking is
+/// read through the configured `reasoning_field` (§ 12).
+pub(crate) fn request_to_ir_with(
+    body: &[u8],
+    format_options: &OpenAiChatCompletionsOptions,
+) -> Result<(Request, Vec<ConversionWarning>)> {
+    validate_reasoning_field(&format_options.reasoning_field)?;
+    let reasoning_field = format_options.reasoning_field.as_str();
     let wire: types::Request =
         serde_json::from_slice(body).map_err(|e| parse_failure("request", e, body))?;
     let mut warnings = Vec::new();
@@ -53,7 +66,7 @@ pub fn request_to_ir(body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)> {
         .messages
         .iter()
         .enumerate()
-        .map(|(i, m)| parse_message(m, i, &mut warnings))
+        .map(|(i, m)| parse_message(m, i, reasoning_field, &mut warnings))
         .collect();
 
     req.max_output_tokens = wire.max_completion_tokens;
@@ -182,6 +195,18 @@ fn warn_dropped_stream_options(options: &Value, warnings: &mut Vec<ConversionWar
 /// Parses a 2xx `chat.completion` body into the IR (§ 8). Reads the first
 /// choice; more than one adds a `MultipleCandidates` warning.
 pub fn response_to_ir(body: &[u8], meta: &ResponseMeta) -> Result<Response> {
+    response_to_ir_with(body, meta, &OpenAiChatCompletionsOptions::default())
+}
+
+/// [`response_to_ir`] with format options: the assistant thinking channel
+/// is read through the configured `reasoning_field` (§ 12).
+pub(crate) fn response_to_ir_with(
+    body: &[u8],
+    meta: &ResponseMeta,
+    format_options: &OpenAiChatCompletionsOptions,
+) -> Result<Response> {
+    validate_reasoning_field(&format_options.reasoning_field)?;
+    let reasoning_field = format_options.reasoning_field.as_str();
     let raw: Value =
         serde_json::from_slice(body).map_err(|e| parse_failure("response", e, body))?;
     let wire: types::Response =
@@ -199,7 +224,7 @@ pub fn response_to_ir(body: &[u8], meta: &ResponseMeta) -> Result<Response> {
         ));
     }
     let (message, finish_reason) = match wire.choices.first() {
-        Some(choice) => parse_choice(choice, &mut warnings),
+        Some(choice) => parse_choice(choice, reasoning_field, &mut warnings),
         None => {
             warnings.push(warn(
                 WarningCode::MalformedField,
@@ -239,6 +264,7 @@ pub(crate) fn map_finish_reason(s: &str) -> StopReason {
 /// reason.
 fn parse_choice(
     choice: &Value,
+    reasoning_field: &str,
     warnings: &mut Vec<ConversionWarning>,
 ) -> (Message, Option<String>) {
     let wire: types::Choice = match serde_json::from_value(choice.clone()) {
@@ -253,7 +279,7 @@ fn parse_choice(
         }
     };
     let message = match &wire.message {
-        Some(m) => assistant_value_to_message(m, "/choices/0/message", warnings),
+        Some(m) => assistant_value_to_message(m, "/choices/0/message", reasoning_field, warnings),
         None => {
             warnings.push(warn(
                 WarningCode::MalformedField,
@@ -274,6 +300,7 @@ fn parse_choice(
 pub(crate) fn assistant_value_to_message(
     value: &Value,
     ptr: &str,
+    reasoning_field: &str,
     warnings: &mut Vec<ConversionWarning>,
 ) -> Message {
     let wire: types::Message = match serde_json::from_value(value.clone()) {
@@ -287,19 +314,20 @@ pub(crate) fn assistant_value_to_message(
             return Message::assistant(Vec::new());
         }
     };
-    assistant_wire_to_message(wire, ptr, warnings)
+    assistant_wire_to_message(wire, ptr, reasoning_field, warnings)
 }
 
 /// Builds the IR assistant message from a typed wire message. `role` is
 /// forced to assistant; `name` and everything unknown mirrors into the
 /// message extra.
 fn assistant_wire_to_message(
-    wire: types::Message,
+    mut wire: types::Message,
     ptr: &str,
+    reasoning_field: &str,
     warnings: &mut Vec<ConversionWarning>,
 ) -> Message {
     let mut ns = Map::new();
-    let blocks = assistant_fields_to_blocks(&wire, ptr, &mut ns, warnings);
+    let blocks = assistant_fields_to_blocks(&mut wire, ptr, reasoning_field, &mut ns, warnings);
     if let Some(name) = wire.name {
         ns.insert("name".to_owned(), name);
     }
@@ -316,26 +344,40 @@ fn assistant_wire_to_message(
 /// returns the blocks in canonical order — thinking, content parts,
 /// message-level refusal, tool calls.
 fn assistant_fields_to_blocks(
-    wire: &types::Message,
+    wire: &mut types::Message,
     ptr: &str,
+    reasoning_field: &str,
     ns: &mut Map<String, Value>,
     warnings: &mut Vec<ConversionWarning>,
 ) -> Vec<ContentBlock> {
     let mut blocks: Vec<ContentBlock> = Vec::new();
-    match &wire.reasoning_content {
+    // The configured thinking channel (§ 12) is the single authority: the
+    // default name reads the typed `reasoning_content` field; a custom
+    // name reads (and consumes) the unknown-field map, and the wire
+    // `reasoning_content` demotes to an ordinary unknown field.
+    let thinking = if reasoning_field == DEFAULT_REASONING_FIELD {
+        wire.reasoning_content.take()
+    } else {
+        if let Some(v) = wire.reasoning_content.take() {
+            // `null` still canonicalizes to absent (`from_unknown` drops it).
+            ns.insert(DEFAULT_REASONING_FIELD.to_owned(), v);
+        }
+        wire.extra.remove(reasoning_field)
+    };
+    match thinking {
         None | Some(Value::Null) => {}
         Some(Value::String(s)) => {
             // Plaintext thinking with no namespace is native to this
             // format (implementation contract) — no marker needed.
-            blocks.push(ContentBlock::thinking(s.clone()));
+            blocks.push(ContentBlock::thinking(s));
         }
         Some(other) => {
             warnings.push(warn(
                 WarningCode::MalformedField,
-                format!("{ptr}/reasoning_content"),
-                "non-string `reasoning_content` kept verbatim in the message extra",
+                format!("{ptr}/{reasoning_field}"),
+                format!("non-string `{reasoning_field}` kept verbatim in the message extra"),
             ));
-            ns.insert("reasoning_content".to_owned(), other.clone());
+            ns.insert(reasoning_field.to_owned(), other);
         }
     }
     match &wire.content {
@@ -596,7 +638,12 @@ pub(crate) fn tool_call_entry_to_block(
 /// Parses one wire message (request side) into an IR message. Unmodeled
 /// roles (legacy `function`, dialect roles) and structurally garbage
 /// entries keep the whole message verbatim as a lone `Opaque` block.
-fn parse_message(value: &Value, index: usize, warnings: &mut Vec<ConversionWarning>) -> Message {
+fn parse_message(
+    value: &Value,
+    index: usize,
+    reasoning_field: &str,
+    warnings: &mut Vec<ConversionWarning>,
+) -> Message {
     let ptr = format!("/messages/{index}");
     let wire: types::Message = match serde_json::from_value(value.clone()) {
         Ok(m) => m,
@@ -621,7 +668,7 @@ fn parse_message(value: &Value, index: usize, warnings: &mut Vec<ConversionWarni
         "system" => input_message_to_ir(Role::System, &wire, &ptr, warnings),
         "developer" => input_message_to_ir(Role::Developer, &wire, &ptr, warnings),
         "user" => input_message_to_ir(Role::User, &wire, &ptr, warnings),
-        "assistant" => assistant_wire_to_message(wire, &ptr, warnings),
+        "assistant" => assistant_wire_to_message(wire, &ptr, reasoning_field, warnings),
         "tool" => tool_message_to_ir(&wire, &ptr, warnings),
         // The legacy `function` role maps to the IR Tool role
         // (implementation contract) as a whole-message Opaque node.

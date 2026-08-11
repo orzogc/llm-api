@@ -286,12 +286,21 @@ pub struct OpenAiChatCompletionsOptions {
     /// Injects `stream_options: {include_usage: true}` on streaming calls;
     /// disable for dialects that reject it.
     pub inject_include_usage: bool,
+    /// Wire field name of the plaintext thinking channel on assistant
+    /// messages and stream deltas. The default is `reasoning_content`
+    /// (DeepSeek dialect); some CC dialects use `reasoning` or `thinking`.
+    /// The configured name is the single authority: with a custom name,
+    /// a wire `reasoning_content` is an ordinary unknown field. An empty
+    /// name or one colliding with a modeled wire field fails the
+    /// conversion.
+    pub reasoning_field: String,
 }
 
 impl Default for OpenAiChatCompletionsOptions {
     fn default() -> Self {
         Self {
             inject_include_usage: true,
+            reasoning_field: "reasoning_content".to_owned(),
         }
     }
 }
@@ -310,6 +319,21 @@ pub trait ApiFormat: Send + Sync {
     /// afterwards.
     fn parse_response(&self, body: &[u8], meta: &ResponseMeta) -> Result<Response>;
 
+    /// [`ApiFormat::parse_response`] with the provider's format options —
+    /// the variant the client always calls. The default implementation
+    /// ignores the options; formats with per-provider parse knobs (like
+    /// Chat Completions' `reasoning_field`) override it, and third-party
+    /// formats needing such knobs should too.
+    fn parse_response_with(
+        &self,
+        body: &[u8],
+        meta: &ResponseMeta,
+        options: &FormatOptions,
+    ) -> Result<Response> {
+        let _ = options;
+        self.parse_response(body, meta)
+    }
+
     /// Classifies a non-2xx response, preserving the provider error shape.
     /// The default builds a generic `Error::Api` from status + raw body.
     fn parse_error(&self, status: u16, headers: &http::HeaderMap, body: &[u8]) -> Error {
@@ -320,9 +344,32 @@ pub trait ApiFormat: Send + Sync {
     /// stateful.
     fn stream_parser(&self) -> Box<dyn StreamParser>;
 
+    /// [`ApiFormat::stream_parser`] with the provider's format options —
+    /// the variant the client always calls. The default implementation
+    /// ignores the options; formats with per-provider stream knobs
+    /// override it. There is no `Result` here: implementations reporting
+    /// invalid options do so from the parser's first `parse` call.
+    fn stream_parser_with(&self, options: &FormatOptions) -> Box<dyn StreamParser> {
+        let _ = options;
+        self.stream_parser()
+    }
+
     /// Parses a provider-format request into the IR (powers round-trip
     /// tests and future format-to-format conversion).
     fn parse_request(&self, body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)>;
+
+    /// [`ApiFormat::parse_request`] with format options — the variant to
+    /// call when per-provider parse knobs matter (Chat Completions parses
+    /// assistant-history thinking through its configured
+    /// `reasoning_field`). The default implementation ignores the options.
+    fn parse_request_with(
+        &self,
+        body: &[u8],
+        options: &FormatOptions,
+    ) -> Result<(Request, Vec<ConversionWarning>)> {
+        let _ = options;
+        self.parse_request(body)
+    }
 
     /// Builds a model-listing request; `cursor` is the pagination cursor
     /// returned by the previous page.

@@ -90,7 +90,11 @@ impl Client {
         )
         .await?;
         let meta = ResponseMeta::new(d.status, d.headers);
-        let mut response = provider.chat.format.parse_response(&body, &meta)?;
+        let mut response =
+            provider
+                .chat
+                .format
+                .parse_response_with(&body, &meta, &provider.format_options)?;
         let mut warnings = d.warnings;
         warnings.append(&mut response.warnings);
         response.warnings = warnings;
@@ -128,12 +132,12 @@ impl Client {
             .await);
         }
         Ok(StreamHandle::new(
-            d.status,
-            d.headers,
+            ResponseMeta::new(d.status, d.headers),
             d.warnings,
             d.body,
             SseParser::new(provider.limits.max_sse_event),
             provider.chat.format.as_ref(),
+            &provider.format_options,
             opts.include_raw,
         ))
     }

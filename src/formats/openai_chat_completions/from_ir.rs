@@ -12,7 +12,15 @@ use crate::ir::{
     Reasoning, Request, Role, Tool, ToolChoice, ToolOutputBlock,
 };
 
-use super::{FORMAT, text_block_reserved_key, tool_call_reserved_key};
+use super::{FORMAT, text_block_reserved_key, tool_call_reserved_key, validate_reasoning_field};
+
+/// Per-message serialization knobs threaded through [`build_message`].
+struct MsgCtx<'a> {
+    /// Conversion options (`thinking_as_text`, `downgrade_developer`, …).
+    options: &'a ConvertOptions,
+    /// Wire field name of the thinking channel (§ 12).
+    reasoning_field: &'a str,
+}
 
 /// Output of the build-side conversion, before
 /// [`crate::finalize_request`] runs.
@@ -45,12 +53,17 @@ pub(crate) fn build_body(
     options: &ConvertOptions,
     format_options: &OpenAiChatCompletionsOptions,
 ) -> Result<BuiltBody> {
+    validate_reasoning_field(&format_options.reasoning_field)?;
     crate::convert::check_finite_sampling(&[
         (req.temperature, "/temperature"),
         (req.top_p, "/top_p"),
         (req.frequency_penalty, "/frequency_penalty"),
         (req.presence_penalty, "/presence_penalty"),
     ])?;
+    let msg_ctx = MsgCtx {
+        options,
+        reasoning_field: &format_options.reasoning_field,
+    };
     let mut warnings = Vec::new();
     let mut log = MergeLog::new();
     let messages = preprocess_messages(req, options, &mut warnings);
@@ -73,7 +86,7 @@ pub(crate) fn build_body(
         build_message(
             msg,
             mi,
-            options,
+            &msg_ctx,
             &mut wire_messages,
             &mut pointers,
             &mut warnings,
@@ -499,7 +512,7 @@ fn apply_breakpoint(
 fn build_message(
     msg: &Message,
     mi: usize,
-    options: &ConvertOptions,
+    ctx: &MsgCtx<'_>,
     wire: &mut Vec<Value>,
     pointers: &mut Vec<(String, Role)>,
     warnings: &mut Vec<ConversionWarning>,
@@ -523,7 +536,7 @@ fn build_message(
         Role::System | Role::Developer | Role::User => {
             let (wire_role, ir_role) = match msg.role {
                 Role::System => ("system", Role::System),
-                Role::Developer if options.downgrade_developer => {
+                Role::Developer if ctx.options.downgrade_developer => {
                     warnings.push(warn(
                         WarningCode::RoleDowngraded,
                         format!("/messages/{}", wire.len()),
@@ -544,7 +557,7 @@ fn build_message(
         }
         Role::Assistant => {
             let ptr = format!("/messages/{}", wire.len());
-            let item = build_assistant_message(msg, mi, options, &ptr, warnings, log)?;
+            let item = build_assistant_message(msg, mi, ctx, &ptr, warnings, log)?;
             wire.push(item);
             pointers.push((ptr, Role::Assistant));
         }
@@ -582,22 +595,24 @@ fn encode_role_content(
     encode_input_content(&msg.content, msg_ptr, system_channel, warnings, log)
 }
 
-/// Serializes an assistant message: native thinking → `reasoning_content`,
-/// text/refusal blocks → `content`, tool calls → `tool_calls[]`.
+/// Serializes an assistant message: native thinking → the configured
+/// `reasoning_field` (default `reasoning_content`, § 12), text/refusal
+/// blocks → `content`, tool calls → `tool_calls[]`.
 ///
 /// The wire message holds one field per channel, so only canonical block
 /// order (thinking → content → tool calls) survives a round trip:
 /// serializing an interleaved sequence warns `BlockOrderLost` (semantic),
-/// and joining several thinking texts into the single `reasoning_content`
+/// and joining several thinking texts into the single thinking-channel
 /// string warns `ThinkingBlocksJoined` (cosmetic).
 fn build_assistant_message(
     msg: &Message,
     mi: usize,
-    options: &ConvertOptions,
+    ctx: &MsgCtx<'_>,
     msg_ptr: &str,
     warnings: &mut Vec<ConversionWarning>,
     log: &mut MergeLog,
 ) -> Result<Value> {
+    let reasoning_field = ctx.reasoning_field;
     let mut thinking_texts: Vec<String> = Vec::new();
     let mut text_blocks: Vec<&ContentBlock> = Vec::new();
     let mut calls: Vec<Value> = Vec::new();
@@ -637,7 +652,7 @@ fn build_assistant_message(
                 signature,
                 extra,
             } => {
-                let ptr = format!("{msg_ptr}/reasoning_content");
+                let ptr = format!("{msg_ptr}/{reasoning_field}");
                 if is_native_thinking(extra) {
                     if let Some(text) = text {
                         reached(THINKING);
@@ -647,12 +662,14 @@ fn build_assistant_message(
                         warnings.push(warn(
                             WarningCode::ThinkingSignatureDropped,
                             ptr,
-                            "`reasoning_content` is a plaintext channel; the thinking signature \
-                             was dropped",
+                            format!(
+                                "`{reasoning_field}` is a plaintext channel; the thinking \
+                                 signature was dropped"
+                            ),
                         ));
                     }
                     thinking_extras.push(extra);
-                } else if options.thinking_as_text
+                } else if ctx.options.thinking_as_text
                     && let Some(text) = text
                 {
                     reached(THINKING);
@@ -661,8 +678,10 @@ fn build_assistant_message(
                         warnings.push(warn(
                             WarningCode::ThinkingSignatureDropped,
                             ptr,
-                            "thinking_as_text re-emitted foreign thinking as `reasoning_content`; \
-                             its signature was dropped",
+                            format!(
+                                "thinking_as_text re-emitted foreign thinking as \
+                                 `{reasoning_field}`; its signature was dropped"
+                            ),
                         ));
                     }
                 } else {
@@ -722,19 +741,21 @@ fn build_assistant_message(
         warnings.push(warn(
             WarningCode::BlockOrderLost,
             msg_ptr.to_owned(),
-            "assistant blocks interleave across the reasoning_content / content / \
-             tool_calls channels; the wire message holds one field per channel, so \
-             parsing it back yields canonical order (thinking, content, tool calls) \
-             and the original block order is lost",
+            format!(
+                "assistant blocks interleave across the {reasoning_field} / content / \
+                 tool_calls channels; the wire message holds one field per channel, so \
+                 parsing it back yields canonical order (thinking, content, tool calls) \
+                 and the original block order is lost"
+            ),
         ));
     }
     if thinking_texts.len() > 1 {
         warnings.push(warn(
             WarningCode::ThinkingBlocksJoined,
-            format!("{msg_ptr}/reasoning_content"),
+            format!("{msg_ptr}/{reasoning_field}"),
             format!(
                 "{} thinking texts were joined with \"\\n\\n\" into the single \
-                 `reasoning_content` string; block boundaries are lost (order kept)",
+                 `{reasoning_field}` string; block boundaries are lost (order kept)",
                 thinking_texts.len()
             ),
         ));
@@ -748,7 +769,7 @@ fn build_assistant_message(
         item["content"] = content;
     }
     if !thinking_texts.is_empty() {
-        item["reasoning_content"] = Value::from(thinking_texts.join("\n\n"));
+        item[reasoning_field] = Value::from(thinking_texts.join("\n\n"));
     }
     if !calls.is_empty() {
         item["tool_calls"] = Value::Array(calls);

@@ -9,7 +9,7 @@ use futures_core::Stream;
 
 use crate::convert::{ConversionWarning, WarningCode};
 use crate::error::{Error, Result};
-use crate::format::{ApiFormat, StreamParser};
+use crate::format::{ApiFormat, FormatOptions, ResponseMeta, StreamParser};
 use crate::http::{BodyStream, SseEvent, SseParser};
 use crate::ir::{Accumulator, Response, StreamEvent, StreamItem};
 
@@ -66,25 +66,25 @@ pub struct StreamHandle {
 
 impl StreamHandle {
     /// Wraps an accepted (2xx) streaming response. `format` supplies the
-    /// stream parser and the canonical id carried by handle-produced
-    /// warnings.
+    /// stream parser — honoring the provider's `format_options` (§ 12) —
+    /// and the canonical id carried by handle-produced warnings.
     pub(crate) fn new(
-        status: u16,
-        headers: http::HeaderMap,
+        meta: ResponseMeta,
         build_warnings: Vec<ConversionWarning>,
         body: BodyStream,
         sse: SseParser,
         format: &dyn ApiFormat,
+        format_options: &FormatOptions,
         include_raw: bool,
     ) -> Self {
         Self {
-            status,
-            headers,
+            status: meta.status,
+            headers: meta.headers,
             build_warnings,
             include_raw,
             body,
             sse,
-            parser: format.stream_parser(),
+            parser: format.stream_parser_with(format_options),
             format_id: format.id().to_owned(),
             queue: VecDeque::new(),
             pending_warnings: Vec::new(),

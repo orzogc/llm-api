@@ -3,11 +3,12 @@
 //! Chat Completions streams carry per-choice `delta` fragments with no
 //! explicit block boundaries; this parser infers them statefully:
 //!
-//! - `delta.content`, `delta.reasoning_content` and `delta.refusal` are
-//!   three text channels; a fragment on a different channel than the last
-//!   one closes the current block and opens a new one, so
-//!   `reasoning_content` ↔ `content` transitions produce interleaved
-//!   `Thinking` / `Text` blocks in arrival order. Tool-call fragments do
+//! - `delta.content`, the configured thinking field (default
+//!   `delta.reasoning_content`, § 12) and `delta.refusal` are three text
+//!   channels; a fragment on a different channel than the last one closes
+//!   the current block and opens a new one, so thinking ↔ `content`
+//!   transitions produce interleaved `Thinking` / `Text` blocks in
+//!   arrival order. Tool-call fragments do
 //!   **not** close the text channel — the wire message holds one string
 //!   per channel, so later same-channel text merges into its earlier
 //!   block and the accumulated message equals the non-streaming parse of
@@ -58,11 +59,13 @@ use serde_json::{Map, Value};
 
 use crate::convert::{ConversionWarning, WarningCode};
 use crate::error::{Error, Result};
-use crate::format::StreamParser;
+use crate::format::{OpenAiChatCompletionsOptions, StreamParser};
 use crate::http::SseEvent;
 use crate::ir::{BlockDelta, ContentBlock, Extra, StreamEvent};
 
-use super::{FORMAT, text_block_reserved_key, to_ir, tool_call_reserved_key};
+use super::{
+    FORMAT, text_block_reserved_key, to_ir, tool_call_reserved_key, validate_reasoning_field,
+};
 
 /// Parse-side warning shorthand.
 fn warn(
@@ -78,18 +81,20 @@ fn warn(
 enum Channel {
     /// `delta.content` → `Text` block.
     Content,
-    /// `delta.reasoning_content` → `Thinking` block.
+    /// The configured thinking-channel field (default
+    /// `delta.reasoning_content`, § 12) → `Thinking` block.
     Reasoning,
     /// `delta.refusal` → refusal-marked `Text` block (§ 9).
     Refusal,
 }
 
 impl Channel {
-    /// The wire `delta` field this channel reads.
-    fn field(self) -> &'static str {
+    /// The wire `delta` field this channel reads; `reasoning_field` is
+    /// the configured thinking-channel name (§ 12).
+    fn field(self, reasoning_field: &str) -> &str {
         match self {
             Self::Content => "content",
-            Self::Reasoning => "reasoning_content",
+            Self::Reasoning => reasoning_field,
             Self::Refusal => "refusal",
         }
     }
@@ -468,7 +473,7 @@ fn relock_kind(state: &mut ToolCallState, declared: PayloadKind) {
 
 /// Stateful stream parser for `openai_chat_completions` (one instance per
 /// stream). Implements [`StreamParser`].
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ChatCompletionsStreamParser {
     started: bool,
     terminal: bool,
@@ -483,13 +488,41 @@ pub struct ChatCompletionsStreamParser {
     warned_interleaved: bool,
     /// Unknown delta field names already warned about.
     warned_unknown: BTreeSet<String>,
+    /// Wire field name of the thinking channel (§ 12); validated on the
+    /// first `parse` call (`stream_parser_with` cannot fail).
+    reasoning_field: String,
+}
+
+impl Default for ChatCompletionsStreamParser {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ChatCompletionsStreamParser {
-    /// A fresh parser.
+    /// A fresh parser with the default options.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self::with_options(&OpenAiChatCompletionsOptions::default())
+    }
+
+    /// A fresh parser honoring the format options (§ 12): deltas of the
+    /// configured `reasoning_field` stream as the thinking channel, and a
+    /// `reasoning_content` delta under a custom name is an ordinary
+    /// unknown field.
+    #[must_use]
+    pub fn with_options(options: &OpenAiChatCompletionsOptions) -> Self {
+        Self {
+            started: false,
+            terminal: false,
+            next_index: 0,
+            channel: None,
+            tool_calls: BTreeMap::new(),
+            warned_multiple: false,
+            warned_interleaved: false,
+            warned_unknown: BTreeSet::new(),
+            reasoning_field: options.reasoning_field.clone(),
+        }
     }
 
     fn alloc_index(&mut self) -> usize {
@@ -605,15 +638,15 @@ impl ChatCompletionsStreamParser {
             && self.tool_calls.values().any(|t| t.block_index > index)
         {
             self.warned_interleaved = true;
+            let field = kind.field(&self.reasoning_field);
             warnings.push(warn(
                 WarningCode::BlockOrderLost,
-                format!("/choices/0/delta/{}", kind.field()),
+                format!("/choices/0/delta/{field}"),
                 format!(
-                    "a `{}` fragment arrived after a tool call opened; the wire holds one \
-                     string per channel, so the fragment merged into its earlier block and \
-                     the arrival interleaving is lost (the accumulated message reads in \
-                     canonical channel order, like the non-streaming parse)",
-                    kind.field()
+                    "a `{field}` fragment arrived after a tool call opened; the wire holds \
+                     one string per channel, so the fragment merged into its earlier block \
+                     and the arrival interleaving is lost (the accumulated message reads in \
+                     canonical channel order, like the non-streaming parse)"
                 ),
             ));
         }
@@ -731,7 +764,10 @@ impl ChatCompletionsStreamParser {
         events: &mut Vec<StreamEvent>,
         warnings: &mut Vec<ConversionWarning>,
     ) {
-        if let Some(s) = delta.get("reasoning_content").and_then(Value::as_str) {
+        if let Some(s) = delta
+            .get(self.reasoning_field.as_str())
+            .and_then(Value::as_str)
+        {
             self.channel_delta(Channel::Reasoning, s, events, warnings);
         }
         if let Some(s) = delta.get("content").and_then(Value::as_str) {
@@ -751,13 +787,15 @@ impl ChatCompletionsStreamParser {
         let mut leftover = Map::new();
         if let Some(obj) = delta.as_object() {
             for (key, value) in obj {
-                match key.as_str() {
-                    "role" | "content" | "reasoning_content" | "refusal" | "tool_calls" => {}
-                    _ if value.is_null() => {}
-                    _ => {
-                        leftover.insert(key.clone(), value.clone());
-                    }
+                // The modeled keys; with a custom `reasoning_field` a wire
+                // `reasoning_content` is an ordinary unknown field and
+                // takes the leftover fold below.
+                let modeled = matches!(key.as_str(), "role" | "content" | "refusal" | "tool_calls")
+                    || *key == self.reasoning_field;
+                if modeled || value.is_null() {
+                    continue;
                 }
+                leftover.insert(key.clone(), value.clone());
             }
         }
         if !leftover.is_empty() {
@@ -1043,6 +1081,10 @@ fn finalize_tool_call(
 
 impl StreamParser for ChatCompletionsStreamParser {
     fn parse(&mut self, event: &SseEvent) -> Result<(Vec<StreamEvent>, Vec<ConversionWarning>)> {
+        // `stream_parser_with` cannot fail; an invalid configured
+        // `reasoning_field` reports here, matching the build/parse entry
+        // points.
+        validate_reasoning_field(&self.reasoning_field)?;
         if self.terminal {
             // Data after the protocol terminator — a repeated `[DONE]`
             // included — cannot be attributed.

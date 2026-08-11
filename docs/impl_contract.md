@@ -87,14 +87,28 @@ dropped with a cosmetic `StreamOptionsDropped` warning (not mirrored into
 - Native → reconstruct the provider structure. Foreign (has another
   format's namespace, or plaintext-only where F validates signatures) →
   drop + `ThinkingDropped` (semantic), unless `thinking_as_text` → emit
-  `text` into F's thinking-text channel (CC `reasoning_content`; Anthropic
-  `thinking` block without signature; Google `thought: true` part;
-  Responses `content: [{type: "reasoning_text"}]` — the official raw-CoT
-  channel), adding `ThinkingSignatureDropped` (semantic) when a signature
-  existed.
+  `text` into F's thinking-text channel (CC `reasoning_content` — the
+  configured `reasoning_field`; Anthropic `thinking` block without
+  signature; Google `thought: true` part; Responses `content: [{type:
+  "reasoning_text"}]` — the official raw-CoT channel), adding
+  `ThinkingSignatureDropped` (semantic) when a signature existed.
 - Plaintext-only thinking (no signature, no namespace) is native to CC
-  (its channel is plaintext `reasoning_content`); on the other three it is
-  foreign (see above).
+  (its channel is a plaintext wire field, by default `reasoning_content`);
+  on the other three it is foreign (see above).
+- The CC thinking-channel field name comes from
+  `OpenAiChatCompletionsOptions.reasoning_field` (default
+  `reasoning_content`) and is the single authority on both sides: under a
+  custom name the wire `reasoning_content` demotes to an ordinary unknown
+  field (message extra on parse, stream-delta leftover fold), and the
+  configured field is consumed from the unknown-field map instead of the
+  typed one; warning locations and texts name the configured field.
+  `validate_reasoning_field` rejects an empty name or a collision with
+  `role`/`content`/`refusal`/`tool_calls`/`tool_call_id`/`name`/
+  `function_call`/`audio` identically at build, parse and the stream
+  parser's first `parse`. Options reach the parse/stream side through the
+  defaulted `ApiFormat::{parse_response_with, parse_request_with,
+  stream_parser_with}` — the client always calls the `_with` variants;
+  count/models paths take no format options.
 - "Request enables thinking" (for § 7.3 warnings) := `reasoning` present
   and (`enabled == Some(true)`, or `enabled` unset and `effort` set to
   something other than `Effort::None`).

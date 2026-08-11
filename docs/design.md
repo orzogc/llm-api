@@ -275,9 +275,10 @@ absent.
 
 `Thinking { text, signature, extra }`:
 
-- `text`: plaintext chain of thought (CC dialects' `reasoning_content`;
-  Responses `content` arrays of `reasoning_text` parts — raw reasoning,
-  preferred over the summary when both are exposed) or joined summary text.
+- `text`: plaintext chain of thought (CC dialects' `reasoning_content` —
+  the field name is per-provider configurable, § 12; Responses `content`
+  arrays of `reasoning_text` parts — raw reasoning, preferred over the
+  summary when both are exposed) or joined summary text.
   Note: replaying `reasoning_content` in **input** messages is rejected by
   some dialects (DeepSeek documents a 400); the library maps the channel
   faithfully and returns the upstream error unchanged.
@@ -1113,6 +1114,14 @@ pub trait ApiFormat: Send + Sync {
     /// part inference, Responses output/content index flattening).
     fn stream_parser(&self) -> Box<dyn StreamParser>;
     fn parse_request(&self, body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)>;
+    // Defaulted `_with` variants add a `&FormatOptions` parameter to the
+    // three methods above that lack one (parse_response_with,
+    // parse_request_with, stream_parser_with). The client always calls
+    // the `_with` variants; the defaults ignore the options and forward,
+    // so third-party formats only override them for per-provider knobs
+    // (CC overrides all three for `reasoning_field`). `stream_parser_with`
+    // has no `Result`: invalid options surface from the parser's first
+    // `parse` call. Count/models paths take no format options.
     // Model listing / token counting; default impls return NotSupported.
     fn build_models_request(&self, ctx: &BuildCtx, cursor: Option<&str>) -> Result<BuiltRequest>;
     fn parse_models_response(&self, body: &[u8]) -> Result<(Vec<Model>, Option<String>)>; // page + next cursor
@@ -1242,7 +1251,26 @@ pub enum Override<T> { Inherit, Set(T), Disable }
     a beta flag, that is the user's responsibility (via `betas` or
     `extra_headers`), not the library's. `merge_consecutive_roles` (default `false`) merges adjacent
     same-role messages for dialect providers that do not auto-merge.
-  - `OpenAiChatCompletionsOptions { inject_include_usage: bool /* default true */ }`.
+  - `OpenAiChatCompletionsOptions { inject_include_usage: bool /* default
+    true */, reasoning_field: String /* default "reasoning_content" */ }`.
+    `reasoning_field` names the wire field of the CC plaintext thinking
+    channel, for dialects calling it `reasoning`, `thinking`, …. The
+    configured name is the single authority on both sides: build writes
+    native thinking there, parse (non-streaming and streaming) reads only
+    it, and under a custom name a wire `reasoning_content` is an ordinary
+    unknown field (message extra on parse; leftover fold on stream deltas).
+    An empty name, or one colliding with a modeled assistant/delta wire key
+    (`role`, `content`, `refusal`, `tool_calls`, `tool_call_id`, `name`,
+    `function_call`, `audio`), fails the conversion (`ConversionError`)
+    identically at all three entry points — build, parse, and the stream
+    parser's first `parse` call. Options reach the parse/stream side
+    through the defaulted `ApiFormat::{parse_response_with,
+    parse_request_with, stream_parser_with}` methods (§ 11) — the client
+    always calls the `_with` variants; the defaults forward to the plain
+    methods, so third-party formats are unaffected unless they need
+    per-provider knobs (`stream_parser_with` returns no `Result`;
+    implementations report invalid options from the parser's first
+    `parse`).
   - Responses/Google: none yet.
 - Per-call options: `CallOptions { model, convert, hooks, extra_headers,
   extra_query, include_raw }` — field-wise merge with the provider config,

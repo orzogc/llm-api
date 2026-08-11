@@ -45,14 +45,16 @@ reachable.
 | Chat (non-streaming + SSE streaming) | ✓ | ✓ | ✓ | ✓ |
 | Tool calling | ✓ | ✓ | ✓ | ✓ |
 | Image input (URL / base64 / file id) | URL, base64 | ✓ | ✓ | ✓ |
-| Thinking incl. replay signatures | plaintext (`reasoning_content`) | ✓ | ✓ | ✓ |
+| Thinking incl. replay signatures | plaintext (`reasoning_content`, field name configurable) | ✓ | ✓ | ✓ |
 | Structured output | ✓ | ✓ | JSON Schema only | ✓ |
 | Model listing | ✓ | ✓ | ✓ (paginated) | ✓ (paginated) |
 | Token counting | — (no endpoint) | ✓ | ✓ | ✓ |
 
 ¹ A single implementation covering CC dialects such as DeepSeek
-(`reasoning_content`). Third-party formats can be added by implementing the
-public `ApiFormat` trait.
+(`reasoning_content`; the thinking field name is configurable via
+`OpenAiChatCompletionsOptions.reasoning_field` for dialects calling it
+`reasoning`, `thinking`, …). Third-party formats can be added by
+implementing the public `ApiFormat` trait.
 
 ## Installation
 
