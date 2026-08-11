@@ -42,8 +42,8 @@ API 格式之间的**双向转换**，以及**可插拔的 HTTP 传输层**。�
 | 模型列表 | ✓ | ✓ | ✓（分页） | ✓（分页） |
 | token 计数 | —（无端点） | ✓ | ✓ | ✓ |
 
-¹ 单一实现即覆盖 DeepSeek（`reasoning_content`）等 CC 方言;思维链字段名可经
-`OpenAiChatCompletionsOptions.reasoning_field` 配置,以适配使用 `reasoning`、
+¹ 单一实现即覆盖 DeepSeek（`reasoning_content`）等 CC 方言；思维链字段名可经
+`OpenAiChatCompletionsOptions.reasoning_field` 配置，以适配使用 `reasoning`、
 `thinking` 等字段的方言。第三方格式可通过实现公开的 `ApiFormat` trait 接入。
 
 ## 安装

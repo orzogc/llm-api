@@ -28,8 +28,9 @@
 //!   unset (officially an empty parameter list). `custom` tools and other
 //!   kinds round-trip as `Tool::Opaque`. `ToolChoice::Tool` maps to
 //!   `{type: "function", function: {name}}`.
-//! - Assistant messages: native thinking → `reasoning_content` (see
-//!   below), text / refusal-marked blocks → `content`, `ToolCall` blocks →
+//! - Assistant messages: native thinking → the configured
+//!   `reasoning_field` (default `reasoning_content`, see below), text /
+//!   refusal-marked blocks → `content`, `ToolCall` blocks →
 //!   `tool_calls[]` (an id is required — `ConversionError` when absent).
 //!   The wire message holds one field per channel, so only canonical block
 //!   order (thinking → content → tool calls) survives; serializing an
@@ -62,9 +63,10 @@
 //! [`OpenAiChatCompletionsOptions::reasoning_field`] (§ 12); the
 //! configured name is the single authority on both sides — under a custom
 //! name a wire `reasoning_content` is an ordinary unknown field. A
-//! `Thinking` block is native iff its `extra`
-//! carries this namespace or no format namespace at all — plaintext
-//! thinking with no provenance is native to Chat Completions. Native
+//! `Thinking` block is native iff its `extra` carries a non-empty
+//! namespace for this format, or no non-empty format namespace at all —
+//! plaintext thinking with no provenance is native to Chat Completions.
+//! Native
 //! blocks emit their text (several join with `"\n\n"` — the wire field is
 //! a single string — adding a cosmetic `ThinkingBlocksJoined` warning);
 //! a signature has no channel and drops with

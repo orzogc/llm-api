@@ -1110,8 +1110,9 @@ pub trait ApiFormat: Send + Sync {
     /// Default impl builds a generic `Error::Api` from status + raw body.
     fn parse_error(&self, status: u16, headers: &http::HeaderMap, body: &[u8]) -> Error;
     /// One parser instance per stream: block-boundary inference is stateful
-    /// (CC tool-call index grouping and reasoning_content transitions, Google
-    /// part inference, Responses output/content index flattening).
+    /// (CC tool-call index grouping and configured thinking-field
+    /// transitions, Google part inference, Responses output/content index
+    /// flattening).
     fn stream_parser(&self) -> Box<dyn StreamParser>;
     fn parse_request(&self, body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)>;
     // Defaulted `_with` variants add a `&FormatOptions` parameter to the

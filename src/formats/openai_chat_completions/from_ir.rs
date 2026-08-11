@@ -9,7 +9,7 @@ use crate::error::{ConversionError, Result};
 use crate::format::{CallMode, OpenAiChatCompletionsOptions, to_data_url};
 use crate::ir::{
     CacheHint, ContentBlock, Effort, Extra, ImageSource, MergeLog, Message, OutputFormat,
-    Reasoning, Request, Role, Tool, ToolChoice, ToolOutputBlock,
+    Reasoning, Request, Role, Tool, ToolChoice, ToolOutputBlock, escape_pointer_token,
 };
 
 use super::{FORMAT, text_block_reserved_key, tool_call_reserved_key, validate_reasoning_field};
@@ -652,7 +652,7 @@ fn build_assistant_message(
                 signature,
                 extra,
             } => {
-                let ptr = format!("{msg_ptr}/{reasoning_field}");
+                let ptr = format!("{msg_ptr}/{}", escape_pointer_token(reasoning_field));
                 if is_native_thinking(extra) {
                     if let Some(text) = text {
                         reached(THINKING);
@@ -752,7 +752,7 @@ fn build_assistant_message(
     if thinking_texts.len() > 1 {
         warnings.push(warn(
             WarningCode::ThinkingBlocksJoined,
-            format!("{msg_ptr}/{reasoning_field}"),
+            format!("{msg_ptr}/{}", escape_pointer_token(reasoning_field)),
             format!(
                 "{} thinking texts were joined with \"\\n\\n\" into the single \
                  `{reasoning_field}` string; block boundaries are lost (order kept)",
@@ -882,11 +882,13 @@ fn encode_assistant_content(
     Some(Value::Array(parts))
 }
 
-/// § 4.4 / contract provenance for the plaintext `reasoning_content`
-/// channel: a thinking block is native to Chat Completions iff its `extra`
-/// has this format's namespace, or it has no format namespace at all
-/// (plaintext thinking is native here; a bare signature rides along
-/// optimistically but has no channel and is dropped with a warning).
+/// § 4.4 / contract provenance for the plaintext thinking channel (the
+/// configured `reasoning_field`, default `reasoning_content`): a thinking
+/// block is native to Chat Completions iff its `extra` carries a
+/// non-empty namespace for this format, or no non-empty format namespace
+/// at all (plaintext thinking is native here; a bare signature rides
+/// along optimistically but has no channel and is dropped with a
+/// warning).
 fn is_native_thinking(extra: &Extra) -> bool {
     let has_own = extra.get(FORMAT).is_some_and(|ns| !ns.is_empty());
     if has_own {

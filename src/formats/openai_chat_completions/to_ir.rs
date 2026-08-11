@@ -9,7 +9,7 @@ use crate::format::{OpenAiChatCompletionsOptions, ResponseMeta, parse_data_url};
 use crate::ir::{
     CacheHint, ContentBlock, Effort, Extra, FunctionTool, ImageSource, Message, OutputFormat,
     Reasoning, Request, Response, Role, StopReason, Tool, ToolChoice, ToolOutputBlock, Usage,
-    normalize_stop_reason,
+    escape_pointer_token, normalize_stop_reason,
 };
 
 use super::{
@@ -293,10 +293,10 @@ fn parse_choice(
 }
 
 /// Parses an assistant wire message (response side) into an IR assistant
-/// message: `reasoning_content` → `Thinking`, `content` → `Text`,
-/// `refusal` → refusal-marked `Text` (§ 9), `tool_calls` → `ToolCall`
-/// blocks; unknown message fields (`annotations`, `audio`, …) ride the
-/// message extra.
+/// message: the configured `reasoning_field` (default `reasoning_content`)
+/// → `Thinking`, `content` → `Text`, `refusal` → refusal-marked `Text`
+/// (§ 9), `tool_calls` → `ToolCall` blocks; unknown message fields
+/// (`annotations`, `audio`, …) ride the message extra.
 pub(crate) fn assistant_value_to_message(
     value: &Value,
     ptr: &str,
@@ -374,7 +374,7 @@ fn assistant_fields_to_blocks(
         Some(other) => {
             warnings.push(warn(
                 WarningCode::MalformedField,
-                format!("{ptr}/{reasoning_field}"),
+                format!("{ptr}/{}", escape_pointer_token(reasoning_field)),
                 format!("non-string `{reasoning_field}` kept verbatim in the message extra"),
             ));
             ns.insert(reasoning_field.to_owned(), other);

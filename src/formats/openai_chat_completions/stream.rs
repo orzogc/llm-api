@@ -61,7 +61,7 @@ use crate::convert::{ConversionWarning, WarningCode};
 use crate::error::{Error, Result};
 use crate::format::{OpenAiChatCompletionsOptions, StreamParser};
 use crate::http::SseEvent;
-use crate::ir::{BlockDelta, ContentBlock, Extra, StreamEvent};
+use crate::ir::{BlockDelta, ContentBlock, Extra, StreamEvent, escape_pointer_token};
 
 use super::{
     FORMAT, text_block_reserved_key, to_ir, tool_call_reserved_key, validate_reasoning_field,
@@ -641,7 +641,7 @@ impl ChatCompletionsStreamParser {
             let field = kind.field(&self.reasoning_field);
             warnings.push(warn(
                 WarningCode::BlockOrderLost,
-                format!("/choices/0/delta/{field}"),
+                format!("/choices/0/delta/{}", escape_pointer_token(field)),
                 format!(
                     "a `{field}` fragment arrived after a tool call opened; the wire holds \
                      one string per channel, so the fragment merged into its earlier block \
@@ -764,11 +764,29 @@ impl ChatCompletionsStreamParser {
         events: &mut Vec<StreamEvent>,
         warnings: &mut Vec<ConversionWarning>,
     ) {
-        if let Some(s) = delta
-            .get(self.reasoning_field.as_str())
-            .and_then(Value::as_str)
-        {
-            self.channel_delta(Channel::Reasoning, s, events, warnings);
+        match delta.get(self.reasoning_field.as_str()) {
+            // `null` is the absent canonical form (tier-1 silence).
+            None | Some(Value::Null) => {}
+            Some(Value::String(s)) => {
+                self.channel_delta(Channel::Reasoning, s, events, warnings);
+            }
+            Some(_) => {
+                // Parity with the non-streaming parse: warned, then kept
+                // verbatim on the unknown-field path — the leftover scan
+                // below lets non-string values of the configured field
+                // through, so they fold like any unknown delta field.
+                warnings.push(warn(
+                    WarningCode::MalformedField,
+                    format!(
+                        "/choices/0/delta/{}",
+                        escape_pointer_token(&self.reasoning_field)
+                    ),
+                    format!(
+                        "non-string `{}` kept verbatim as an unknown delta field",
+                        self.reasoning_field
+                    ),
+                ));
+            }
         }
         if let Some(s) = delta.get("content").and_then(Value::as_str) {
             self.channel_delta(Channel::Content, s, events, warnings);
@@ -789,9 +807,11 @@ impl ChatCompletionsStreamParser {
             for (key, value) in obj {
                 // The modeled keys; with a custom `reasoning_field` a wire
                 // `reasoning_content` is an ordinary unknown field and
-                // takes the leftover fold below.
+                // takes the leftover fold below. The configured field is
+                // consumed only when it carried thinking text — a
+                // non-string value (warned above) stays an unknown field.
                 let modeled = matches!(key.as_str(), "role" | "content" | "refusal" | "tool_calls")
-                    || *key == self.reasoning_field;
+                    || (*key == self.reasoning_field && value.is_string());
                 if modeled || value.is_null() {
                     continue;
                 }
