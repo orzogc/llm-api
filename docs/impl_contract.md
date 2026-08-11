@@ -37,12 +37,24 @@ fixtures under `tests/fixtures/<id>/`.
    node in the final body>, &mut merge_log)`. Assemble bottom-up. An IR
    `Tool`-role message that produces several wire messages merges its
    message-level extra into the **first** produced wire message.
+
+   A non-empty IR message whose serialization produced zero wire content
+   is omitted from the body with `EmptyMessageDropped` (semantic; design
+   § 7.6), `location` = the containing array (`/messages`, `/contents`,
+   `/input`), message text naming the IR message index. Genuinely empty
+   IR messages are the caller's own data and serialize as the format
+   allows.
 2. Merge `request.extra[<id>]` into the whole body with base `""` last.
 3. Collect `ConversionWarning`s using the exact `WarningCode`s from
    `src/convert/warnings.rs`; `location` is a JSON pointer into the final
    body (for a dropped field: the pointer where it would naturally live,
    e.g. `/top_k` on CC, `/generationConfig/thinkingConfig` for a Google
-   thinking warning).
+   thinking warning). `ConversionError` locations follow the variant's own
+   field doc instead: `InvalidBlockForRole.location` points at the
+   offending block **in the IR** (`/messages/{mi}/content/{bi}`, uniform
+   across formats — serialization aborted, so a final-body pointer may not
+   exist), while `MissingRequired.location` names the would-be output
+   field.
 4. `finalize_request(&mut body, &mut warnings, &merge_log, ctx.convert
    .strict, &ctx.hooks, &message_pointers)` — `message_pointers` =
    `(pointer, Role)` per serialized message in order; wire roles map to IR
@@ -187,7 +199,30 @@ Round-trip metadata flows **parse-attach → serialize-consume**.
   surface as `Unknown` with the warning emitted **once per stream**.
 - Usage unification (§ 8): Anthropic `input_tokens` += cache read+write;
   Google `output_tokens` = `candidatesTokenCount + thoughtsTokenCount`.
-  Keep the provider object in `Usage.raw`.
+  Keep the provider object in `Usage.raw`. Usage parses leniently on
+  every path (non-streaming, stream start, stream deltas, terminal
+  snapshots): a malformed usage object degrades to `usage: None` +
+  `MalformedField` — never fail the billed response/stream, never zero a
+  field silently. Anthropic's cumulative overlay keeps merging raw
+  fields, so a later well-formed snapshot self-heals. Count-tokens stays
+  fail-loud (§ 13) — the count is the payload.
+- Responses stop-reason derivation counts `function_call` **and**
+  `custom_tool_call` output items as tool use (both await
+  developer-supplied outputs; the latter stays an `Opaque` block). Other
+  awaiting kinds (`mcp_approval_request`, …) do not participate.
+- Stream disclosure (§ 6 applied to streams): a modeled delta channel
+  carrying a non-conforming type warns `MalformedField` and takes the
+  unknown-field path instead of being ignored (CC `content` / `refusal` /
+  `tool_calls`); a known delta kind addressed to an unmodeled (`Opaque`)
+  block degrades to `BlockDelta::Other` + `MalformedField` (once per
+  block) instead of failing the stream — the known×known block/delta
+  mismatch stays a hard `Error::Parse`; unmodeled members of a recognized
+  delta (e.g. Anthropic `thinking_delta.estimated_tokens`) surface as an
+  extra `BlockDelta::Other` (warned once per member name, transient —
+  never folded into the finalized block); a provider error frame inside a
+  2xx stream becomes `Error::Api` (Google `error` key, Anthropic `error`
+  event); a chunk with no modeled signal at all surfaces `Unknown` +
+  `MalformedField` (once per stream).
 - Google blocked prompt (no candidates, `promptFeedback.blockReason`):
   empty assistant message, `stop_reason: Some(ContentFilter)`, body in
   `raw`; streaming: `MessageStart` (if needed) + `MessageDelta {

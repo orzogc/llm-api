@@ -107,15 +107,19 @@ code is written for these in v1.
   IR data — no serde, no `#[non_exhaustive]`.
 - IR JSON representation: `ContentBlock` and `StreamEvent` use
   `#[serde(tag = "type", rename_all = "snake_case")]`; string-like enums
-  serialize as plain strings — `Role` is a closed set (derived, lowercase;
-  unknown wire roles never reach it: parsers keep the whole message as an
-  own-format `Opaque` per the implementation contract), while `Effort` and
+  serialize as plain strings — `Role` serializes as a plain lowercase
+  string, and unknown wire roles never reach it (parsers keep the whole
+  message as an own-format `Opaque` per the implementation contract); the
+  enum itself stays `#[non_exhaustive]` so a future cross-provider role (as
+  `developer` once was) can be added in a minor version. `Effort` and
   `StopReason` carry out-of-set values in `Other` (custom impls). Optional
   fields use
   `#[serde(default, skip_serializing_if)]`, and fields added later are always
   optional, so previously persisted IR JSON keeps deserializing. The IR JSON
   representation is covered by semver — an incompatible change is a
-  major-version change.
+  major-version change, and any major release that changes it must ship a
+  documented migration path for persisted IR JSON: downstream event logs
+  (agent history stores) depend on it.
 
 Module sketch:
 
@@ -818,6 +822,24 @@ warning. The opt-ins interact as follows:
 - Hooks can break signatures arbitrarily; per the § 6 pipeline note, post-hook
   consequences are the user's.
 
+### 7.6 Messages that serialize to nothing
+
+Block-level drops can hollow out a whole message: a foreign thinking-only
+assistant turn (with `thinking_as_text` off) loses its every block, each
+with its own warning. The uniform rule across all four formats: **a
+non-empty IR message whose serialization produced zero wire content is
+omitted from the request body**, with an `EmptyMessageDropped` (semantic)
+warning naming the IR message index — the wire never carries an empty turn
+the upstream would reject (Google requires non-empty `parts`; Anthropic
+non-empty `content`), and an empty turn carries no model-visible
+information beyond what the block-level warnings already disclosed. On
+Google, omission happens by creating a turn lazily on its first part, so
+the neighbours merge under the existing same-side grouping. A genuinely
+empty IR message (constructed by the caller with no blocks) is the
+caller's own data and is not covered by this rule. When every message is
+omitted the request serializes with an empty message array — the library
+does not invent content; the upstream rejection is the caller's signal.
+
 ## 8. Response model
 
 Two layers with different lifecycles:
@@ -858,7 +880,7 @@ pub enum StopReason { EndTurn, MaxTokens, StopSequence, ToolUse,
 | Source | Mapping |
 |---|---|
 | OpenAI CC `finish_reason` | `stop`→`EndTurn`, `length`→`MaxTokens`, `tool_calls`→`ToolUse`, `content_filter`→`ContentFilter`; anything else → `Other(original)` |
-| Responses | no finish reason; derived from `status` + `incomplete_details` (`max_output_tokens`→`MaxTokens`, `content_filter`→`ContentFilter`) + presence of `function_call` output items→`ToolUse`; `status:"failed"` becomes an `Error::Api` |
+| Responses | no finish reason; derived from `status` + `incomplete_details` (`max_output_tokens`→`MaxTokens`, `content_filter`→`ContentFilter`) + presence of `function_call` or `custom_tool_call` output items→`ToolUse` (both await developer-supplied outputs; `custom_tool_call` stays an `Opaque` block, so on this format `ToolUse` can co-occur with no typed `ToolCall` block — other awaiting item kinds, e.g. `mcp_approval_request`, do not participate and must be inspected by the caller); `status:"failed"` becomes an `Error::Api` |
 | Anthropic `stop_reason` | `end_turn`/`max_tokens`/`stop_sequence`/`tool_use`/`refusal` map directly; `pause_turn`→`PauseTurn` (actionable: resend the turn as-is to continue); `model_context_window_exceeded`, `compaction` → `Other(original)` |
 | Google `finishReason` | `STOP`→`EndTurn`, `MAX_TOKENS`→`MaxTokens`, safety family (`SAFETY`, `PROHIBITED_CONTENT`, `BLOCKLIST`, `SPII`, `IMAGE_*`)→`ContentFilter`, everything else → `Other(original)` |
 
@@ -904,6 +926,17 @@ already are (both documented as reasoning-inclusive), while Google's
 must not underflow). `reasoning_tokens` ← OpenAI
 `reasoning_tokens` / Anthropic `output_tokens_details.thinking_tokens` /
 Google `thoughtsTokenCount`.
+
+Usage parses leniently on every path (non-streaming and streaming): a
+malformed usage object — a gateway sending fractional token counts, wrong
+types — degrades to `usage: None` with a `MalformedField` warning. It never
+fails an otherwise-good billed response or stream, and never silently
+zeroes a field. (Count-tokens responses are the deliberate opposite: § 13
+pins them fail-loud, since the count *is* the payload.) Google's
+`toolUsePromptTokenCount` is deliberately not folded into `input_tokens` —
+the official docs do not pin whether `promptTokenCount` already includes
+it, and double-counting would be worse than under-reporting; the original
+value stays visible in `Usage.raw`.
 
 ## 9. Streaming
 

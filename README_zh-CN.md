@@ -62,6 +62,11 @@ futures-util = "0.3"       # 仅流式示例需要（`StreamExt`）
 
 MSRV：1.88。
 
+注意：llm-api 启用了 serde_json 的 `preserve_order` feature 以保证请求输出
+的字段序确定性。由于 Cargo 的 feature 合并是全局的，你自己的
+`serde_json::Map` 也会随之变为保持插入序（底层为 IndexMap），依赖树中会
+多出 `indexmap`。
+
 ## 快速上手
 
 ```rust
@@ -124,8 +129,13 @@ let stream = client.stream(&provider, &request, &CallOptions::default()).await?;
 let response = stream.collect().await?;
 ```
 
-未见到协议终止符就中断的流会报告为错误——静默的 EOF 绝不会被当作完整响应
-蒙混过关。
+未见到协议终止符就中断的流会报告为 `Error::TruncatedStream`——静默的 EOF
+绝不会被当作完整响应蒙混过关。截断与畸形数据（`Error::Parse`）是两个变
+体：截断通常值得重试，`Error::is_retryable()` 提供了这一建议性分类。
+
+从流累加得到的 `Response` 其 `raw` 为 `None`——不存在单一的服务商载荷可
+附。若需存档服务商原始帧，开启 `CallOptions::include_raw` 并逐条持久化
+`StreamItem::raw`（体积与保真的取舍由调用方决定）。
 
 ## 逃生通道
 
@@ -152,8 +162,22 @@ request.extra.set(
 每个命名空间只在序列化到对应格式时生效，服务商专有数据绝不会泄漏到其他服
 务商。从服务商解析到的非 null 未知字段也落入相同命名空间并原样往返。
 
+能用一等 IR 字段就优先用一等字段。例如 prompt 缓存不需要打 JSON 补丁：块
+级 `CacheHint` 会映射为 Anthropic 的 `cache_control`（含 TTL）与 Chat
+Completions 的 `prompt_cache_breakpoint`；没有块级通道的格式会给出
+`Cosmetic` 警告而不是失败：
+
+```rust
+use llm_api::{CacheHint, ContentBlock, Message};
+
+let cached = Message::user(vec![
+    ContentBlock::text("<大段稳定上下文…>").with_cache(CacheHint::with_ttl("1h")),
+]);
+```
+
 **钩子**——作用于序列化后 JSON 的闭包，在转换与 strict 检查之后、发送之前
-运行：
+运行。`on_message` 的下标指向目标格式序列化后的消息序列（经过该格式的拆
+分与合并），因此钩子应当作 IR 与 `extra` 都够不着时的最后手段：
 
 ```rust
 use llm_api::RequestHooks;
@@ -161,7 +185,8 @@ use llm_api::RequestHooks;
 let hooks = RequestHooks::new()
     .with_on_message(|index, _role, message| {
         if index == 0 {
-            message["cache_control"] = json!({"type": "ephemeral"});
+            // Chat Completions：消息上可选的参与者 name 字段。
+            message["name"] = json!("alice");
         }
         Ok(())
     })
@@ -188,6 +213,11 @@ let provider = provider.with_convert(ConvertOptions::default().strict(true));
 strict 模式下，构建侧任何未被覆盖的语义级警告都会在发起 IO 之前使调用失
 败。解析侧警告永远不会让调用失败——响应已经发生并计费——它们通过
 `Response::warnings` / `StreamItem::warnings` 上报。
+
+使用建议：strict 适合 CI 与调试。长程/交互式 agent 循环应默认 lenient 并
+把警告当作可观测事件——切换服务商后，回放外来历史每一轮都会正当地产生语
+义警告，strict 会直接拒发。持久化警告时按 `(code, location)` 去重：固定
+的请求形状每次调用都会产生完全相同的警告。
 
 ## 纯转换层
 
@@ -221,9 +251,11 @@ let count = client.count_tokens(&provider, &request, &CallOptions::default()).aw
 ```
 
 token 数只来自服务商端点（库从不在本地估算）；Chat Completions 没有该端
-点，返回 `Error::NotSupported`。各能力可按端点解耦——例如用 Anthropic 格式
-聊天、用 OpenAI 格式列模型——通过 `ProviderConfig::with_models_endpoint` /
-`with_count_tokens_endpoint` 配置。
+点，返回 `Error::NotSupported`。监控上下文水位时应以上一轮
+`Response::usage` 的反馈环为主、计数端点为辅。各能力可按端点解耦——例如用
+Anthropic 格式聊天、用 OpenAI 格式列模型——通过
+`ProviderConfig::with_models_endpoint` / `with_count_tokens_endpoint` 配
+置。翻页受 `Limits::max_model_pages` 约束，防止失控 cursor。
 
 ## 自定义 HTTP 传输
 
@@ -241,6 +273,11 @@ pub trait HttpClient: Send + Sync {
 
 API key 与请求分开传递，因此它不会出现在你的代码可能记录日志的
 `http::Request` 里；自带的 reqwest 实现会把注入的头标记为敏感。
+
+超时归传输层管。若要流式调用，**不要**给 reqwest 设全局
+`Client::timeout`——它覆盖整个响应*包括 body*，会把任何超过该时长的 SSE
+流拦腰截断。改用 `connect_timeout` 加 `read_timeout`（空闲读超时，每收到
+一块数据就重置），或在消费侧自行包一层 `tokio::time::timeout`。
 
 ## 文档
 

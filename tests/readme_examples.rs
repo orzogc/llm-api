@@ -11,8 +11,8 @@ use futures_util::StreamExt;
 use llm_api::formats::anthropic_messages::AnthropicMessages;
 use llm_api::formats::openai_chat_completions::OpenAiChatCompletions;
 use llm_api::{
-    ApiFormat, BlockDelta, BuildCtx, CallMode, CallOptions, Client, ConvertOptions, EndpointUrl,
-    Message, ProviderConfig, Request, RequestHooks, StreamEvent,
+    ApiFormat, BlockDelta, BuildCtx, CacheHint, CallMode, CallOptions, Client, ContentBlock,
+    ConvertOptions, EndpointUrl, Message, ProviderConfig, Request, RequestHooks, StreamEvent,
 };
 use serde_json::json;
 
@@ -94,12 +94,20 @@ fn extra_manipulation(request: &mut Request) {
     );
 }
 
+// README: first-class block-level cache hint.
+fn cache_hint() -> Message {
+    Message::user(vec![
+        ContentBlock::text("<large, stable context…>").with_cache(CacheHint::with_ttl("1h")),
+    ])
+}
+
 // README: Hooks.
 fn hooks() -> CallOptions {
     let hooks = RequestHooks::new()
         .with_on_message(|index, _role, message| {
             if index == 0 {
-                message["cache_control"] = json!({"type": "ephemeral"});
+                // Chat Completions: optional participant name on a message.
+                message["name"] = json!("alice");
             }
             Ok(())
         })
@@ -152,6 +160,7 @@ fn readme_snippets_compile() {
     let _ = streaming;
     let _ = streaming_accumulated;
     let _ = extra_manipulation;
+    let _ = cache_hint;
     let _ = hooks;
     let _ = strict;
     let _ = pure_conversion;

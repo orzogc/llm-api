@@ -72,6 +72,11 @@ futures-util = "0.3"       # only for the streaming example (`StreamExt`)
 
 MSRV: 1.88.
 
+Note: llm-api enables serde_json's `preserve_order` feature for
+deterministic request output. Cargo feature unification makes it global —
+your own `serde_json::Map` becomes insertion-ordered (IndexMap-backed) and
+`indexmap` joins your dependency tree.
+
 ## Quick start
 
 ```rust
@@ -135,8 +140,16 @@ let stream = client.stream(&provider, &request, &CallOptions::default()).await?;
 let response = stream.collect().await?;
 ```
 
-A stream that dies before its protocol terminator is reported as an error —
-a silent EOF is never passed off as a complete response.
+A stream that dies before its protocol terminator is reported as
+`Error::TruncatedStream` — a silent EOF is never passed off as a complete
+response. Truncation is kept distinct from malformed data (`Error::Parse`)
+because it is usually worth a retry; `Error::is_retryable()` encodes that
+advisory classification.
+
+A `Response` accumulated from a stream carries `raw: None` — there is no
+single provider payload to attach. To archive provider frames, enable
+`CallOptions::include_raw` and persist each `StreamItem::raw` (a
+size-versus-fidelity trade-off left to the caller).
 
 ## Escape hatches
 
@@ -165,8 +178,24 @@ Each namespace only applies when serializing to that format, so provider-
 specific data never leaks across providers. Non-null unknown fields parsed
 from a provider land in the same namespaces and round-trip verbatim.
 
+Prefer first-class IR fields where they exist. Prompt caching, for example,
+needs no JSON patching: a block-level `CacheHint` maps to Anthropic
+`cache_control` (TTL included) and to Chat Completions
+`prompt_cache_breakpoint`; formats without a block-level channel warn
+(`Cosmetic`) instead of failing:
+
+```rust
+use llm_api::{CacheHint, ContentBlock, Message};
+
+let cached = Message::user(vec![
+    ContentBlock::text("<large, stable context…>").with_cache(CacheHint::with_ttl("1h")),
+]);
+```
+
 **Hooks** — closures over the serialized JSON, run after conversion and the
-strict gate, before sending:
+strict gate, before sending. `on_message` indexes refer to the target-format
+message sequence (after the format's splits and merges), so treat hooks as
+the last resort for fields the IR and `extra` cannot reach:
 
 ```rust
 use llm_api::RequestHooks;
@@ -174,7 +203,8 @@ use llm_api::RequestHooks;
 let hooks = RequestHooks::new()
     .with_on_message(|index, _role, message| {
         if index == 0 {
-            message["cache_control"] = json!({"type": "ephemeral"});
+            // Chat Completions: optional participant name on a message.
+            message["name"] = json!("alice");
         }
         Ok(())
     })
@@ -203,6 +233,13 @@ Under strict, any non-overridden semantic warning on the build side fails
 the call before IO. Parse-side warnings never fail a call — the response
 already happened and was billed — they ride `Response::warnings` /
 `StreamItem::warnings` instead.
+
+Guidance: strict mode suits CI and debugging. Long-running or interactive
+agent loops should stay lenient and surface warnings as observable events —
+after a provider switch, replayed foreign history legitimately produces
+semantic warnings every turn, and strict would refuse to send at all. When
+persisting warnings, dedupe by `(code, location)`: a fixed request shape
+reproduces the identical warning on every call.
 
 ## The pure conversion layer
 
@@ -237,9 +274,12 @@ let count = client.count_tokens(&provider, &request, &CallOptions::default()).aw
 
 Token counts come from provider endpoints only (the library never estimates
 locally); Chat Completions has no endpoint and returns `Error::NotSupported`.
-Capabilities can be decoupled per endpoint — e.g. chat in Anthropic format
-while listing models in OpenAI format — via
-`ProviderConfig::with_models_endpoint` / `with_count_tokens_endpoint`.
+For context-window monitoring, prefer the `Response::usage` feedback loop
+from the previous turn and treat count endpoints as auxiliary. Capabilities
+can be decoupled per endpoint — e.g. chat in Anthropic format while listing
+models in OpenAI format — via `ProviderConfig::with_models_endpoint` /
+`with_count_tokens_endpoint`. Pagination is bounded by
+`Limits::max_model_pages` against runaway cursors.
 
 ## Custom HTTP transport
 
@@ -258,6 +298,12 @@ pub trait HttpClient: Send + Sync {
 The API key is passed separately from the request so it never sits in an
 `http::Request` your code might log; the bundled reqwest implementation
 marks the injected header sensitive.
+
+Timeouts belong to the transport. If you stream, do **not** set reqwest's
+global `Client::timeout` — it spans the whole response *including the body*,
+so it kills any SSE stream that outlives it. Use `connect_timeout` plus
+`read_timeout` (an idle-read timeout that resets on every chunk) instead,
+or wrap consumption in your own `tokio::time::timeout`.
 
 ## Documentation
 

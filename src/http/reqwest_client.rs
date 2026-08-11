@@ -5,6 +5,15 @@
 //! TLS backend is rustls with the platform certificate verifier (and its
 //! defaults include system-proxy support); opt into `native-tls` on your
 //! own reqwest dependency if you need the old backend.
+//!
+//! Timeouts: for streaming calls do **not** set the global
+//! [`reqwest::ClientBuilder::timeout`] — it spans the entire response
+//! *including the body*, so any SSE stream outliving it dies mid-flight as
+//! `Transport(Timeout)`. Use `connect_timeout` plus `read_timeout` (an
+//! idle-read timeout that resets on each chunk) instead; the library adds
+//! no timeouts of its own, and a stalled stream with no transport timeout
+//! pends forever unless the caller wraps consumption (e.g.
+//! `tokio::time::timeout`).
 
 use std::future::Future;
 use std::pin::Pin;
