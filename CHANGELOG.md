@@ -5,7 +5,7 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The IR
 JSON representation is covered by semver (see `docs/design.md` § 3).
 
-## [0.1.0] - 2026-08-12
+## [0.1.0] - 2026-08-24
 
 Initial release.
 
