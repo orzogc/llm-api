@@ -6,8 +6,8 @@
 
 use llm_api::formats::google_generate_content::{GoogleGenerateContent, request_from_ir};
 use llm_api::{
-    ApiFormat, BuildCtx, CallMode, ConvertOptions, EndpointUrl, Error, Message, Reasoning, Request,
-    WarningCode, ids,
+    ApiFormat, BuildCtx, CallMode, ConvertOptions, EndpointUrl, Error,
+    GoogleGenerateContentOptions, Message, Reasoning, Request, WarningCode, ids,
 };
 use serde_json::{Value, json};
 
@@ -39,8 +39,12 @@ fn strict_ctx() -> BuildCtx {
 fn extra_created_object_path_marks_warning_overridden() {
     // The converter emits no `generationConfig` for a disabled-reasoning
     // request, so the merge creates the whole path from vacant keys.
-    let (body, warnings) =
-        request_from_ir(&request_with_disable_override(), &ConvertOptions::default()).unwrap();
+    let (body, warnings) = request_from_ir(
+        &request_with_disable_override(),
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap();
     assert_eq!(
         body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
         json!(0)

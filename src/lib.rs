@@ -37,9 +37,9 @@ pub use error::{
 };
 pub use format::{
     AnthropicAuthStyle, AnthropicOptions, ApiFormat, AuthScheme, BuildCtx, BuiltRequest, CallMode,
-    EndpointUrl, FormatOptions, OpenAiChatCompletionsOptions, ResponseMeta, StreamParser,
-    build_url, encode_path_segment, extract_error_message, finalize_request, generic_api_error,
-    ids, parse_data_url, to_data_url,
+    EndpointUrl, FormatOptions, GoogleGenerateContentOptions, GoogleSafetySettings,
+    OpenAiChatCompletionsOptions, ResponseMeta, StreamParser, build_url, encode_path_segment,
+    extract_error_message, finalize_request, generic_api_error, ids, parse_data_url, to_data_url,
 };
 pub use ir::{
     Accumulator, BlockDelta, CacheHint, ContentBlock, Effort, Extra, FunctionTool, ImageSource,

@@ -223,6 +223,8 @@ pub struct FormatOptions {
     pub anthropic: AnthropicOptions,
     /// OpenAI Chat Completions knobs.
     pub openai_chat_completions: OpenAiChatCompletionsOptions,
+    /// Google `generateContent` knobs.
+    pub google_generate_content: GoogleGenerateContentOptions,
     /// Free-form knobs for third-party formats, keyed by format id.
     pub custom: BTreeMap<String, Value>,
 }
@@ -303,6 +305,39 @@ impl Default for OpenAiChatCompletionsOptions {
             reasoning_field: "reasoning_content".to_owned(),
         }
     }
+}
+
+/// What the Google format writes into the request's `safetySettings`.
+///
+/// The variants pin the two platform-specific "all filters off" presets:
+/// AI Studio (the Gemini API) and Vertex AI accept different harm-category
+/// sets, so disabling filtering needs a different array on each. Both set
+/// every category's threshold to `OFF` (`BLOCK_NONE` for
+/// `HARM_CATEGORY_CIVIC_INTEGRITY`, which does not accept `OFF`).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GoogleSafetySettings {
+    /// Emit no `safetySettings` — the provider's defaults apply. Custom
+    /// settings can be injected via
+    /// `request.extra["google_generate_content"]["safetySettings"]`.
+    #[default]
+    Unset,
+    /// The AI Studio (Gemini API) all-off preset: every harm category the
+    /// platform accepts, threshold `OFF`.
+    DisableAiStudio,
+    /// The Vertex AI all-off preset: the Vertex category set (including
+    /// the `HARM_CATEGORY_IMAGE_*` families), threshold `OFF`.
+    DisableVertex,
+}
+
+/// Google `generateContent` options (§ 12).
+#[non_exhaustive]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GoogleGenerateContentOptions {
+    /// `safetySettings` handling; defaults to emitting nothing. A
+    /// `request.extra` `safetySettings` entry merges after the generated
+    /// body and therefore overrides a preset (RFC 7396: arrays replace).
+    pub safety_settings: GoogleSafetySettings,
 }
 
 /// An object-safe, third-party-implementable provider format (§ 11).

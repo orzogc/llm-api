@@ -1347,7 +1347,18 @@ pub enum Override<T> { Inherit, Set(T), Disable }
     per-provider knobs (`stream_parser_with` returns no `Result`;
     implementations report invalid options from the parser's first
     `parse`).
-  - Responses/Google: none yet.
+  - `GoogleGenerateContentOptions { safety_settings: GoogleSafetySettings
+    /* default Unset */ }`. `Unset` emits no `safetySettings` (provider
+    defaults; custom settings go through `extra`); `DisableAiStudio` /
+    `DisableVertex` emit the platform's all-filters-off preset — every
+    harm category the platform accepts at threshold `OFF` (`BLOCK_NONE`
+    for `HARM_CATEGORY_CIVIC_INTEGRITY`, which rejects `OFF`; the Vertex
+    set additionally covers the `HARM_CATEGORY_IMAGE_*` families). A
+    `request.extra` `safetySettings` merges after the generated body and
+    overrides a preset (arrays replace under RFC 7396). The count path
+    builds the same chat body, so a preset flows into `countTokens`
+    unchanged (the endpoint accepts the full `GenerateContentRequest`).
+  - Responses: none yet.
 - Per-call options: `CallOptions { model, convert, hooks, extra_headers,
   extra_query, include_raw }` — field-wise merge with the provider config,
   per-call wins. Format, URL and auth are deliberately not per-call

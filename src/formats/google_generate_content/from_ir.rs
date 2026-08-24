@@ -13,6 +13,7 @@ use serde_json::{Map, Value, json};
 use crate::convert::{ConversionWarning, ConvertOptions, OrphanToolCalls, WarningCode};
 use crate::error::{ConversionError, Result};
 use crate::format::ids::GOOGLE_GENERATE_CONTENT as ID;
+use crate::format::{GoogleGenerateContentOptions, GoogleSafetySettings};
 use crate::ir::{
     ContentBlock, Effort, Extra, ImageSource, MergeLog, Message, OutputFormat, Request, Role, Tool,
     ToolChoice, ToolOutputBlock,
@@ -37,13 +38,14 @@ pub(crate) struct BuiltBody {
 pub fn request_from_ir(
     req: &Request,
     options: &ConvertOptions,
+    format_options: &GoogleGenerateContentOptions,
 ) -> Result<(Value, Vec<ConversionWarning>)> {
     let BuiltBody {
         mut body,
         mut warnings,
         merge_log,
         message_pointers,
-    } = build_body(req, options)?;
+    } = build_body(req, options, format_options)?;
     crate::format::finalize_request(
         &mut body,
         &mut warnings,
@@ -84,8 +86,45 @@ fn warn(
     warnings.push(ConversionWarning::to_format(code, ID, location, message));
 }
 
+/// The `safetySettings` array for a configured preset; `None` for
+/// [`GoogleSafetySettings::Unset`]. Every category the platform accepts is
+/// set to `OFF` (`BLOCK_NONE` for `HARM_CATEGORY_CIVIC_INTEGRITY`, which
+/// does not accept `OFF`); the category sets differ between AI Studio and
+/// Vertex AI (only the latter has the `HARM_CATEGORY_IMAGE_*` families).
+fn safety_settings_preset(settings: GoogleSafetySettings) -> Option<Value> {
+    let entry =
+        |category: &str, threshold: &str| json!({"category": category, "threshold": threshold});
+    match settings {
+        GoogleSafetySettings::Unset => None,
+        GoogleSafetySettings::DisableAiStudio => Some(Value::Array(vec![
+            entry("HARM_CATEGORY_HARASSMENT", "OFF"),
+            entry("HARM_CATEGORY_HATE_SPEECH", "OFF"),
+            entry("HARM_CATEGORY_SEXUALLY_EXPLICIT", "OFF"),
+            entry("HARM_CATEGORY_DANGEROUS_CONTENT", "OFF"),
+            entry("HARM_CATEGORY_CIVIC_INTEGRITY", "BLOCK_NONE"),
+            entry("HARM_CATEGORY_JAILBREAK", "OFF"),
+        ])),
+        GoogleSafetySettings::DisableVertex => Some(Value::Array(vec![
+            entry("HARM_CATEGORY_HATE_SPEECH", "OFF"),
+            entry("HARM_CATEGORY_DANGEROUS_CONTENT", "OFF"),
+            entry("HARM_CATEGORY_HARASSMENT", "OFF"),
+            entry("HARM_CATEGORY_SEXUALLY_EXPLICIT", "OFF"),
+            entry("HARM_CATEGORY_CIVIC_INTEGRITY", "BLOCK_NONE"),
+            entry("HARM_CATEGORY_IMAGE_HATE", "OFF"),
+            entry("HARM_CATEGORY_IMAGE_DANGEROUS_CONTENT", "OFF"),
+            entry("HARM_CATEGORY_IMAGE_HARASSMENT", "OFF"),
+            entry("HARM_CATEGORY_IMAGE_SEXUALLY_EXPLICIT", "OFF"),
+            entry("HARM_CATEGORY_JAILBREAK", "OFF"),
+        ])),
+    }
+}
+
 /// Builds the request body per the § 6 pipeline (steps 1–3).
-pub(crate) fn build_body(req: &Request, options: &ConvertOptions) -> Result<BuiltBody> {
+pub(crate) fn build_body(
+    req: &Request,
+    options: &ConvertOptions,
+    format_options: &GoogleGenerateContentOptions,
+) -> Result<BuiltBody> {
     crate::convert::check_finite_sampling(&[
         (req.temperature, "/generationConfig/temperature"),
         (req.top_p, "/generationConfig/topP"),
@@ -349,6 +388,14 @@ pub(crate) fn build_body(req: &Request, options: &ConvertOptions) -> Result<Buil
                 "Google cannot express parallel_tool_calls: false; the serial-execution constraint was dropped",
             );
         }
+    }
+
+    // ---- safetySettings: only the configured preset, never a default —
+    // absent means the provider's own defaults apply. A `request.extra`
+    // `safetySettings` merges later and overrides the preset (arrays
+    // replace under RFC 7396).
+    if let Some(settings) = safety_settings_preset(format_options.safety_settings) {
+        body.insert("safetySettings".to_owned(), settings);
     }
 
     if keep_system {

@@ -47,6 +47,12 @@
 //!   `extra["google_generate_content"]["thoughtSignature"]`.
 //! - `thinkingBudget` is deliberately not modeled (design § 4.7); rewrite
 //!   `generationConfig.thinkingConfig` via `extra` where needed.
+//! - `safetySettings` is emitted only when
+//!   [`crate::GoogleGenerateContentOptions::safety_settings`] selects an
+//!   all-filters-off preset (`DisableAiStudio` / `DisableVertex` — the two
+//!   platforms accept different harm-category sets); the default emits
+//!   nothing and custom settings go through `extra`, which also overrides
+//!   a preset (arrays replace under RFC 7396).
 //! - Usage: `input_tokens` = `promptTokenCount + toolUsePromptTokenCount`
 //!   (live-verified: the tool-use term is excluded from `promptTokenCount`
 //!   but included in `totalTokenCount`, so folding it in keeps
@@ -168,7 +174,11 @@ impl ApiFormat for GoogleGenerateContent {
             mut warnings,
             merge_log,
             message_pointers,
-        } = from_ir::build_body(req, &ctx.convert)?;
+        } = from_ir::build_body(
+            req,
+            &ctx.convert,
+            &ctx.format_options.google_generate_content,
+        )?;
         finalize_request(
             &mut body,
             &mut warnings,
@@ -270,7 +280,11 @@ impl ApiFormat for GoogleGenerateContent {
             mut warnings,
             merge_log,
             message_pointers,
-        } = from_ir::build_body(req, &ctx.convert)?;
+        } = from_ir::build_body(
+            req,
+            &ctx.convert,
+            &ctx.format_options.google_generate_content,
+        )?;
         finalize_request(
             &mut body,
             &mut warnings,

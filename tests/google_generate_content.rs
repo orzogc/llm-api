@@ -5,9 +5,9 @@
 use llm_api::formats::google_generate_content::{GoogleGenerateContent, request_from_ir};
 use llm_api::{
     ApiFormat, BuildCtx, CacheHint, CallMode, ContentBlock, ConversionError, ConversionWarning,
-    ConvertOptions, Effort, EndpointUrl, Error, FunctionTool, ImageSource, Message,
-    OrphanToolCalls, OutputFormat, Reasoning, Request, RequestHooks, Role, Tool, ToolChoice,
-    ToolOutputBlock, WarningCode, WarningSeverity,
+    ConvertOptions, Effort, EndpointUrl, Error, FunctionTool, GoogleGenerateContentOptions,
+    GoogleSafetySettings, ImageSource, Message, OrphanToolCalls, OutputFormat, Reasoning, Request,
+    RequestHooks, Role, Tool, ToolChoice, ToolOutputBlock, WarningCode, WarningSeverity,
 };
 use serde_json::{Value, json};
 
@@ -22,7 +22,12 @@ fn ctx(mode: CallMode) -> BuildCtx {
 }
 
 fn build(req: &Request) -> (Value, Vec<ConversionWarning>) {
-    request_from_ir(req, &ConvertOptions::default()).unwrap()
+    request_from_ir(
+        req,
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap()
 }
 
 fn codes(warnings: &[ConversionWarning]) -> Vec<WarningCode> {
@@ -181,7 +186,12 @@ fn non_finite_sampling_values_are_conversion_errors() {
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let mut req = user_req("hi");
             set(&mut req, bad);
-            let err = request_from_ir(&req, &ConvertOptions::default()).unwrap_err();
+            let err = request_from_ir(
+                &req,
+                &ConvertOptions::default(),
+                &GoogleGenerateContentOptions::default(),
+            )
+            .unwrap_err();
             match err {
                 Error::Conversion(ConversionError::NonFiniteNumber { location, .. }) => {
                     assert_eq!(location, expected);
@@ -369,7 +379,12 @@ fn invalid_system_blocks_error() {
     // Request.system allows Text only — even Opaque is rejected there.
     let mut req = user_req("hi");
     req.system = Some(vec![ContentBlock::opaque(FMT, json!({"text": "x"}))]);
-    let err = request_from_ir(&req, &ConvertOptions::default()).unwrap_err();
+    let err = request_from_ir(
+        &req,
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap_err();
     assert!(matches!(
         err,
         Error::Conversion(ConversionError::InvalidBlockForRole {
@@ -386,7 +401,12 @@ fn invalid_system_blocks_error() {
         ),
         Message::user_text("hi"),
     ]);
-    let err = request_from_ir(&req, &ConvertOptions::default()).unwrap_err();
+    let err = request_from_ir(
+        &req,
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap_err();
     assert!(matches!(
         err,
         Error::Conversion(ConversionError::InvalidBlockForRole {
@@ -563,7 +583,12 @@ fn role_block_validity_is_enforced() {
         (Role::Tool, ContentBlock::image_url("https://x/y.png")),
     ] {
         let req = Request::with_messages(vec![Message::new(role, vec![block])]);
-        let err = request_from_ir(&req, &ConvertOptions::default()).unwrap_err();
+        let err = request_from_ir(
+            &req,
+            &ConvertOptions::default(),
+            &GoogleGenerateContentOptions::default(),
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -821,7 +846,12 @@ fn tool_call_arguments_must_parse_to_an_object() {
         let req = Request::with_messages(vec![Message::assistant(vec![
             ContentBlock::tool_call_with_id("c1", "f", arguments),
         ])]);
-        let err = request_from_ir(&req, &ConvertOptions::default()).unwrap_err();
+        let err = request_from_ir(
+            &req,
+            &ConvertOptions::default(),
+            &GoogleGenerateContentOptions::default(),
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -866,7 +896,12 @@ fn tool_result_without_resolvable_name_errors() {
         Some("unknown".to_owned()),
         "x",
     )])]);
-    let err = request_from_ir(&req, &ConvertOptions::default()).unwrap_err();
+    let err = request_from_ir(
+        &req,
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap_err();
     assert!(matches!(
         err,
         Error::Conversion(ConversionError::MissingRequired { .. })
@@ -1110,7 +1145,8 @@ fn extra_override_marks_warnings() {
     req.extra
         .set(FMT, "generationConfig", json!({"thinkingConfig": null}));
     let options = ConvertOptions::new().strict(true);
-    let (_, warnings) = request_from_ir(&req, &options).unwrap();
+    let (_, warnings) =
+        request_from_ir(&req, &options, &GoogleGenerateContentOptions::default()).unwrap();
     let w = find(&warnings, &WarningCode::EffortUnsupported);
     assert!(w.overridden);
 }
@@ -1215,7 +1251,8 @@ fn thinking_provenance_controls_serialization() {
     ]);
     let mut options = ConvertOptions::default();
     options.thinking_as_text = true;
-    let (body, warnings) = request_from_ir(&req, &options).unwrap();
+    let (body, warnings) =
+        request_from_ir(&req, &options, &GoogleGenerateContentOptions::default()).unwrap();
     assert_eq!(
         body["contents"][1]["parts"][0],
         json!({"text": "planning", "thought": true})
@@ -1320,7 +1357,8 @@ fn missing_thinking_with_tool_calls_warns_or_fills() {
     // Filled message says so instead of implying a fix.
     let mut options = ConvertOptions::default();
     options.fill_missing_thinking = Some("tool call".to_owned());
-    let (_, warnings) = request_from_ir(&req, &options).unwrap();
+    let (_, warnings) =
+        request_from_ir(&req, &options, &GoogleGenerateContentOptions::default()).unwrap();
     let filled = find(&warnings, &WarningCode::MissingThinkingFilled);
     assert_eq!(
         filled.message,
@@ -1334,7 +1372,8 @@ fn missing_thinking_with_tool_calls_warns_or_fills() {
     // With thinking_as_text the placeholder actually reaches the wire, so
     // the message keeps its plain form and nothing is dropped.
     options.thinking_as_text = true;
-    let (body, warnings) = request_from_ir(&req, &options).unwrap();
+    let (body, warnings) =
+        request_from_ir(&req, &options, &GoogleGenerateContentOptions::default()).unwrap();
     let filled = find(&warnings, &WarningCode::MissingThinkingFilled);
     assert_eq!(
         filled.message,
@@ -1375,7 +1414,12 @@ fn orphan_passthrough_sends_as_is() {
 fn orphan_drop_trailing_removes_calls_and_flags_thinking() {
     let mut options = ConvertOptions::default();
     options.orphan_tool_calls = OrphanToolCalls::DropTrailing;
-    let (body, warnings) = request_from_ir(&orphan_request(), &options).unwrap();
+    let (body, warnings) = request_from_ir(
+        &orphan_request(),
+        &options,
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap();
     let parts = body["contents"][1]["parts"].as_array().unwrap();
     assert_eq!(parts.len(), 1, "only the thinking part remains: {parts:?}");
     find(&warnings, &WarningCode::OrphanToolCallsDropped);
@@ -1387,7 +1431,8 @@ fn orphan_drop_trailing_removes_calls_and_flags_thinking() {
         Message::user_text("hi"),
         Message::assistant(vec![ContentBlock::tool_call_with_id("c1", "f", "{}")]),
     ]);
-    let (body, warnings) = request_from_ir(&req, &options).unwrap();
+    let (body, warnings) =
+        request_from_ir(&req, &options, &GoogleGenerateContentOptions::default()).unwrap();
     assert_eq!(body["contents"].as_array().unwrap().len(), 1);
     find(&warnings, &WarningCode::OrphanToolCallsDropped);
 }
@@ -1396,7 +1441,12 @@ fn orphan_drop_trailing_removes_calls_and_flags_thinking() {
 fn orphan_synthesize_error_appends_results() {
     let mut options = ConvertOptions::default();
     options.orphan_tool_calls = OrphanToolCalls::SynthesizeError;
-    let (body, warnings) = request_from_ir(&orphan_request(), &options).unwrap();
+    let (body, warnings) = request_from_ir(
+        &orphan_request(),
+        &options,
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap();
     find(&warnings, &WarningCode::OrphanToolCallsSynthesized);
     let contents = body["contents"].as_array().unwrap();
     assert_eq!(contents.len(), 3);
@@ -1497,7 +1547,12 @@ fn strict_mode_escalates_semantic_warnings() {
     let mut req = user_req("hi");
     req.parallel_tool_calls = Some(false);
     req.tools = Some(vec![Tool::function(FunctionTool::new("f"))]);
-    let err = request_from_ir(&req, &ConvertOptions::new().strict(true)).unwrap_err();
+    let err = request_from_ir(
+        &req,
+        &ConvertOptions::new().strict(true),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap_err();
     match err {
         Error::Conversion(ConversionError::Strict { warnings, .. }) => {
             assert_eq!(codes(&warnings), vec![WarningCode::SerialToolCallsDropped]);
@@ -1508,7 +1563,12 @@ fn strict_mode_escalates_semantic_warnings() {
     // Cosmetic warnings pass the strict gate.
     let mut req = user_req("hi");
     req.cache_key = Some("k".to_owned());
-    let (_, warnings) = request_from_ir(&req, &ConvertOptions::new().strict(true)).unwrap();
+    let (_, warnings) = request_from_ir(
+        &req,
+        &ConvertOptions::new().strict(true),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap();
     assert_eq!(codes(&warnings), vec![WarningCode::CacheKeyDropped]);
 }
 
@@ -1592,5 +1652,95 @@ fn empty_and_prefill_conversations_serialize() {
     assert_eq!(
         body["contents"][1],
         json!({"role": "model", "parts": [{"text": "Roses are"}]})
+    );
+}
+
+// ---------------------------------------------------------------- safety settings
+
+#[test]
+fn safety_settings_presets() {
+    let req = user_req("hi");
+
+    // Default: no `safetySettings` — the provider's defaults apply.
+    let (body, warnings) = build(&req);
+    assert!(body.get("safetySettings").is_none());
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    let with_preset = |preset: GoogleSafetySettings| {
+        let mut opts = GoogleGenerateContentOptions::default();
+        opts.safety_settings = preset;
+        request_from_ir(&req, &ConvertOptions::default(), &opts).unwrap()
+    };
+
+    let (body, warnings) = with_preset(GoogleSafetySettings::DisableAiStudio);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        body["safetySettings"],
+        json!([
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF"},
+            {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_JAILBREAK", "threshold": "OFF"},
+        ])
+    );
+
+    let (body, warnings) = with_preset(GoogleSafetySettings::DisableVertex);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        body["safetySettings"],
+        json!([
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF"},
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF"},
+            {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_IMAGE_HATE", "threshold": "OFF"},
+            {"category": "HARM_CATEGORY_IMAGE_DANGEROUS_CONTENT", "threshold": "OFF"},
+            {"category": "HARM_CATEGORY_IMAGE_HARASSMENT", "threshold": "OFF"},
+            {"category": "HARM_CATEGORY_IMAGE_SEXUALLY_EXPLICIT", "threshold": "OFF"},
+            {"category": "HARM_CATEGORY_JAILBREAK", "threshold": "OFF"},
+        ])
+    );
+}
+
+#[test]
+fn safety_settings_extra_overrides_preset() {
+    // `request.extra` merges after the generated body: an explicit
+    // `safetySettings` replaces the preset array wholesale (RFC 7396).
+    let custom = json!([
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"}
+    ]);
+    let mut req = user_req("hi");
+    req.extra.set(FMT, "safetySettings", custom.clone());
+    let mut opts = GoogleGenerateContentOptions::default();
+    opts.safety_settings = GoogleSafetySettings::DisableAiStudio;
+    let (body, _) = request_from_ir(&req, &ConvertOptions::default(), &opts).unwrap();
+    assert_eq!(body["safetySettings"], custom);
+}
+
+#[test]
+fn safety_settings_preset_reaches_chat_and_count_bodies() {
+    // The trait path threads `BuildCtx.format_options`, and the count
+    // adapter reuses the chat build — the preset lands in both bodies.
+    let mut c = ctx(CallMode::Unary);
+    c.format_options.google_generate_content.safety_settings =
+        GoogleSafetySettings::DisableAiStudio;
+    let format = GoogleGenerateContent;
+    let req = user_req("hi");
+
+    let built = format.build_request(&req, &c).unwrap();
+    let body: Value = serde_json::from_slice(&built.body).unwrap();
+    assert_eq!(body["safetySettings"].as_array().unwrap().len(), 6);
+
+    let built = format.build_count_tokens_request(&req, &c).unwrap();
+    let body: Value = serde_json::from_slice(&built.body).unwrap();
+    assert_eq!(
+        body["generateContentRequest"]["safetySettings"]
+            .as_array()
+            .unwrap()
+            .len(),
+        6
     );
 }

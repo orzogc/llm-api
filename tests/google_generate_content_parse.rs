@@ -8,8 +8,9 @@ use llm_api::formats::google_generate_content::{
     GoogleGenerateContent, request_from_ir, request_to_ir, response_to_ir,
 };
 use llm_api::{
-    ApiErrorKind, ApiFormat, ContentBlock, ConvertOptions, Error, ImageSource, ResponseMeta, Role,
-    StopReason, Tool, ToolChoice, ToolOutputBlock, WarningCode, WarningSeverity,
+    ApiErrorKind, ApiFormat, ContentBlock, ConvertOptions, Error, GoogleGenerateContentOptions,
+    ImageSource, ResponseMeta, Role, StopReason, Tool, ToolChoice, ToolOutputBlock, WarningCode,
+    WarningSeverity,
 };
 use serde_json::{Value, json};
 
@@ -23,7 +24,12 @@ fn meta() -> ResponseMeta {
 /// parse → serialize pass must be the identity (§ 1 idempotence).
 fn assert_fixed_point(body: &Value) {
     let (ir, _) = request_to_ir(&serde_json::to_vec(body).unwrap()).unwrap();
-    let (serialized, _) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
+    let (serialized, _) = request_from_ir(
+        &ir,
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap();
     assert_eq!(&serialized, body, "canonical body must be a fixed point");
     let (ir2, _) = request_to_ir(&serde_json::to_vec(&serialized).unwrap()).unwrap();
     assert_eq!(
@@ -42,7 +48,12 @@ fn canonical_request_fixture_round_trips_losslessly() {
     .unwrap();
     let (ir, parse_warnings) = request_to_ir(&serde_json::to_vec(&fixture).unwrap()).unwrap();
     assert!(parse_warnings.is_empty(), "{parse_warnings:?}");
-    let (serialized, warnings) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
+    let (serialized, warnings) = request_from_ir(
+        &ir,
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap();
     assert!(
         warnings.is_empty(),
         "round trip must be warning-free: {warnings:?}"
@@ -121,7 +132,12 @@ fn canonical_request_fixture_round_trips_losslessly() {
     // Second pass: parse(serialize) reproduces the IR and the JSON.
     let (ir2, _) = request_to_ir(&serde_json::to_vec(&serialized).unwrap()).unwrap();
     assert_eq!(ir2, ir);
-    let (serialized2, _) = request_from_ir(&ir2, &ConvertOptions::default()).unwrap();
+    let (serialized2, _) = request_from_ir(
+        &ir2,
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap();
     assert_eq!(serialized2, serialized);
 }
 
@@ -235,7 +251,12 @@ fn malformed_function_response_value_is_preserved() {
         &json!({"response": "not an object"})
     );
     // Still a fixed point: the scalar is restored by the extra merge.
-    let (serialized, _) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
+    let (serialized, _) = request_from_ir(
+        &ir,
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap();
     assert_eq!(serialized, body);
 }
 
@@ -269,7 +290,12 @@ fn function_response_missing_response_warns_and_reads_empty() {
     assert_eq!(name.as_deref(), Some("f"));
     assert!(content.is_empty());
     assert_eq!(*is_error, None);
-    let (serialized, _) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
+    let (serialized, _) = request_from_ir(
+        &ir,
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap();
     assert_eq!(
         serialized["contents"][0]["parts"][0]["functionResponse"],
         json!({"name": "f", "response": {}})
@@ -298,7 +324,14 @@ fn function_response_missing_name_warns_and_stays_unset() {
     };
     assert_eq!(*name, None);
     assert!(matches!(&content[0], ToolOutputBlock::Text { text, .. } if text == "ok"));
-    assert!(request_from_ir(&ir, &ConvertOptions::default()).is_err());
+    assert!(
+        request_from_ir(
+            &ir,
+            &ConvertOptions::default(),
+            &GoogleGenerateContentOptions::default()
+        )
+        .is_err()
+    );
 
     // With an id matching an earlier call, re-serialization recovers the
     // name from history; the parse-side disclosure still fires.
@@ -315,7 +348,12 @@ fn function_response_missing_name_warns_and_stays_unset() {
         warnings[0].location,
         "/contents/1/parts/0/functionResponse/name"
     );
-    let (serialized, _) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
+    let (serialized, _) = request_from_ir(
+        &ir,
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap();
     assert_eq!(
         serialized["contents"][1]["parts"][0]["functionResponse"],
         json!({"id": "c1", "name": "f", "response": {"output": "ok"}})
@@ -365,7 +403,12 @@ fn legacy_function_role_parses_as_tool_turn() {
     assert_eq!(warnings[0].code, WarningCode::MalformedField);
     assert_eq!(warnings[0].location, "/contents/0/role");
     // Canonicalizes to the documented user turn on the way back.
-    let (serialized, _) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
+    let (serialized, _) = request_from_ir(
+        &ir,
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap();
     assert_eq!(serialized["contents"][0]["role"], "user");
 }
 
@@ -383,7 +426,12 @@ fn out_of_schema_content_role_warns_and_stays_user() {
     assert!(warnings[0].message.contains("assistant"));
     assert_eq!(ir.messages[0].role, Role::User);
     // Canonicalizes to role "user" on the way back.
-    let (serialized, _) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
+    let (serialized, _) = request_from_ir(
+        &ir,
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap();
     assert_eq!(serialized["contents"][0]["role"], "user");
 
     // Documented values stay warning-free — including the absent default.
@@ -510,8 +558,18 @@ fn snake_case_request_spellings_parse_into_modeled_fields() {
     let (ir_s, ws_s) = request_to_ir(&serde_json::to_vec(&snake).unwrap()).unwrap();
     assert_eq!(ir_s, ir_c);
     assert_eq!(ws_s, ws_c);
-    let (out_c, _) = request_from_ir(&ir_c, &ConvertOptions::default()).unwrap();
-    let (out_s, _) = request_from_ir(&ir_s, &ConvertOptions::default()).unwrap();
+    let (out_c, _) = request_from_ir(
+        &ir_c,
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap();
+    let (out_s, _) = request_from_ir(
+        &ir_s,
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap();
     assert_eq!(out_s, out_c);
     // Serialization always emits the canonical camelCase spelling.
     assert!(out_s.get("generationConfig").is_some());
@@ -591,7 +649,12 @@ fn system_instruction_with_non_text_parts_parses_as_leading_system_message() {
     );
 
     // The hoist rule makes the wire round-trip the identity, warning-free.
-    let (serialized, ser_warnings) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
+    let (serialized, ser_warnings) = request_from_ir(
+        &ir,
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap();
     assert!(ser_warnings.is_empty(), "{ser_warnings:?}");
     assert_eq!(serialized, body);
     let (ir2, _) = request_to_ir(&serde_json::to_vec(&serialized).unwrap()).unwrap();
@@ -605,7 +668,12 @@ fn system_instruction_with_non_text_parts_parses_as_leading_system_message() {
     let (ir, _) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
     assert_eq!(ir.system, None);
     assert_eq!(ir.messages[0].role, Role::System);
-    let (serialized, _) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
+    let (serialized, _) = request_from_ir(
+        &ir,
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap();
     assert_eq!(serialized, body);
 }
 
@@ -621,7 +689,12 @@ fn function_call_args_edge_cases() {
         &ir.messages[0].content[0],
         ContentBlock::ToolCall { arguments, .. } if arguments == "{}"
     ));
-    let (serialized, _) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
+    let (serialized, _) = request_from_ir(
+        &ir,
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap();
     assert_eq!(
         serialized["contents"][0]["parts"][0]["functionCall"],
         json!({"name": "f", "args": {}})
@@ -645,7 +718,14 @@ fn function_call_args_edge_cases() {
         &ir.messages[0].content[0],
         ContentBlock::ToolCall { arguments, .. } if arguments == "5"
     ));
-    assert!(request_from_ir(&ir, &ConvertOptions::default()).is_err());
+    assert!(
+        request_from_ir(
+            &ir,
+            &ConvertOptions::default(),
+            &GoogleGenerateContentOptions::default()
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -667,7 +747,12 @@ fn function_call_missing_name_warns_and_defaults_empty() {
         ContentBlock::ToolCall { id: None, name, arguments, .. }
             if name.is_empty() && arguments == "{}"
     ));
-    let (serialized, _) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
+    let (serialized, _) = request_from_ir(
+        &ir,
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap();
     assert_eq!(
         serialized["contents"][0]["parts"][0]["functionCall"],
         json!({"name": "", "args": {}})
@@ -780,7 +865,12 @@ fn mixed_tool_entry_canonicalizes_by_splitting() {
     assert!(parse_warnings.is_empty(), "{parse_warnings:?}");
     let tools = ir.tools.as_ref().unwrap();
     assert_eq!(tools.len(), 2);
-    let (serialized, warnings) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
+    let (serialized, warnings) = request_from_ir(
+        &ir,
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap();
     assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(
         serialized["tools"],
@@ -797,7 +887,12 @@ fn unknown_null_fields_canonicalize_to_absent() {
         "customTop": null
     });
     let (ir, _) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
-    let (serialized, _) = request_from_ir(&ir, &ConvertOptions::default()).unwrap();
+    let (serialized, _) = request_from_ir(
+        &ir,
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap();
     assert_eq!(
         serialized,
         json!({"contents": [{"role": "user", "parts": [{"text": "hi"}]}]})
@@ -1034,7 +1129,12 @@ fn thinking_response_parses_thought_parts() {
         llm_api::Message::user_text("haiku please"),
         resp.message.clone(),
     ]);
-    let (serialized, warnings) = request_from_ir(&req, &ConvertOptions::default()).unwrap();
+    let (serialized, warnings) = request_from_ir(
+        &req,
+        &ConvertOptions::default(),
+        &GoogleGenerateContentOptions::default(),
+    )
+    .unwrap();
     assert!(
         warnings.is_empty(),
         "replay must be warning-free: {warnings:?}"
