@@ -72,6 +72,7 @@ pub struct Request {
 /// The polymorphic `input` field: string shorthand or an item array.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum RequestInput {
     /// Shorthand for a single `user` text message.
     Text(String),
@@ -151,6 +152,7 @@ pub struct MessageItem {
 /// Message content: string shorthand or content parts.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum MessageContent {
     /// A single text input.
     Text(String),
@@ -199,6 +201,7 @@ pub struct FunctionCallOutputItem {
 /// The polymorphic `function_call_output.output` field.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum FunctionCallOutput {
     /// String output (the empty string encodes an empty result).
     Text(String),

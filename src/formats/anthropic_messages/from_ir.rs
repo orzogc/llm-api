@@ -4,7 +4,7 @@ use serde_json::{Map, Value, json};
 
 use crate::convert::{ConversionWarning, ConvertOptions, OrphanToolCalls, WarningCode};
 use crate::error::{ConversionError, Error, Result};
-use crate::format::BuildCtx;
+use crate::format::AnthropicOptions;
 use crate::ir::{
     CacheHint, ContentBlock, Effort, Extra, MergeLog, Message, Reasoning, Request, Role, Tool,
     ToolChoice, ToolOutputBlock, merge_patch,
@@ -88,15 +88,21 @@ fn warn(
 
 /// Builds the Anthropic Messages request body from the IR (§ 6 pipeline
 /// steps 1–3; `finalize_request` and URL building happen in the caller).
-pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) -> Result<ChatBody> {
+/// An empty `model` is omitted from the body (it comes from configuration,
+/// not the IR — the upstream requirement is the caller's concern).
+pub(crate) fn build_chat_body(
+    req: &Request,
+    model: &str,
+    convert: &ConvertOptions,
+    opts: &AnthropicOptions,
+    streaming: bool,
+) -> Result<ChatBody> {
     crate::convert::check_finite_sampling(&[
         (req.temperature, "/temperature"),
         (req.top_p, "/top_p"),
         (req.frequency_penalty, "/frequency_penalty"),
         (req.presence_penalty, "/presence_penalty"),
     ])?;
-    let opts = &ctx.format_options.anthropic;
-    let convert = &ctx.convert;
     let mut warnings: Vec<ConversionWarning> = Vec::new();
     let mut pending: Vec<Pending> = Vec::new();
     let mut log = MergeLog::new();
@@ -223,7 +229,9 @@ pub(crate) fn build_chat_body(req: &Request, ctx: &BuildCtx, streaming: bool) ->
     };
 
     let mut body = Map::new();
-    body.insert("model".to_owned(), Value::from(ctx.model.clone()));
+    if !model.is_empty() {
+        body.insert("model".to_owned(), Value::from(model));
+    }
     body.insert("max_tokens".to_owned(), Value::from(max_tokens));
 
     // Top-level system channel.

@@ -1744,3 +1744,29 @@ fn safety_settings_preset_reaches_chat_and_count_bodies() {
         6
     );
 }
+
+#[test]
+fn extra_rewritten_parts_forces_a_new_turn_instead_of_panicking() {
+    // README promises arbitrary override/delete via `extra`; a message
+    // that deletes or rewrites its shared turn's `parts` must not panic
+    // the next same-side message — it opens a fresh turn instead.
+    for patch in [json!(null), json!({"custom": true}), json!("scalar")] {
+        let mut first = Message::user_text("one");
+        first.extra.set(FMT, "parts", patch.clone());
+        let req = Request::with_messages(vec![first, Message::user_text("two")]);
+        let (body, warnings) = build(&req);
+        let contents = body["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 2, "{patch}: {body}");
+        // The customized turn keeps the user's shape (null deletes the key).
+        if patch.is_null() {
+            assert!(contents[0].get("parts").is_none(), "{body}");
+        } else {
+            assert_eq!(contents[0]["parts"], patch, "{body}");
+        }
+        // The second message lands intact in a fresh same-role turn.
+        assert_eq!(contents[1]["role"], json!("user"), "{body}");
+        assert_eq!(contents[1]["parts"][0]["text"], json!("two"), "{body}");
+        let w = find(&warnings, &WarningCode::MalformedField);
+        assert_eq!(w.location, "/contents/0/parts");
+    }
+}

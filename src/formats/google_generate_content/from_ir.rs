@@ -236,7 +236,27 @@ pub(crate) fn build_body(
         // Prospective turn index and base part index; block-level warning
         // locations use them even when the message ends up omitted (the
         // established would-be-location reading for dropped content).
-        let new_turn = sides.last() != Some(&side);
+        let mut new_turn = sides.last() != Some(&side);
+        if !new_turn && !contents[contents.len() - 1]["parts"].is_array() {
+            // A previous message's extra rewrote or deleted the shared
+            // turn's `parts` (RFC 7396 permits both). Appending to it is
+            // impossible; the message opens a fresh same-side turn instead
+            // — the customized turn stays untouched, nothing panics.
+            warn(
+                &mut warnings,
+                WarningCode::MalformedField,
+                format!("/contents/{}/parts", contents.len() - 1),
+                format!(
+                    "message-level `extra` left this turn's `parts` as a non-array; \
+                     IR message {mi} opens a new `{}` turn instead of appending",
+                    match side {
+                        Side::User => "user",
+                        Side::Model => "model",
+                    }
+                ),
+            );
+            new_turn = true;
+        }
         let ci = if new_turn {
             contents.len()
         } else {
@@ -245,6 +265,8 @@ pub(crate) fn build_body(
         let part_base = if new_turn {
             0
         } else {
+            // Invariant: the `!new_turn` path above verified `parts` is an
+            // array; a fresh turn is created with one below.
             contents[ci]["parts"]
                 .as_array()
                 .expect("content.parts is an array")

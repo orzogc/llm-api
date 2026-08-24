@@ -774,11 +774,11 @@ async fn auth_endpoint_set_used_verbatim() {
     let (client, captured) = scripted(vec![respond_json(&json!({"text": "ok"}))]);
     let mut provider = mock_provider();
     provider.auth = None; // Set wins even without a provider key.
-    provider.chat.auth = Override::Set(AuthHeader {
-        name: http::HeaderName::from_static("x-api-key"),
-        prefix: None,
-        value: ApiKey::new("endpoint-key"),
-    });
+    provider.chat.auth = Override::Set(AuthHeader::new(
+        http::HeaderName::from_static("x-api-key"),
+        None,
+        ApiKey::new("endpoint-key"),
+    ));
 
     client
         .send(&provider, &user_request(), &CallOptions::new())
@@ -1711,11 +1711,11 @@ async fn derived_endpoints_keep_chat_auth_and_header_overrides() {
     ]);
     let mut provider = mock_provider();
     provider.auth = None; // prove the endpoint Set auth is what travels
-    provider.chat.auth = Override::Set(AuthHeader {
-        name: http::HeaderName::from_static("x-chat-key"),
-        prefix: None,
-        value: ApiKey::new("chat-secret"),
-    });
+    provider.chat.auth = Override::Set(AuthHeader::new(
+        http::HeaderName::from_static("x-chat-key"),
+        None,
+        ApiKey::new("chat-secret"),
+    ));
     let mut endpoint_headers = http::HeaderMap::new();
     endpoint_headers.insert("x-endpoint", http::HeaderValue::from_static("e"));
     provider.chat.headers = Override::Set(endpoint_headers);
@@ -1845,11 +1845,11 @@ async fn list_models_explicit_endpoint_overrides() {
             MockFormat::new("mock").arc(),
             EndpointUrl::base("http://models.local/api").unwrap(),
         )
-        .with_auth(Override::Set(AuthHeader {
-            name: http::HeaderName::from_static("x-models-key"),
-            prefix: None,
-            value: ApiKey::new("mk"),
-        })),
+        .with_auth(Override::Set(AuthHeader::new(
+            http::HeaderName::from_static("x-models-key"),
+            None,
+            ApiKey::new("mk"),
+        ))),
     );
 
     let models = client.list_models(&provider).await.unwrap();

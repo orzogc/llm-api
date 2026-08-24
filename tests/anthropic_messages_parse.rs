@@ -1167,3 +1167,44 @@ fn count_tokens_response_parses() {
         Err(Error::Parse { .. })
     ));
 }
+
+#[test]
+fn typed_layer_entry_points_are_public() {
+    // The standalone typed layer promised by design § 11 for every format:
+    // build, parse (request and response) and the stream parser type.
+    use llm_api::formats::anthropic_messages::{
+        AnthropicStreamParser, request_from_ir, request_to_ir, response_to_ir,
+    };
+    use llm_api::{AnthropicOptions, CallMode, ConvertOptions, StreamParser};
+
+    let mut req = Request::with_messages(vec![Message::user_text("hi")]);
+    req.max_output_tokens = Some(16);
+    let (body, warnings) = request_from_ir(
+        &req,
+        Some("claude-opus-5"),
+        CallMode::Unary,
+        &ConvertOptions::default(),
+        &AnthropicOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(body["model"], serde_json::json!("claude-opus-5"));
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    let (ir, _) = request_to_ir(&serde_json::to_vec(&body).unwrap()).unwrap();
+    assert_eq!(ir.messages.len(), 1);
+
+    let resp = response_to_ir(
+        &serde_json::to_vec(&serde_json::json!({
+            "id": "m", "type": "message", "role": "assistant", "model": "x",
+            "content": [{"type": "text", "text": "hey"}], "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 2},
+        }))
+        .unwrap(),
+        &meta(),
+    )
+    .unwrap();
+    assert_eq!(resp.text(), "hey");
+
+    let mut parser = AnthropicStreamParser::new();
+    let _: &mut dyn StreamParser = &mut parser;
+}

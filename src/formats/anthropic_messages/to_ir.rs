@@ -458,8 +458,8 @@ fn u32_or_mirror(
 }
 
 /// Parses an Anthropic Messages request body into the IR (§ 11
-/// `parse_request`).
-pub(crate) fn parse_request_body(body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)> {
+/// `parse_request`) — the pure typed-layer entry point.
+pub fn request_to_ir(body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)> {
     let wire: MessagesRequest = serde_json::from_slice(body)
         .map_err(|e| parse_error(format!("invalid Anthropic Messages request: {e}"), body))?;
     let mut warnings: Vec<ConversionWarning> = Vec::new();
@@ -745,8 +745,9 @@ pub(crate) fn unify_usage(wire: &UsageWire, raw: Value) -> Usage {
     usage
 }
 
-/// Parses a 2xx Messages response body into a unified [`Response`].
-pub(crate) fn parse_response_body(body: &[u8], meta: &ResponseMeta) -> Result<Response> {
+/// Parses a 2xx Messages response body into a unified [`Response`] —
+/// the pure typed-layer entry point.
+pub fn response_to_ir(body: &[u8], meta: &ResponseMeta) -> Result<Response> {
     let raw: Value = serde_json::from_slice(body)
         .map_err(|e| parse_error(format!("invalid Anthropic Messages response: {e}"), body))?;
     let wire: MessagesResponse = serde_json::from_value(raw.clone())

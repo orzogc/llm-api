@@ -14,6 +14,7 @@ use serde_json::{Map, Value};
 /// `model` and `max_tokens` are required upstream but optional here so that
 /// foreign request bodies parse leniently.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct MessagesRequest {
     /// Model id or alias.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -67,6 +68,7 @@ pub struct MessagesRequest {
 
 /// One `messages[]` entry.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct MessageParam {
     /// `user`, `assistant` or `system` (mid-conversation system content).
     pub role: String,
@@ -80,6 +82,7 @@ pub struct MessageParam {
 /// Message content: string shorthand for one text block, or a block array.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum MessageContent {
     /// Shorthand for `[{"type": "text", "text": …}]`.
     Text(String),
@@ -90,6 +93,7 @@ pub enum MessageContent {
 /// The top-level `system` field: string form or text-block array.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum SystemPrompt {
     /// Plain string form.
     Text(String),
@@ -99,6 +103,7 @@ pub enum SystemPrompt {
 
 /// `cache_control: {type: "ephemeral", ttl?}` on request blocks and tools.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CacheControl {
     /// Cache type; `ephemeral` is the only documented value.
     #[serde(rename = "type")]
@@ -125,6 +130,7 @@ impl CacheControl {
 
 /// A `text` content block.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TextBlock {
     /// Discriminator, always `text`.
     #[serde(rename = "type")]
@@ -141,6 +147,7 @@ pub struct TextBlock {
 
 /// An `image` content block.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ImageBlock {
     /// Discriminator, always `image`.
     #[serde(rename = "type")]
@@ -158,6 +165,7 @@ pub struct ImageBlock {
 /// The `image.source` union.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[non_exhaustive]
 pub enum ImageSourceParam {
     /// Inline base64 data.
     #[serde(rename = "base64")]
@@ -183,6 +191,7 @@ pub enum ImageSourceParam {
 
 /// A `tool_use` content block (assistant tool call).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ToolUseBlock {
     /// Discriminator, always `tool_use`.
     #[serde(rename = "type")]
@@ -203,6 +212,7 @@ pub struct ToolUseBlock {
 
 /// A `tool_result` content block (user-side tool output).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ToolResultBlock {
     /// Discriminator, always `tool_result`.
     #[serde(rename = "type")]
@@ -227,6 +237,7 @@ pub struct ToolResultBlock {
 /// `tool_result.content`: string shorthand or nested block array.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum ToolResultContent {
     /// String shorthand for one text block.
     Text(String),
@@ -236,6 +247,7 @@ pub enum ToolResultContent {
 
 /// A `thinking` content block.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ThinkingBlock {
     /// Discriminator, always `thinking`.
     #[serde(rename = "type")]
@@ -254,6 +266,7 @@ pub struct ThinkingBlock {
 
 /// A `redacted_thinking` content block.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct RedactedThinkingBlock {
     /// Discriminator, always `redacted_thinking`.
     #[serde(rename = "type")]
@@ -267,6 +280,7 @@ pub struct RedactedThinkingBlock {
 
 /// A custom (function) tool definition.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct FunctionToolParam {
     /// Tool name.
     pub name: String,
@@ -289,6 +303,7 @@ pub struct FunctionToolParam {
 
 /// The `tool_choice` object.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ToolChoiceParam {
     /// `auto`, `any`, `tool` or `none`.
     #[serde(rename = "type")]
@@ -306,6 +321,7 @@ pub struct ToolChoiceParam {
 
 /// The `thinking` request configuration.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ThinkingConfig {
     /// `enabled`, `adaptive` or `disabled`.
     #[serde(rename = "type")]
@@ -324,6 +340,7 @@ pub struct ThinkingConfig {
 
 /// The `output_config` object.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct OutputConfig {
     /// Output effort level (`low` … `max`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -338,6 +355,7 @@ pub struct OutputConfig {
 
 /// `output_config.format`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct OutputFormatConfig {
     /// Discriminator (`json_schema`).
     #[serde(rename = "type")]
@@ -353,6 +371,7 @@ pub struct OutputFormatConfig {
 /// A Messages API response (`type: "message"`), also nested in the
 /// streaming `message_start` event.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct MessagesResponse {
     /// Message id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -387,6 +406,7 @@ pub struct MessagesResponse {
 
 /// The provider `usage` object.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct UsageWire {
     /// Uncached input tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -410,6 +430,7 @@ pub struct UsageWire {
 
 /// `usage.output_tokens_details`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct OutputTokensDetails {
     /// Raw reasoning tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -421,6 +442,7 @@ pub struct OutputTokensDetails {
 
 /// The `message_start` stream event payload.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct MessageStartEvent {
     /// The initial message object (empty `content`, input-side usage).
     pub message: MessagesResponse,
@@ -428,6 +450,7 @@ pub struct MessageStartEvent {
 
 /// The `content_block_start` stream event payload.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ContentBlockStartEvent {
     /// Position of the block in the final `content` array.
     pub index: usize,
@@ -437,6 +460,7 @@ pub struct ContentBlockStartEvent {
 
 /// The `content_block_delta` stream event payload.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ContentBlockDeltaEvent {
     /// Target block index.
     pub index: usize,
@@ -446,6 +470,7 @@ pub struct ContentBlockDeltaEvent {
 
 /// The `content_block_stop` stream event payload.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ContentBlockStopEvent {
     /// Completed block index.
     pub index: usize,
@@ -453,6 +478,7 @@ pub struct ContentBlockStopEvent {
 
 /// The `message_delta` stream event payload.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct MessageDeltaEvent {
     /// Top-level changes to the final message.
     pub delta: MessageDeltaBody,
@@ -466,6 +492,7 @@ pub struct MessageDeltaEvent {
 
 /// `message_delta.delta`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct MessageDeltaBody {
     /// Final stop reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -480,6 +507,7 @@ pub struct MessageDeltaBody {
 
 /// The provider error envelope (non-2xx bodies and `error` stream events).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ErrorEnvelope {
     /// The error detail.
     pub error: ErrorBody,
@@ -490,6 +518,7 @@ pub struct ErrorEnvelope {
 
 /// `error` detail object.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ErrorBody {
     /// Provider error type (`overloaded_error`, …).
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
@@ -504,6 +533,7 @@ pub struct ErrorBody {
 
 /// One `GET /v1/models` page.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ModelsPage {
     /// The page of models (entries kept raw; `id`, `display_name` and
     /// `created_at` are extracted by the parser).
@@ -525,6 +555,7 @@ pub struct ModelsPage {
 
 /// The `POST /v1/messages/count_tokens` response.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CountTokensResponse {
     /// Total input tokens for the prospective request.
     #[serde(default)]

@@ -63,7 +63,7 @@ enum OpenBlock {
 
 /// Stateful per-stream parser (one instance per stream, § 11).
 #[derive(Default)]
-pub(crate) struct AnthropicStreamParser {
+pub struct AnthropicStreamParser {
     /// Latest raw usage snapshot: seeded by `message_start`, overlaid by
     /// every `message_delta` (whose usage is cumulative but may omit the
     /// input-side fields).
@@ -82,7 +82,8 @@ pub(crate) struct AnthropicStreamParser {
 }
 
 impl AnthropicStreamParser {
-    pub(crate) fn new() -> Self {
+    /// Creates a parser for one stream.
+    pub fn new() -> Self {
         Self::default()
     }
 

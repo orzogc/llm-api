@@ -8,6 +8,10 @@
 use serde::{Deserialize, Serialize};
 
 /// Whether a warning describes lost meaning or lost tuning.
+///
+/// Deliberately a closed set (no `#[non_exhaustive]`): the two-level
+/// severity split is a design commitment, so downstream matches may be
+/// exhaustive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WarningSeverity {
@@ -20,6 +24,9 @@ pub enum WarningSeverity {
 }
 
 /// Which conversion direction produced a warning.
+///
+/// Deliberately a closed set (no `#[non_exhaustive]`): a conversion has
+/// exactly two directions, so downstream matches may be exhaustive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversionDirection {

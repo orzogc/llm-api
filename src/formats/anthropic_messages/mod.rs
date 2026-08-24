@@ -1,9 +1,11 @@
 //! Anthropic Messages (`POST /v1/messages`).
 //!
 //! Format id: `anthropic_messages`. This module owns the complete wire
-//! types ([`types`]) and the bidirectional IR conversions, exposed through
-//! the [`AnthropicMessages`] unit struct's [`ApiFormat`] implementation —
-//! usable standalone without the client.
+//! types ([`types`]) plus the typed conversion entry points re-exported
+//! here ([`request_from_ir`], [`request_to_ir`], [`response_to_ir`],
+//! [`AnthropicStreamParser`]); [`AnthropicMessages`] is the dynamic
+//! [`ApiFormat`] implementation — both layers are usable standalone
+//! without the client.
 //!
 //! Mapping highlights (design § 4–§ 9, § 7.1–7.5 and the implementation
 //! contract):
@@ -69,7 +71,7 @@
 
 use serde_json::Value;
 
-use crate::convert::{ConversionWarning, WarningCode, strict_gate};
+use crate::convert::{ConversionWarning, ConvertOptions, RequestHooks, WarningCode, strict_gate};
 use crate::error::{ApiErrorKind, ConversionError, Error, Result};
 use crate::format::{
     AnthropicAuthStyle, AnthropicOptions, ApiFormat, AuthScheme, BuildCtx, BuiltRequest, CallMode,
@@ -83,6 +85,9 @@ mod from_ir;
 mod stream;
 mod to_ir;
 pub mod types;
+
+pub use stream::AnthropicStreamParser;
+pub use to_ir::{request_to_ir, response_to_ir};
 
 /// Canonical id of this format.
 pub(crate) const FORMAT_ID: &str = ids::ANTHROPIC_MESSAGES;
@@ -108,6 +113,35 @@ const COUNT_TOKENS_ACCEPTED: &[&str] = &[
     "speed",
 ];
 
+/// Runs the § 6 pipeline without hooks: node and request `extra` merges,
+/// `overridden` marking and the strict gate. `model` is optional because
+/// it comes from configuration, not the IR (the upstream `model`
+/// requirement is the caller's concern in this pure layer).
+pub fn request_from_ir(
+    req: &Request,
+    model: Option<&str>,
+    mode: CallMode,
+    convert: &ConvertOptions,
+    options: &AnthropicOptions,
+) -> Result<(Value, Vec<ConversionWarning>)> {
+    let mut chat = from_ir::build_chat_body(
+        req,
+        model.unwrap_or(""),
+        convert,
+        options,
+        mode == CallMode::Streaming,
+    )?;
+    finalize_request(
+        &mut chat.body,
+        &mut chat.warnings,
+        &chat.merge_log,
+        convert.strict,
+        &RequestHooks::default(),
+        &chat.message_pointers,
+    )?;
+    Ok((chat.body, chat.warnings))
+}
+
 impl ApiFormat for AnthropicMessages {
     fn id(&self) -> &str {
         FORMAT_ID
@@ -115,7 +149,13 @@ impl ApiFormat for AnthropicMessages {
 
     fn build_request(&self, req: &Request, ctx: &BuildCtx) -> Result<BuiltRequest> {
         let streaming = ctx.mode == CallMode::Streaming;
-        let mut chat = from_ir::build_chat_body(req, ctx, streaming)?;
+        let mut chat = from_ir::build_chat_body(
+            req,
+            &ctx.model,
+            &ctx.convert,
+            &ctx.format_options.anthropic,
+            streaming,
+        )?;
         finalize_request(
             &mut chat.body,
             &mut chat.warnings,
@@ -140,7 +180,7 @@ impl ApiFormat for AnthropicMessages {
     }
 
     fn parse_response(&self, body: &[u8], meta: &ResponseMeta) -> Result<Response> {
-        to_ir::parse_response_body(body, meta)
+        response_to_ir(body, meta)
     }
 
     fn parse_error(&self, status: u16, headers: &http::HeaderMap, body: &[u8]) -> Error {
@@ -168,11 +208,11 @@ impl ApiFormat for AnthropicMessages {
     }
 
     fn stream_parser(&self) -> Box<dyn StreamParser> {
-        Box::new(stream::AnthropicStreamParser::new())
+        Box::new(AnthropicStreamParser::new())
     }
 
     fn parse_request(&self, body: &[u8]) -> Result<(Request, Vec<ConversionWarning>)> {
-        to_ir::parse_request_body(body)
+        request_to_ir(body)
     }
 
     fn build_models_request(&self, ctx: &BuildCtx, cursor: Option<&str>) -> Result<BuiltRequest> {
@@ -239,7 +279,13 @@ impl ApiFormat for AnthropicMessages {
         // Build the full chat body first — extra, convert options and hooks
         // all act on it exactly as for `send` (§ 13 pipeline), always in
         // unary mode.
-        let mut chat = from_ir::build_chat_body(req, ctx, false)?;
+        let mut chat = from_ir::build_chat_body(
+            req,
+            &ctx.model,
+            &ctx.convert,
+            &ctx.format_options.anthropic,
+            false,
+        )?;
         finalize_request(
             &mut chat.body,
             &mut chat.warnings,

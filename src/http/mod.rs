@@ -88,6 +88,7 @@ pub enum HttpErrorKind {
 /// The injected header value is `prefix + key`. This is passed to the
 /// transport separately from the request so the API key never sits in an
 /// `http::Request` that user code might log.
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct AuthHeader {
     /// Header name (e.g. `authorization`, `x-api-key`).
@@ -99,6 +100,16 @@ pub struct AuthHeader {
 }
 
 impl AuthHeader {
+    /// An auth header carrying `prefix + key` under `name`.
+    #[must_use]
+    pub fn new(name: http::HeaderName, prefix: Option<String>, value: ApiKey) -> Self {
+        Self {
+            name,
+            prefix,
+            value,
+        }
+    }
+
     /// Builds the full header value (`prefix + key`). The result should be
     /// marked sensitive by transports that support it.
     pub fn header_value(&self) -> Result<http::HeaderValue, http::header::InvalidHeaderValue> {
