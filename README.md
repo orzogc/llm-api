@@ -187,7 +187,7 @@ from a provider land in the same namespaces and round-trip verbatim.
 
 Prefer first-class IR fields where they exist. Prompt caching, for example,
 needs no JSON patching: a block-level `CacheHint` maps to Anthropic
-`cache_control` (TTL included) and to Chat Completions
+`cache_control` (TTL included) and to Chat Completions / Responses
 `prompt_cache_breakpoint`; formats without a block-level channel warn
 (`Cosmetic`) instead of failing:
 

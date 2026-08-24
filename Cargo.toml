@@ -9,6 +9,15 @@ readme = "README.md"
 repository = "https://github.com/orzogc/llm-api"
 keywords = ["llm", "openai", "anthropic", "gemini", "api"]
 categories = ["api-bindings", "asynchronous"]
+# `docs/official_api/` holds unofficial condensed provider-doc references
+# (third-party content — kept out of the redistributed crate);
+# `tests/downstream_readme.rs` cannot run from the .crate because cargo
+# strips its nested-package fixture.
+exclude = [
+    "/docs/official_api/",
+    "/.github/",
+    "/tests/downstream_readme.rs",
+]
 
 [features]
 default = ["reqwest"]

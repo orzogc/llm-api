@@ -170,8 +170,8 @@ request.extra.set(
 
 能用一等 IR 字段就优先用一等字段。例如 prompt 缓存不需要打 JSON 补丁：块
 级 `CacheHint` 会映射为 Anthropic 的 `cache_control`（含 TTL）与 Chat
-Completions 的 `prompt_cache_breakpoint`；没有块级通道的格式会给出
-`Cosmetic` 警告而不是失败：
+Completions / Responses 的 `prompt_cache_breakpoint`；没有块级通道的格式
+会给出 `Cosmetic` 警告而不是失败：
 
 ```rust
 use llm_api::{CacheHint, ContentBlock, Message};
